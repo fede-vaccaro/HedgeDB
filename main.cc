@@ -127,29 +127,57 @@ int main(int argc, char* argv[])
 
     // Read the keys back
     t0 = std::chrono::high_resolution_clock::now();
-    for(const auto& key : keys)
-    {
-        auto maybe_data_readback = ss_db.get(key);
+    auto shared_count = std::atomic<int>(0);
+    std::vector<std::thread> threads_reader;
 
-        if(!maybe_data_readback.has_value())
-        {
-            std::cerr << "Error: " << maybe_data_readback.error().to_string() << '\n';
-            continue;
-        }
+    constexpr int NUM_THREADS = 6;
+    for (int i = 0; i < NUM_THREADS; ++i) {
+        // Capture necessary variables by reference or value
+        threads_reader.emplace_back([
+            thread_id = i,                  // Capture by value for thread ID
+            &keys,                          // Capture by reference (const access)
+            &ss_db,                         // Capture by reference
+            &shared_count,                   // Capture by reference (atomic)
+            &data
+        ]() {
+            int inner_count = 0;
 
-        if(maybe_data_readback.value() != data)
-        {
-            std::cerr << "Failed to read data for key: " << key << '\n';
-            continue;
-        }   
+            for (size_t k = thread_id; k < keys.size(); k += NUM_THREADS) {
+                // Check if the global limit has been reached
 
-        if(count++ == 1000)
-            break;
+                const auto& key = keys[k];
+                auto maybe_data_readback = ss_db.get(key);
+
+                if (!maybe_data_readback.has_value()) {
+                    std::cerr << "Error from thread " << thread_id << " for key " << key << ": " << maybe_data_readback.error().to_string() << '\n';
+                    continue;
+                }
+
+                // Construct the expected data based on the key
+                if (maybe_data_readback.value() != data) 
+                {
+                    std::cerr << "Failed to read data for key: " << key << " from thread " << thread_id << '\n';
+                    continue;
+                }
+                // Increment the shared count if the read was successful and matched
+                shared_count.fetch_add(1, std::memory_order_relaxed);
+
+                if(++inner_count == 1000)
+                    break; // Limit the number of reads per thread to avoid excessive output    
+            }
+        });
     }
+
+    for (auto& t : threads_reader) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+
     t1 = std::chrono::high_resolution_clock::now();
     elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
     std::cout << "Elapsed time for reads: " << elapsed << " ms" << '\n';
-    std::cout << "Reads/sec " << (static_cast<double>(count) / (static_cast<double>(elapsed) / 1000.0)) << '\n';
+    std::cout << "Reads/sec " << (static_cast<double>(shared_count) / (static_cast<double>(elapsed) / 1000.0)) << '\n';
 
     // test remove keys
     constexpr auto ELEMENTS_TO_DELETE = 5;
