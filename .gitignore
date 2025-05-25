@@ -1,3 +1,7 @@
 # ignore executables
 hedgehog_table
 hedgehog_db
+
+# clangd
+compile_commands.json
+.cache/*
