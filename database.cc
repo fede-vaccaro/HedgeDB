@@ -8,7 +8,7 @@
 #include <error.hpp>
 
 #include "database.h"
-#include "db.indexsorted.h"
+#include "tables.h"
 
 namespace hedgehog::db
 {
