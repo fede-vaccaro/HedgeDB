@@ -1,14 +1,19 @@
 ## HedgehogDB
 
-HedgehogDB is a prototype, write-intensive key-value store inspired by [BadgerDB](https://github.com/hypermodeinc/badger) and [RocksDB](https://github.com/facebook/rocksdb), specifically optimized for Hard Disk Drives (HDDs). It aims for simplicity in its design and implementation. One of the goals was having low/controllable memory footprint.
+<p align="center">
+<img src="resources/logo.png" width="50%">
+</p>
+
+HedgehogDB is a prototype, write-intensive key-value store inspired by [BadgerDB](https://github.com/hypermodeinc/badger) and [RocksDB](https://github.com/facebook/rocksdb), specifically optimized for Hard Disk Drives (HDDs). It aims for simplicity in its design and implementation, with also the goal of having low (or at least, predictable) memory footprint.
 
 
-**Disclaimer**: as you might expect from a prototype it was not extensively tested, nor the code is threadsafe
+**Disclaimer**: as you might expect from a prototype it was not extensively tested, nor the code is threadsafe or production ready.
 
 So far it is only Linux compatible.
 
 ## Features
 
+- **Exclusive UUIDv4 support**: It is optimized just to accept UUIDv4 (only 16 bytes) keys. 
 - **Separate Index and Values**: Index and Values are stored in separate files. This allows the index to be held in memory (2M entries fits in 64MB). However, when flushed to the storage, the keys are sorted to allow a quick look-up (through binary-search).
 - **Crash recovery**: When the `insert` operation is called, data are not buffered and are immediately written on disk (still leveraging the support of Linux Async I/O)
 - **HDD Optimized**: Designed with sequential write patterns in mind, which are efficient for HDDs.
@@ -29,14 +34,16 @@ g++ -std=c++20 -O2 main.cc database.cc MurmurHash3.cc bloom_filter.cc tables.cc 
 ```
 
 For running it:
+
+```
+./hedgehog_table <NUM_ITEMS> <BASE_PATH> <VALUE_SIZE_BYTES>
+```
+
+Possible output (on NVME) when writing 2M values of 50KB:
+
 ```
 mkdir /tmp/hedgehog/
-./hedgehog_table 2000000 /tmp/hedgehog
-```
-
-Possible output (on SSD):
-
-```
+$ ./hedgehog_table 2000000 /tmp/hedgehog 51200
 version 0.0.1a
 N_FILES: 2000000
 VALUE_SIZE: 51200

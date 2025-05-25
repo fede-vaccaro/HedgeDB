@@ -42,16 +42,18 @@ int main(int argc, char* argv[])
     auto N_FILES = std::stoul(argv[1]);
     auto VALUE_SIZE = std::stoul(argv[3]);
 
+    std::cout << "BASE_PATH: " << base_path << '\n';
     std::cout << "N_FILES: " << N_FILES << '\n';
     std::cout << "VALUE_SIZE: " << VALUE_SIZE << '\n';
 
     auto FILE_SIZE = VALUE_SIZE;
 
     std::random_device rd{};
-    std::mt19937 generator(rd());
-
     std::vector<uint8_t> data(FILE_SIZE, 0);
     std::uniform_int_distribution<int> dist(0, 255);
+    
+    std::mt19937 generator(rd());
+
     std::for_each(data.begin(), data.end(), [&generator, &dist](uint8_t& byte)
     {
         byte = static_cast<uint8_t>(dist(generator));
@@ -65,10 +67,11 @@ int main(int argc, char* argv[])
     for(size_t i = 0; i < key_sets.size(); ++i)
     {
         threads.emplace_back(
-            [&key_sets, i, N_FILES, &generator]()
+            [&key_sets, i, N_FILES, &rd]()
             {
                 key_sets[i].reserve(N_FILES / N_THREADS + 1);
 
+                std::mt19937 generator(rd());
                 std::uniform_int_distribution<int> dist(0, 15);
                 uuids::uuid_random_generator gen{generator};
 
@@ -91,8 +94,14 @@ int main(int argc, char* argv[])
     auto t0 = std::chrono::high_resolution_clock::now(); // NOLINT
 
     for(const auto& key : keys)
-        database.insert(key, data);
-
+    {
+        auto status = database.insert(key, data);
+        if(!status)
+        {
+            std::cerr << "Failed to insert key: " << key << ": " << status.error().to_string() << '\n';
+            return 1;
+        }
+    }
     auto t1 = std::chrono::high_resolution_clock::now(); // NOLINT
 
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
@@ -172,47 +181,49 @@ int main(int argc, char* argv[])
     elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
     std::cout << "Elapsed time for deletes: " << elapsed << " ms" << '\n';
 
+    // skip testing compact, too slow
+
     return 0;
 
-    // test compact
-    t0 = std::chrono::high_resolution_clock::now();
+    // // test compact
+    // t0 = std::chrono::high_resolution_clock::now();
 
-    if(auto status = ss_db.compact(); !status)
-        std::cerr << "Failed to compact: " << status.error() << '\n';
+    // if(auto status = ss_db.compact(); !status)
+    //     std::cerr << "Failed to compact: " << status.error() << '\n';
 
-    t1 = std::chrono::high_resolution_clock::now();
-    elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-    std::cout << "Elapsed time for compact: " << elapsed << " ms" << '\n';
+    // t1 = std::chrono::high_resolution_clock::now();
+    // elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    // std::cout << "Elapsed time for compact: " << elapsed << " ms" << '\n';
 
-    count = 0;
+    // count = 0;
 
-    // test retrieval of remaining keys
-    t0 = std::chrono::high_resolution_clock::now();
-    for(const auto& key : keys)
-    {
-        if(keys_to_delete.contains(key))
-            continue;
+    // // test retrieval of remaining keys
+    // t0 = std::chrono::high_resolution_clock::now();
+    // for(const auto& key : keys)
+    // {
+    //     if(keys_to_delete.contains(key))
+    //         continue;
 
-        auto maybe_data_readback = ss_db.get(key);
+    //     auto maybe_data_readback = ss_db.get(key);
 
-        if(!maybe_data_readback.has_value())
-            std::cerr << "Failed to retrieve data with key " << key << " : " << maybe_data_readback.error() << '\n';
+    //     if(!maybe_data_readback.has_value())
+    //         std::cerr << "Failed to retrieve data with key " << key << " : " << maybe_data_readback.error() << '\n';
 
-        auto data_readback = std::move(maybe_data_readback.value());
+    //     auto data_readback = std::move(maybe_data_readback.value());
 
-        if(data_readback.empty())
-            std::cerr << "Failed to read data for key: " << key << '\n';
+    //     if(data_readback.empty())
+    //         std::cerr << "Failed to read data for key: " << key << '\n';
 
-        if(data_readback != data)
-            std::cerr << "Data mismatch for key: " << key << ": " << std::string(data_readback.begin(), data_readback.end()) << '\n';
+    //     if(data_readback != data)
+    //         std::cerr << "Data mismatch for key: " << key << ": " << std::string(data_readback.begin(), data_readback.end()) << '\n';
 
-        if(count++ == 1000)
-            break;
-    }
-    t1 = std::chrono::high_resolution_clock::now();
-    elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-    std::cout << "Elapsed time for reads after compact: " << elapsed << " ms" << '\n';
-    std::cout << "Read/sec after compact: " << (static_cast<double>(count) / (static_cast<double>(elapsed) / 1000.0)) << '\n';
+    //     if(count++ == 1000)
+    //         break;
+    // }
+    // t1 = std::chrono::high_resolution_clock::now();
+    // elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    // std::cout << "Elapsed time for reads after compact: " << elapsed << " ms" << '\n';
+    // std::cout << "Read/sec after compact: " << (static_cast<double>(count) / (static_cast<double>(elapsed) / 1000.0)) << '\n';
 
     return 0;
 }

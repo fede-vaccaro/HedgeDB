@@ -230,6 +230,15 @@ namespace hedgehog::db
         return this->_memtable;
     }
 
+    void memtable_db::_close_files()
+    {
+        if(this->_value_log_out.is_open())
+            this->_value_log_out.close();
+
+        if(this->_tmp_index.is_open())
+            this->_tmp_index.close();
+    }
+
     hedgehog::expected<sortedstring_db> sortedstring_db::existing_from_path(const std::filesystem::path& base_path, const std::string& db_name)
     {
         auto index_path = base_path / with_extension(db_name, INDEX_EXT);
@@ -431,6 +440,8 @@ namespace hedgehog::db
     hedgehog::expected<sortedstring_db> flush_memtable_db(memtable_db&& db_)
     {
         auto mem_db = std::move(db_);
+        
+        mem_db._close_files();
 
         std::vector<index_key_t> index_sorted;
 
