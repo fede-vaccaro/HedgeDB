@@ -34,7 +34,7 @@ int main(int argc, char *argv[])
     std::uniform_int_distribution<size_t> dist(0, file_size/(PAGE_SIZE*2));
 
     // open fd with O_DIRECT
-    int fd = open(file_path.c_str(), O_RDONLY | O_DIRECT);
+    int fd = open(file_path.c_str(), O_RDONLY);
 
     if (fd < 0) {
         std::cerr << "Error opening file with O_DIRECT: " << strerror(errno) << std::endl;
@@ -46,7 +46,7 @@ int main(int argc, char *argv[])
     {
 
         uint8_t* aligned_raw_buffer = nullptr;
-        if (posix_memalign(reinterpret_cast<void**>(&aligned_raw_buffer), PAGE_SIZE, PAGE_SIZE * 2) != 0) {
+        if (posix_memalign(reinterpret_cast<void**>(&aligned_raw_buffer), PAGE_SIZE, PAGE_SIZE) != 0) {
             std::string error_msg = std::format("Failed to allocate aligned memory for O_DIRECT: {}", strerror(errno));
             std::cerr << error_msg << std::endl;
             return 1;
@@ -62,9 +62,9 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        ssize_t bytes_read = read(fd, aligned_raw_buffer, PAGE_SIZE*2);
+        ssize_t bytes_read = read(fd, aligned_raw_buffer, PAGE_SIZE);
 
-        if (bytes_read != static_cast<ssize_t>(PAGE_SIZE*2)) {
+        if (bytes_read != static_cast<ssize_t>(PAGE_SIZE)) {
             std::cerr << "Error reading from file: " << strerror(errno) << " read only: " << bytes_read << std::endl;
             free(aligned_raw_buffer);
             return 1;

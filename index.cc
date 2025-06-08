@@ -361,7 +361,7 @@ namespace hedgehog::db
 
     void sorted_index::clear_index()
     {
-        std::vector<index_key_t>().swap(this->_index);
+        this->_index = std::vector<index_key_t>{};
     }
 
     hedgehog::status sorted_index::load_index()
