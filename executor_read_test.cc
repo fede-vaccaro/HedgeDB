@@ -18,8 +18,8 @@
 
 #include "io_executor.h"
 #include "logger.h"
-#include "task.h"
 #include "mailbox_impl.h"
+#include "task.h"
 
 using namespace std::string_literals;
 
@@ -86,9 +86,15 @@ task<void> get_obj(read_request r, executor_context& executor, working_group& wg
 {
     auto response = co_await executor.submit_request(r);
 
+    // if(response.data_size != PAGE_SIZE)
+    // {
+    //     std::cerr << "Error: expected size " << PAGE_SIZE << ", got " << response.data_size << " at offset " << r.offset << "\n";
+    //     throw std::runtime_error("Data size mismatch");
+    // }
+
     std::vector<uint8_t> data{};
     data.assign(static_cast<uint8_t*>(response.data.get()),
-                static_cast<uint8_t*>(response.data.get()) + response.data_size);
+                static_cast<uint8_t*>(response.data.get()) + response.bytes_read);
 
     // log("[get_obj] received data of size: ", data.size());
 
@@ -112,7 +118,7 @@ task<void> get_obj(read_request r, executor_context& executor, working_group& wg
 int main()
 {
     working_group wg;
-    
+
     const uint32_t QUEUE_DEPTH = 64;
     executor_context context(QUEUE_DEPTH);
 
@@ -130,7 +136,7 @@ int main()
         auto task = get_obj(read_request{.fd = fd, .offset = dist(rng) * PAGE_SIZE, .size = PAGE_SIZE}, context, wg);
         context.submit_io_task(std::move(task));
     }
-    std::cout << "Submitted " <<  N_REQUESTS << " jobs\n";
+    std::cout << "Submitted " << N_REQUESTS << " jobs\n";
     wg.wait();
     auto t1 = std::chrono::steady_clock::now();
 

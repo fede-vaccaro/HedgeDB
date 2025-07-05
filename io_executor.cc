@@ -71,6 +71,65 @@ executor_context::~executor_context()
     log("[executor_context] io_uring exited");
 }
 
+uint64_t executor_context::forge_request_key(uint64_t request_id, uint8_t sub_request_idx)
+{
+    request_id %= (1UL << 56);
+
+    uint64_t key = request_id;
+
+#ifdef __BYTE_ORDER__
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    key |= (static_cast<uint64_t>(sub_request_idx) << 56);
+#else
+    key |= (static_cast<uint64_t>(sub_request_idx) << 8);
+#endif
+#else
+#error "Byte order not defined. Please define __BYTE_ORDER__."
+#endif
+
+    return key;
+}
+
+std::pair<uint64_t, uint8_t> executor_context::parse_request_key(uint64_t key)
+{
+#ifdef __BYTE_ORDER__
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    uint64_t request_id = key & 0x00FFFFFFFFFFFFFF;
+    uint8_t sub_request_idx = static_cast<uint8_t>(key >> 56);
+#else
+    uint64_t request_id = key >> 8;
+    uint8_t sub_request_idx = static_cast<uint8_t>(key & 0xFF);
+#endif
+#else
+#error "Byte order not defined. Please define __BYTE_ORDER__."
+#endif
+
+    assert(request_id < (1UL << 56));
+
+    return {request_id, sub_request_idx};
+}
+
+std::vector<io_uring_sqe*>& executor_context::_fill_sqes(size_t sqes_requested)
+{
+    thread_local std::vector<io_uring_sqe*> tmp_sqes{};
+
+    tmp_sqes.clear();
+
+    for(size_t i = 0; i < sqes_requested; ++i)
+    {
+        io_uring_sqe* sqe = io_uring_get_sqe(&this->_ring);
+
+        if(!sqe)
+            throw std::runtime_error("io_uring_get_sqe failed");
+
+        uint64_t sqe_id = forge_request_key(this->current_request_id, static_cast<uint8_t>(i));
+        io_uring_sqe_set_data64(sqe, sqe_id);
+
+        tmp_sqes.emplace_back(sqe);
+    }
+
+    return tmp_sqes;
+}
 
 void executor_context::_submit_sqe()
 {
@@ -93,13 +152,19 @@ void executor_context::_submit_sqe()
 
     for(auto& mailbox : requests)
     {
-        if(!mailbox->prepare_sqes(&this->_ring))
+        auto space_needed = mailbox->needed_sqes();
+
+        if(space_needed > sq_space_left)
         {
             this->_waiting_for_io_queue.emplace_front(std::move(mailbox));
             continue;
         }
 
-        this->_in_flight_requests.emplace(mailbox->get_continuation(), std::move(mailbox));
+        sq_space_left -= space_needed;
+
+        mailbox->prepare_sqes(this->_fill_sqes(space_needed));
+
+        this->_in_flight_requests.emplace(this->current_request_id++, std::move(mailbox));
     }
 
     auto ready = io_uring_sq_ready(&this->_ring);
@@ -142,15 +207,16 @@ void executor_context::_wait_for_cqe()
 
     io_uring_for_each_cqe(&this->_ring, head, cqe)
     {
-        auto coro_handle = std::coroutine_handle<>::from_address(reinterpret_cast<void*>(cqe->user_data));
-        auto it = this->_in_flight_requests.find(coro_handle);
+        auto [request_id, sub_request_id] = parse_request_key(io_uring_cqe_get_data64(cqe));
+
+        auto it = this->_in_flight_requests.find(request_id);
 
         if(it == this->_in_flight_requests.end())
             throw std::runtime_error("Invalid user_data: " + std::to_string(cqe->user_data) + ", not found in in_flight_requests");
 
         auto& mailbox = it->second;
 
-        if(mailbox->handle_cqe(cqe))
+        if(mailbox->handle_cqe(cqe, sub_request_id))
         {
             this->_ready_queue.emplace_back(std::move(mailbox));
             this->_in_flight_requests.erase(it);

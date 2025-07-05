@@ -29,7 +29,8 @@ class executor_context
     std::atomic_bool _running{true};
     std::thread _worker;
 
-    std::unordered_map<std::coroutine_handle<>, std::unique_ptr<mailbox>> _in_flight_requests;
+    uint64_t current_request_id{0};
+    std::unordered_map<uint64_t, std::unique_ptr<mailbox>> _in_flight_requests;
 
     std::deque<std::unique_ptr<mailbox>> _waiting_for_io_queue;
     std::deque<std::unique_ptr<mailbox>> _ready_queue;
@@ -39,8 +40,12 @@ class executor_context
     std::deque<task<void>> _pending_requests;
 
 public:
-    executor_context(uint32_t queue_depth);
+    executor_context() = default;
+    explicit executor_context(uint32_t queue_depth);
     ~executor_context();
+
+    executor_context(const executor_context&) = delete;
+    executor_context& operator=(const executor_context&) = delete;
 
     void submit_io_task(task<void> task);
     void shutdown();
@@ -63,4 +68,8 @@ private:
     void _do_work();
     void _wait_for_cqe();
     void _run();
+    std::vector<io_uring_sqe*>& _fill_sqes(size_t sqes_requested);
+
+    static uint64_t forge_request_key(uint64_t request_id, uint8_t sub_request_idx);
+    static std::pair<uint64_t, uint8_t> parse_request_key(uint64_t key);
 };
