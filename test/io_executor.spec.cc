@@ -1,11 +1,16 @@
+#include <cstdint>
 #include <fcntl.h>
 #include <fstream>
 #include <future>
 #include <gtest/gtest.h>
 #include <iostream>
+#include <numeric>
+#include <vector>
 
 #include "../io_executor.h"
 #include "../task.h"
+
+using namespace hedgehog::async;
 
 struct test_executor : public ::testing::Test
 {
@@ -13,7 +18,7 @@ struct test_executor : public ::testing::Test
     {
         constexpr uint32_t QUEUE_DEPTH = 32;
 
-        this->_executor = std::make_unique<executor_context>(QUEUE_DEPTH);
+        this->_executor = std::make_shared<executor_context>(QUEUE_DEPTH);
     }
 
     void TearDown() override
@@ -21,7 +26,7 @@ struct test_executor : public ::testing::Test
         this->_executor->shutdown();
     }
 
-    std::unique_ptr<executor_context> _executor{};
+    std::shared_ptr<executor_context> _executor{};
 };
 
 TEST_F(test_executor, test_read_simple)
