@@ -17,7 +17,7 @@ namespace hedgehog::async
         template <typename REQUEST_T>
         friend std::unique_ptr<mailbox> from_request(REQUEST_T&& request);
 
-        std::variant<read_mailbox, write_mailbox, multi_read_mailbox> _mailbox_impl;
+        mailbox_impls _mailbox_impl;
 
     public:
         template <typename MAILBOX_T>
