@@ -334,4 +334,16 @@ namespace hedgehog::async
         }
     }
 
+    void executor_context::register_fd(int32_t fd)
+    {
+        auto offs = this->_registered_fds.size();
+        this->_registered_fds.push_back(fd);
+        auto result = io_uring_register_files_update(&this->_ring, offs, this->_registered_fds.data(), 1);
+        if(result < 0)
+        {
+            log_always("Failed to register file descriptor ", fd, ": ", strerror(-result));
+            throw std::runtime_error("Failed to register file descriptor: " + std::string(strerror(-result)));
+        }
+    }
+
 } // namespace hedgehog::async
