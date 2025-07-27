@@ -57,7 +57,7 @@ namespace hedgehog
         status() = default;
         status(hedgehog::error err_) : err(err_) {}
 
-        inline operator bool()
+        inline operator bool() const
         {
             return std::holds_alternative<std::monostate>(err);
         }

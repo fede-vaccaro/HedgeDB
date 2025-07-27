@@ -28,8 +28,8 @@ namespace hedgehog
         }
     };
 
-    constexpr size_t FS_PAGE_SIZE_BYTES = 4096;
-    constexpr size_t INDEX_PAGE_NUM_ENTRIES = FS_PAGE_SIZE_BYTES / sizeof(index_key_t);
+    constexpr size_t PAGE_SIZE_IN_BYTES = 4096;
+    constexpr size_t INDEX_PAGE_NUM_ENTRIES = PAGE_SIZE_IN_BYTES / sizeof(index_key_t);
 
     inline std::filesystem::path with_extension(const std::filesystem::path& path, std::string_view ext)
     {
