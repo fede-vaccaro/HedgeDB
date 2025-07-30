@@ -15,20 +15,21 @@ namespace hedgehog
     enum class errc
     {
         GENERIC_ERROR = 0,
+        VALUE_TABLE_NOT_ENOUGH_SPACE,
     };
 
     class error
     {
         static inline std::string kDefaultMsg = "Unknown error";
 
-        std::string mErrorMsg{kDefaultMsg};
-        errc mErrorCode{errc::GENERIC_ERROR};
+        std::string _error_msg{kDefaultMsg};
+        errc _error_code{errc::GENERIC_ERROR};
 
     public:
-        explicit error(const std::string& msg) : mErrorMsg(msg) {}
+        explicit error(const std::string& msg, errc error_code = errc::GENERIC_ERROR) : _error_msg(msg), _error_code(error_code) {}
 
-        [[nodiscard]] const auto& to_string() const { return mErrorMsg; }
-        [[nodiscard]] const auto& code() const { return mErrorCode; }
+        [[nodiscard]] const auto& to_string() const { return _error_msg; }
+        [[nodiscard]] const auto& code() const { return _error_code; }
     };
 
     inline std::ostream& operator<<(std::ostream& os, const error& err)
@@ -36,7 +37,8 @@ namespace hedgehog
         os << err.to_string();
         return os;
     }
-    inline std::error_code make_error_code(const error&) { return {static_cast<int32_t>(errc::GENERIC_ERROR), std::generic_category()}; }
+
+    inline std::error_code make_error_code(const error& err) { return {static_cast<int32_t>(err.code()), std::generic_category()}; }
 
     inline void outcome_throw_as_system_error_with_payload(error err)
     {

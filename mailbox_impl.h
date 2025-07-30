@@ -73,6 +73,39 @@ namespace hedgehog::async
         }
     };
 
+    /*
+
+        To declare a mailbox (that generally speaking it is a
+        wrapper around some liburing prep operation), the following scheme is used
+        struct {op}_request;
+        struct {op}_response;
+        struct {op}_mailbox;
+
+        struct {op}_request
+        {
+            using response_t = {op}_response;
+            using mailbox_t = {op}_malbox;
+
+            // request members
+        };
+
+        struct {op}_response
+        {
+            // response members
+        };
+
+        struct {op}_mailbox
+        {
+            // mailbox implementation
+        };
+
+        basically it is needed for a certain request to exhibit the {op}_response_t and {op}_mailbox_t types
+        this is needed because the request type is determined from the client (i.e. the coroutine calling
+        executor_context::submit_request) and in sequence, the associated mailbox and response types are
+        derived depending on the types binded to the request.
+
+    */
+
     struct read_response;
     struct read_mailbox;
 
@@ -115,37 +148,48 @@ namespace hedgehog::async
         }
     };
 
-    /*
-        To declare a mailbox (that generally speaking it is a
-        wrapper around some liburing prep operation), the following scheme is used
-        struct {op}_request;
-        struct {op}_response;
-        struct {op}_mailbox;
+    struct unaligned_read_response;
+    struct unaligned_read_mailbox;
 
-        struct {op}_request
+    struct unaligned_read_request
+    {
+        using response_t = unaligned_read_response;
+        using mailbox_t = unaligned_read_mailbox;
+
+        int32_t fd{-1};
+        size_t offset{0};
+        size_t size{0};
+    };
+
+    struct unaligned_read_response
+    {
+        std::vector<uint8_t> data{};
+        size_t bytes_read{0};
+        int32_t error_code{0};
+    };
+
+    struct unaligned_read_mailbox : mailbox_base<unaligned_read_mailbox>
+    {
+        unaligned_read_mailbox(unaligned_read_request req)
+            : request(std::move(req)) {}
+
+        unaligned_read_request request;
+        unaligned_read_response response;
+
+        void prepare_sqes(std::span<io_uring_sqe*> sqes);
+        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
+
+        uint32_t needed_sqes()
         {
-            using response_t = {op}_response;
-            using mailbox_t = {op}_malbox;
+            return 1;
+        }
 
-            // request members
-        };
-
-        struct {op}_response
+        void* get_response()
         {
-            // response members
-        };
+            return &response;
+        }
+    };
 
-        struct {op}_mailbox
-        {
-            // mailbox implementation
-        };
-
-        basically it is needed for a certain request to exhibit the {op}_response_t and {op}_mailbox_t types
-        this is needed because the request type is determined from the client (i.e. the coroutine calling
-        executor_context::submit_request) and in sequence, the associated mailbox and response types are
-        derived depending on the types binded to the request.
-
-    */
     struct write_request;
     struct write_response;
     struct write_mailbox;
@@ -253,7 +297,7 @@ namespace hedgehog::async
 
     struct open_mailbox : mailbox_base<open_mailbox>
     {
-        open_mailbox(open_request req): request(std::move(req)) {}
+        open_mailbox(open_request req) : request(std::move(req)) {}
 
         open_request request;
         open_response response;
@@ -399,14 +443,55 @@ namespace hedgehog::async
         };
     };
 
+    struct fsync_request;
+    struct fsync_response;
+    struct fsync_mailbox;
+
+    struct fsync_request
+    {
+        using response_t = fsync_response;
+        using mailbox_t = fsync_mailbox;
+
+        int32_t fd;
+    };
+
+    struct fsync_response
+    {
+        int32_t error_code{};
+    };
+
+    struct fsync_mailbox : mailbox_base<fsync_mailbox>
+    {
+        fsync_mailbox(fsync_request req)
+            : request(std::move(req)) {}
+
+        fsync_request request;
+        fsync_response response;
+
+        void prepare_sqes(std::span<io_uring_sqe*> sqes);
+        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
+
+        uint32_t needed_sqes()
+        {
+            return 1;
+        }
+
+        void* get_response()
+        {
+            return &response;
+        }
+    };
+
     using mailbox_impls =
         std::variant<
             read_mailbox,
+            unaligned_read_mailbox,
             write_mailbox,
             multi_read_mailbox,
             open_mailbox,
             fallocate_mailbox,
             close_mailbox,
-            file_info_mailbox>;
+            file_info_mailbox,
+            fsync_mailbox>;
 
 } // namespace hedgehog::async

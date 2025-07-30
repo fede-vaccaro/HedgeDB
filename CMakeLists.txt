@@ -38,6 +38,8 @@ set(DB_SOURCES
     fs.hpp
     file_reader.cc
     file_reader.h
+    value_table.cc
+    value_table.h
 )
 
 ## io_executor files
@@ -72,3 +74,7 @@ target_link_libraries(index_test gtest gtest_main uring)
 # paginated_view tests
 add_executable(file_reader_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/file_reader.spec.cc)
 target_link_libraries(file_reader_test uring gtest gtest_main)
+
+# value_table tests
+add_executable(value_table_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/value_table.spec.cc)
+target_link_libraries(value_table_test uring gtest gtest_main)
