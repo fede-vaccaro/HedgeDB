@@ -47,6 +47,11 @@ namespace hedgehog::db
         mem_index(const mem_index&) = delete;
         mem_index& operator=(const mem_index&) = delete;
 
+        void clear()
+        {
+            this->_index.clear();
+        }
+
         void reserve(size_t size)
         {
             this->_index.reserve(size);
@@ -83,7 +88,7 @@ namespace hedgehog::db
 
     struct sorted_index_footer
     {
-        inline static constexpr uint32_t CURRENT_FOOTER_VERSION = 1;
+        static constexpr uint32_t CURRENT_FOOTER_VERSION = 1;
 
         // textual header, useful for inspecting the binary
         char header[16] = "HEDGEHOG_FOOTER";
@@ -128,28 +133,28 @@ namespace hedgehog::db
         sorted_index(fs::file_descriptor fd, std::vector<index_key_t> index, std::vector<meta_index_entry> meta_index, sorted_index_footer footer);
         sorted_index() = default;
 
-        sorted_index(sorted_index&& other) = default;
-        sorted_index& operator=(sorted_index&& other) = default;
+        sorted_index(sorted_index&& other)  noexcept = default;
+        sorted_index& operator=(sorted_index&& other)  noexcept = default;
 
         sorted_index(const sorted_index&) = delete;
         sorted_index& operator=(const sorted_index&) = delete;
 
-        hedgehog::expected<std::optional<value_ptr_t>> lookup(const key_t& key) const;
-        async::task<expected<std::optional<value_ptr_t>>> lookup_async(const key_t& key, const std::shared_ptr<async::executor_context>& executor) const;
+        [[nodiscard]] hedgehog::expected<std::optional<value_ptr_t>> lookup(const key_t& key) const;
+        [[nodiscard]] async::task<expected<std::optional<value_ptr_t>>> lookup_async(const key_t& key, const std::shared_ptr<async::executor_context>& executor) const;
 
         hedgehog::status load_index();
 
-        inline size_t upper_bound() const
+        [[nodiscard]] size_t upper_bound() const
         {
             return this->_footer.upper_bound;
         }
 
-        inline size_t size() const
+        [[nodiscard]] size_t size() const
         {
             return this->_footer.indexed_keys;
         }
 
-        inline void stats() const
+        void stats() const
         {
             std::cout << "Sorted index stats:\n";
             std::cout << "  - File path: " << this->_fd.path() << "\n";
@@ -169,9 +174,9 @@ namespace hedgehog::db
         void clear_index();
 
     private:
-        std::optional<size_t> _find_page_id(const key_t& key) const;
-        std::optional<value_ptr_t> _find_in_page(const key_t& key, const index_key_t* page_start, const index_key_t* page_end) const;
-        async::task<expected<std::unique_ptr<uint8_t>>> _load_page_async(size_t offset, const std::shared_ptr<async::executor_context>& executor) const;
+        [[nodiscard]] std::optional<size_t> _find_page_id(const key_t& key) const;
+        [[nodiscard]] std::optional<value_ptr_t> _find_in_page(const key_t& key, const index_key_t* page_start, const index_key_t* page_end) const;
+        [[nodiscard]] async::task<expected<std::unique_ptr<uint8_t>>> _load_page_async(size_t offset, const std::shared_ptr<async::executor_context>& executor) const;
     };
 
 } // namespace hedgehog::db

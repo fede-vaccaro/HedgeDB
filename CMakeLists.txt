@@ -40,6 +40,10 @@ set(DB_SOURCES
     file_reader.h
     value_table.cc
     value_table.h
+    worker.cc
+    worker.h
+    database.cc
+    database.h
 )
 
 ## io_executor files
@@ -78,3 +82,7 @@ target_link_libraries(file_reader_test uring gtest gtest_main)
 # value_table tests
 add_executable(value_table_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/value_table.spec.cc)
 target_link_libraries(value_table_test uring gtest gtest_main)
+
+# worker tests
+add_executable(worker_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/worker.spec.cc)
+target_link_libraries(worker_test uring gtest gtest_main)
