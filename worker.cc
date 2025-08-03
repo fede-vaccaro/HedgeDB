@@ -2,7 +2,7 @@
 
 #include "worker.h"
 
-namespace hedgehog::db
+namespace hedgehog::async
 {
 
     template <typename T>

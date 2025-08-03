@@ -6,7 +6,7 @@
 #include <thread>
 #include <mutex>
 
-namespace hedgehog::db
+namespace hedgehog::async
 {
 
     class worker

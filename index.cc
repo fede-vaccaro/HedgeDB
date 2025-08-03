@@ -195,8 +195,6 @@ namespace hedgehog::db
 
         size_t num_space_partitions = 1 << num_partition_exponent; // 2^num_partition_exponent
 
-        std::cout << "num space partitions: " << num_space_partitions << std::endl;
-
         auto partition_size = (1 << 16) / num_space_partitions;
 
         auto index_sorted = merge_memtables_in_mem(std::move(indices));
@@ -205,8 +203,6 @@ namespace hedgehog::db
         std::vector<index_key_t> current_index{};
 
         size_t current_partition = hedgehog::find_partition_prefix_for_key(index_sorted[0].key, partition_size);
-
-        std::cout << "First element " << index_sorted[0].key << " with prefix: " << hedgehog::find_partition_prefix_for_key(index_sorted[0].key, partition_size) << std::endl;
 
         // todo: upon error, the db might end in undefined state
 
@@ -571,7 +567,7 @@ namespace hedgehog::db
         return {index_end_pos - padding, index_end_pos};
     }
 
-    async::task<hedgehog::expected<sorted_index>> index_ops::two_way_merge_async(const std::filesystem::path& base_path, size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor)
+    async::task<hedgehog::expected<sorted_index>> index_ops::two_way_merge_async(size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor)
     {
         if(read_ahead_size < PAGE_SIZE_IN_BYTES)
             co_return hedgehog::error("Read ahead size must be at least one page size");
@@ -589,7 +585,7 @@ namespace hedgehog::db
         auto new_table_num_keys = left.size() + right.size();
         auto [index_end_pos, meta_index_start_pos] = infer_index_end_pos(new_table_num_keys);
         auto meta_index_entries = ceil(new_table_num_keys, INDEX_PAGE_NUM_ENTRIES);
-        auto meta_index_end_pos = meta_index_start_pos + meta_index_entries * sizeof(meta_index_entry);
+        auto meta_index_end_pos = meta_index_start_pos + (meta_index_entries * sizeof(meta_index_entry));
         auto footer_start_offset = meta_index_end_pos + compute_alignment_padding<meta_index_entry>(meta_index_entries);
 
         sorted_index_footer footer =
@@ -607,28 +603,24 @@ namespace hedgehog::db
                 .footer_start_offset = meta_index_end_pos,
             };
 
-        auto last_page_size = [](const auto& footer)
-        {
-            return footer.indexed_keys % INDEX_PAGE_NUM_ENTRIES == 0 ? INDEX_PAGE_NUM_ENTRIES : footer.indexed_keys % INDEX_PAGE_NUM_ENTRIES;
-        };
-        
         auto lhs_view = async::file_reader(
             left._fd,
             {
-                0,
-                left._footer.index_end_offset,
+                .start_offset = 0,
+                .end_offset = left._footer.index_end_offset,
             },
             executor);
 
         auto rhs_view = async::file_reader(
             right._fd,
             {
-                0,
-                right._footer.index_end_offset,
+                .start_offset = 0,
+                .end_offset = right._footer.index_end_offset,
             },
             executor);
 
-        auto new_path = with_extension(std::min(left._fd.path(), right._fd.path()).string(), ".tmp");
+        auto new_path_id = std::max(left.get_index_id(), right.get_index_id()) + 1;
+        auto new_path = left.get_path().parent_path() / (left.get_path().stem().string() + std::format(".{}", new_path_id));
 
         auto fd_maybe = co_await fs::file_descriptor::from_path_async(new_path, fs::file_descriptor::open_mode::write_new, executor, false, footer_start_offset + sizeof(sorted_index_footer));
 
@@ -835,17 +827,17 @@ namespace hedgehog::db
             std::move(read_fd.value()),
             {},
             std::move(merged_meta_index),
-            std::move(footer)};
+            footer};
 
         co_return result;
     }
 
-    hedgehog::expected<sorted_index> index_ops::two_way_merge(const std::filesystem::path& base_path, size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor)
+    hedgehog::expected<sorted_index> index_ops::two_way_merge(size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor)
     {
         if(!executor)
             return hedgehog::error("Executor context is null");
 
-        auto result = executor->sync_submit(two_way_merge_async(base_path, read_ahead_size, left, right, executor));
+        auto result = executor->sync_submit(two_way_merge_async(read_ahead_size, left, right, executor));
 
         if(!result.has_value())
             return hedgehog::error("Failed to merge sorted indices: " + result.error().to_string());
