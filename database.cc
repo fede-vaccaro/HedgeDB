@@ -205,7 +205,7 @@ namespace hedgehog::db
         std::vector<mem_index> vec_memtable;
         vec_memtable.emplace_back(std::move(this->_mem_index));
 
-        auto partitioned_sorted_indices = index_ops::merge_and_flush(this->_indices_path, std::move(vec_memtable), this->_config.num_partition_exponent);
+        auto partitioned_sorted_indices = index_ops::merge_and_flush(this->_indices_path, std::move(vec_memtable), this->_config.num_partition_exponent, this->_flush_iteration++);
 
         if(!partitioned_sorted_indices)
             return hedgehog::error("An error occurred while flushing the mem index: " + partitioned_sorted_indices.error().to_string());
@@ -256,13 +256,18 @@ namespace hedgehog::db
 
             wg.set(indices_local_copy.size());
 
-            auto make_compactation_sub_task = [this, &wg, &executor, &errors](std::vector<sorted_index_ptr_t>& index_vec) -> async::task<void>
+            auto make_compactation_sub_task = [this, &wg, &executor, &errors, this_iteration_id = this->_flush_iteration++](std::vector<sorted_index_ptr_t>& index_vec) -> async::task<void>
             {
                 auto last_it = index_vec.begin() + (index_vec.size() - 1);
                 auto second_last_it = last_it - 1;
 
+                auto merge_config = hedgehog::db::index_ops::merge_config{
+                    .read_ahead_size = this->_config.compactation_read_ahead_size_bytes,
+                    .new_table_id = this_iteration_id,
+                    .base_path = this->_indices_path};
+
                 auto maybe_compacted_table = co_await index_ops::two_way_merge_async(
-                    this->_config.compactation_read_ahead_size_bytes,
+                    merge_config,
                     **second_last_it,
                     **last_it,
                     executor);
@@ -378,7 +383,7 @@ namespace hedgehog::db
         return compactation_future.get();
     }
 
-    [[nodiscard]] double database::get_read_amplification()
+    [[nodiscard]] double database::load_factor()
     {
         std::lock_guard lk(this->_sorted_index_mutex);
         double total_read_amplification = 0.0;

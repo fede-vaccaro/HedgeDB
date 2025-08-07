@@ -12,7 +12,7 @@
 uint32_t uuid_fake_size(const uuids::uuid& uuid)
 {
     const auto& uuids_as_std_array = reinterpret_cast<const std::array<uint8_t, 16>&>(uuid);
-    return uuids_as_std_array[0] + uuids_as_std_array[1] % 125; // Just a fake size based on the first two bytes
+    return uuids_as_std_array[0] + (uuids_as_std_array[1] % 125); // Just a fake size based on the first two bytes
 };
 
 struct test_configuration
@@ -71,7 +71,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
             auto vec_memtable = std::vector<hedgehog::db::mem_index>{};
             vec_memtable.emplace_back(std::move(memtable));
 
-            auto partitioned_sorted_indices = hedgehog::db::index_ops::merge_and_flush(this->_base_path, std::move(vec_memtable), NUM_PARTITION_EXPONENT);
+            auto partitioned_sorted_indices = hedgehog::db::index_ops::merge_and_flush(this->_base_path, std::move(vec_memtable), NUM_PARTITION_EXPONENT, i);
 
             if(!partitioned_sorted_indices)
             {
@@ -99,7 +99,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
         }
     }
 
-    uuids::uuid generate_uuid()
+    static uuids::uuid generate_uuid()
     {
         // static std::random_device rd;
         size_t seed = 107279581;
@@ -127,10 +127,9 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
         return result;
     }
 
-    uint16_t get_partition_prefix(const uuids::uuid& uuid)
+    [[nodiscard]] uint16_t get_partition_prefix(const uuids::uuid& uuid) const
     {
-        auto matching_partition = hedgehog::find_partition_prefix_for_key(uuid, (1 << 16) / (1 << this->NUM_PARTITION_EXPONENT));
-        return matching_partition;
+        return hedgehog::find_partition_prefix_for_key(uuid, (1 << 16) / (1 << this->NUM_PARTITION_EXPONENT));
     }
 
     size_t NUM_PARTITION_EXPONENT = 0; // 2^4 = 16 partitions
@@ -160,7 +159,8 @@ TEST_P(sorted_string_merge_test, DISABLED_test_merge_unified)
 
         if(sorted_indices.empty())
             continue;
-        else if(sorted_indices.size() == 1)
+
+        if(sorted_indices.size() == 1)
         {
             unified_sorted_indices.insert({prefix, std::move(sorted_indices[0])});
             continue;
@@ -177,13 +177,19 @@ TEST_P(sorted_string_merge_test, DISABLED_test_merge_unified)
                 return a.size() >= b.size();
             });
 
+        auto merge_config = hedgehog::db::index_ops::merge_config{
+            .read_ahead_size = this->READ_AHEAD_SIZE_BYTES,
+            .new_table_id = this->N_RUNS + 1,
+            .base_path = this->_base_path};
+
         auto t0 = std::chrono::high_resolution_clock::now();
         auto maybe_new_index = hedgehog::db::index_ops::two_way_merge(
-            this->READ_AHEAD_SIZE_BYTES,
+            merge_config,
             sorted_indices[0],
             sorted_indices[1],
             this->_executor);
         auto t1 = std::chrono::high_resolution_clock::now();
+
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         total_duration += duration;
 
@@ -236,8 +242,13 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
         auto promise = std::promise<hedgehog::status>{};
         futures.emplace_back(promise.get_future());
 
+        auto merge_config = hedgehog::db::index_ops::merge_config{
+            .read_ahead_size = _this->READ_AHEAD_SIZE_BYTES,
+            .new_table_id = _this->N_RUNS + 1,
+            .base_path = _this->_base_path};
+
         auto new_index = co_await hedgehog::db::index_ops::two_way_merge_async(
-            _this->READ_AHEAD_SIZE_BYTES,
+            merge_config,
             left,
             right,
             _this->_executor);
@@ -262,15 +273,12 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
 
         if(sorted_indices.empty())
             continue;
-        else if(sorted_indices.size() == 1)
+
+        if(sorted_indices.size() == 1)
         {
             unified_sorted_indices.insert({prefix, std::move(sorted_indices[0])});
             continue;
         }
-
-        size_t cumulative_size = 0;
-        for(const auto& index : sorted_indices)
-            cumulative_size += index.size();
 
         std::ranges::sort(
             sorted_indices,
