@@ -185,7 +185,7 @@ namespace hedgehog::db
         }
         else
         {
-            OUTCOME_TRY(mmap, fs::tmp_mmap::from_fd_wrapper(&this->_fd));
+            OUTCOME_TRY(mmap, fs::tmp_mmap::from_fd_wrapper(this->_fd));
 
             page_start_ptr = reinterpret_cast<index_key_t*>(mmap.get_ptr());
         }
@@ -275,7 +275,7 @@ namespace hedgehog::db
         if(!this->_index.empty())
             return hedgehog::ok(); // already loaded
 
-        auto mmap = fs::tmp_mmap::from_fd_wrapper(&this->_fd);
+        auto mmap = fs::tmp_mmap::from_fd_wrapper(this->_fd);
 
         if(!mmap.has_value())
             throw std::runtime_error("Failed to mmap index file: " + mmap.error().to_string());
