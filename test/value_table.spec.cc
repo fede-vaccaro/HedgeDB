@@ -227,7 +227,7 @@ namespace hedgehog::db
         ASSERT_TRUE(maybe_write_result.has_value()) << "An error occurred while writing to the table: " << maybe_write_result.error().to_string();
 
         // try to reopen the table without closing it
-        auto reopen_maybe_table = value_table::load(table.fd().path(), fs::file_descriptor::open_mode::read_write);
+        auto reopen_maybe_table = value_table::load(table.fd().path(), fs::file_descriptor::open_mode::read_write, table.current_offset());
         ASSERT_TRUE(reopen_maybe_table.has_value()) << "An error occurred while reopening the table: " << reopen_maybe_table.error().to_string();
 
         // write again to the reopened table

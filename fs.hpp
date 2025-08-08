@@ -247,7 +247,7 @@ namespace hedgehog::fs
         }
     };
 
-    class mmap_wrapper
+    class mmap_owning
     {
     private:
         file_descriptor _fd_wrapper;
@@ -255,7 +255,7 @@ namespace hedgehog::fs
         size_t _mapped_size = 0;
 
     public:
-        static hedgehog::expected<mmap_wrapper> from_fd_wrapper(file_descriptor&& fd_w)
+        static hedgehog::expected<mmap_owning> from_fd_wrapper(file_descriptor&& fd_w)
         {
             if(fd_w.get() == -1)
             {
@@ -273,7 +273,7 @@ namespace hedgehog::fs
                 return hedgehog::error("Failed to mmap file: " + err_msg);
             }
 
-            mmap_wrapper wrapper;
+            mmap_owning wrapper;
             wrapper._fd_wrapper = std::move(fd_w);
             wrapper._mapped_ptr = mapped_ptr;
             wrapper._mapped_size = wrapper._fd_wrapper.file_size();
@@ -281,7 +281,7 @@ namespace hedgehog::fs
             return std::move(wrapper);
         }
 
-        static hedgehog::expected<mmap_wrapper> from_path(const std::filesystem::path& path, std::optional<size_t> expected_size = std::nullopt)
+        static hedgehog::expected<mmap_owning> from_path(const std::filesystem::path& path, std::optional<size_t> expected_size = std::nullopt)
         {
             auto fd_res = file_descriptor::from_path(path, file_descriptor::open_mode::read_only, false, expected_size);
             if(!fd_res.has_value())
@@ -290,9 +290,9 @@ namespace hedgehog::fs
             return from_fd_wrapper(std::move(fd_res.value()));
         }
 
-        mmap_wrapper() = default;
+        mmap_owning() = default;
 
-        mmap_wrapper(mmap_wrapper&& other) noexcept
+        mmap_owning(mmap_owning&& other) noexcept
             : _fd_wrapper(std::move(other._fd_wrapper)),
               _mapped_ptr(other._mapped_ptr),
               _mapped_size(other._mapped_size)
@@ -301,7 +301,7 @@ namespace hedgehog::fs
             other._mapped_size = 0;
         }
 
-        mmap_wrapper& operator=(mmap_wrapper&& other) noexcept
+        mmap_owning& operator=(mmap_owning&& other) noexcept
         {
             if(this != &other)
             {
@@ -320,10 +320,10 @@ namespace hedgehog::fs
             return *this;
         }
 
-        mmap_wrapper(const mmap_wrapper&) = delete;
-        mmap_wrapper& operator=(const mmap_wrapper&) = delete;
+        mmap_owning(const mmap_owning&) = delete;
+        mmap_owning& operator=(const mmap_owning&) = delete;
 
-        ~mmap_wrapper()
+        ~mmap_owning()
         {
             if(_mapped_ptr != nullptr && _mapped_ptr != MAP_FAILED)
             {
@@ -358,7 +358,13 @@ namespace hedgehog::fs
         size_t _mapped_size = 0;
 
     public:
-        static hedgehog::expected<tmp_mmap> from_fd_wrapper(const file_descriptor* fd_w)
+        struct range
+        {
+            size_t start;
+            size_t size;
+        };
+
+        static hedgehog::expected<tmp_mmap> from_fd_wrapper(const file_descriptor* fd_w, std::optional<range> range = std::nullopt)
         {
             if(fd_w == nullptr)
                 return hedgehog::error("Cannot map a null file descriptor.");
@@ -369,7 +375,7 @@ namespace hedgehog::fs
             if(fd_w->file_size() == 0)
                 return hedgehog::error("Cannot mmap an empty file.");
 
-            void* mapped_ptr = mmap(nullptr, fd_w->file_size(), PROT_READ, MAP_PRIVATE, fd_w->get(), 0);
+            void* mapped_ptr = mmap(nullptr, range ? range->size : fd_w->file_size(), PROT_READ, MAP_PRIVATE, fd_w->get(), range ? range->start : 0);
 
             if(mapped_ptr == MAP_FAILED)
             {
@@ -400,12 +406,9 @@ namespace hedgehog::fs
         {
             if(this != &other)
             {
-                _fd_wrapper = other._fd_wrapper;
-                _mapped_ptr = other._mapped_ptr;
-                _mapped_size = other._mapped_size;
-
-                other._mapped_ptr = nullptr;
-                other._mapped_size = 0;
+                this->_fd_wrapper = other._fd_wrapper;
+                this->_mapped_ptr = std::exchange(other._mapped_ptr, nullptr);
+                this->_mapped_size = std::exchange(other._mapped_size, 0);
             }
             return *this;
         }
