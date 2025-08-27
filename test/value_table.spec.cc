@@ -95,7 +95,7 @@ namespace hedgehog::db
 
         // check infos
         auto expected_info = value_table_info{
-            .current_offset = write_result.offset + write_result.size,
+            .current_offset = write_result.offset() + write_result.size(),
             .items_count = 1,
             .occupied_space = value.size() + sizeof(file_header),
             .deleted_count = 0,
@@ -104,7 +104,7 @@ namespace hedgehog::db
         EXPECT_EQ(info, expected_info);
 
         auto read_result = this->_executor->sync_submit(
-            table.read_async(write_result.offset, write_result.size, this->_executor));
+            table.read_async(write_result.offset(), write_result.size(), this->_executor));
 
         ASSERT_TRUE(read_result.has_value()) << "An error occurred while reading from the table: " << read_result.error().to_string();
         check_read_result(read_result.value(), key, value);
@@ -151,7 +151,7 @@ namespace hedgehog::db
 
             // check infos
             auto expected_info = value_table_info{
-                .current_offset = write_results.back().offset + write_results.back().size,
+                .current_offset = write_results.back().offset() + write_results.back().size(),
                 .items_count = i + 1,
                 .occupied_space = (i + 1) * (payload_size + sizeof(file_header)),
                 .deleted_count = 0,
@@ -169,7 +169,7 @@ namespace hedgehog::db
         for(size_t i = 0; i < values.size(); ++i)
         {
             auto read_result = this->_executor->sync_submit(
-                table.read_async(write_results[i].offset, write_results[i].size, this->_executor));
+                table.read_async(write_results[i].offset(), write_results[i].size(), this->_executor));
 
             ASSERT_TRUE(read_result.has_value()) << "An error occurred while reading from the table: " << read_result.error().to_string();
 
@@ -206,7 +206,7 @@ namespace hedgehog::db
 
         // check infos
         auto expected_info = value_table_info{
-            .current_offset = write_result.offset + write_result.size,
+            .current_offset = write_result.offset() + write_result.size(),
             .items_count = 1,
             .occupied_space = value.size() + sizeof(file_header),
             .deleted_count = 0,
@@ -216,7 +216,7 @@ namespace hedgehog::db
 
         // try to read from the closed table
         auto read_result = this->_executor->sync_submit(
-            table.read_async(write_result.offset, write_result.size, this->_executor));
+            table.read_async(write_result.offset(), write_result.size(), this->_executor));
 
         ASSERT_TRUE(read_result.has_value()) << "An error occurred while reading from the closed table: " << read_result.error().to_string();
         auto& output_file = read_result.value();
@@ -274,12 +274,12 @@ namespace hedgehog::db
 
         // test readback both values from the reopened table
         auto read_result = this->_executor->sync_submit(
-            reopen_maybe_table.value().read_async(maybe_write_result.value().offset, maybe_write_result.value().size, this->_executor));
+            reopen_maybe_table.value().read_async(maybe_write_result.value().offset(), maybe_write_result.value().size(), this->_executor));
         ASSERT_TRUE(read_result.has_value()) << "An error occurred while reading from the reopened table: " << read_result.error().to_string();
         check_read_result(read_result.value(), key, value);
 
         auto new_read_result = this->_executor->sync_submit(
-            reopen_maybe_table.value().read_async(maybe_new_write_result.value().offset, maybe_new_write_result.value().size, this->_executor));
+            reopen_maybe_table.value().read_async(maybe_new_write_result.value().offset(), maybe_new_write_result.value().size(), this->_executor));
 
         ASSERT_TRUE(new_read_result.has_value()) << "An error occurred while reading from the reopened table: " << new_read_result.error().to_string();
         check_read_result(new_read_result.value(), new_key, new_value);
@@ -328,7 +328,7 @@ namespace hedgehog::db
 
             // check infos
             auto expected_info = value_table_info{
-                .current_offset = write_results.back().offset + write_results.back().size,
+                .current_offset = write_results.back().offset() + write_results.back().size(),
                 .items_count = i + 1,
                 .occupied_space = (i + 1) * (payload_size + sizeof(file_header)),
                 .deleted_count = 0,
@@ -338,17 +338,17 @@ namespace hedgehog::db
         }
 
         // delete entry 3 and 7
-        auto status = this->_executor->sync_submit(table.delete_async(keys[3], write_results[3].offset, this->_executor));
+        auto status = this->_executor->sync_submit(table.delete_async(keys[3], write_results[3].offset(), this->_executor));
         ASSERT_TRUE(status) << "An error occurred on deletion: " << status.error().to_string();
 
-        status = this->_executor->sync_submit(table.delete_async(keys[7], write_results[7].offset, this->_executor));
+        status = this->_executor->sync_submit(table.delete_async(keys[7], write_results[7].offset(), this->_executor));
         ASSERT_TRUE(status) << "An error occurred on deletion: " << status.error().to_string();
 
         // test readback
         for(size_t i = 0; i < values.size(); ++i)
         {
             auto read_result = this->_executor->sync_submit(
-                table.read_async(write_results[i].offset, write_results[i].size, this->_executor));
+                table.read_async(write_results[i].offset(), write_results[i].size(), this->_executor));
 
             if(i == 3 || i == 7)
             {
@@ -406,7 +406,7 @@ namespace hedgehog::db
 
             // check infos
             auto expected_info = value_table_info{
-                .current_offset = write_results.back().offset + write_results.back().size,
+                .current_offset = write_results.back().offset() + write_results.back().size(),
                 .items_count = i + 1,
                 .occupied_space = (i + 1) * (payload_size + sizeof(file_header)),
                 .deleted_count = 0,
@@ -416,26 +416,26 @@ namespace hedgehog::db
         }
 
         // delete entry 3 and 7
-        auto status = this->_executor->sync_submit(table.delete_async(keys[3], write_results[3].offset, this->_executor));
+        auto status = this->_executor->sync_submit(table.delete_async(keys[3], write_results[3].offset(), this->_executor));
         ASSERT_TRUE(status) << "An error occurred on deletion: " << status.error().to_string();
 
         // check infos after first deletion
         auto info = table.info();
         EXPECT_EQ(info.deleted_count, 1);
-        EXPECT_EQ(info.freed_space, write_results[3].size);
+        EXPECT_EQ(info.freed_space, write_results[3].size());
 
-        status = this->_executor->sync_submit(table.delete_async(keys[7], write_results[7].offset, this->_executor));
+        status = this->_executor->sync_submit(table.delete_async(keys[7], write_results[7].offset(), this->_executor));
         ASSERT_TRUE(status) << "An error occurred on deletion: " << status.error().to_string();
 
         // check infos after second deletion
         info = table.info();
         EXPECT_EQ(info.deleted_count, 2);
-        EXPECT_EQ(info.freed_space, write_results[3].size + write_results[7].size);
+        EXPECT_EQ(info.freed_space, write_results[3].size() + write_results[7].size());
 
         auto count = 0;
 
-        size_t offset = write_results.front().offset;
-        size_t size = write_results.front().size;
+        size_t offset = write_results.front().offset();
+        size_t size = write_results.front().size();
 
         std::vector<std::vector<uint8_t>> readback_values;
 
@@ -449,11 +449,13 @@ namespace hedgehog::db
 
             auto& read_result = maybe_read_result.value();
 
-            readback_values.push_back(std::move(read_result.first.binaries));
+            if(!read_result.first.header.deleted_flag)
+            {
+                readback_values.push_back(std::move(read_result.first.binaries));
+                count++;
+            }
 
             std::tie(offset, size) = read_result.second;
-
-            count++;
 
             if(offset == std::numeric_limits<size_t>::max() && size == 0)
                 break;

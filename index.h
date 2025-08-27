@@ -30,7 +30,7 @@ namespace hedgehog::db
         struct merge_config
         {
             size_t read_ahead_size{};
-            size_t new_table_id{};
+            size_t new_index_id{};
             std::filesystem::path base_path{};
         };
 
@@ -65,19 +65,14 @@ namespace hedgehog::db
             this->_index.reserve(size);
         }
 
-        bool add(const key_t& key, const value_ptr_t& value)
+        bool put(const key_t& key, const value_ptr_t& value)
         {
-            auto [it, inserted] = _index.emplace(key, value);
+            auto [it, inserted] = this->_index.emplace(key, value);
 
             if(!inserted)
                 it->second = value;
 
             return true;
-        }
-
-        bool erase(const key_t& key)
-        {
-            return this->_index.erase(key) > 0;
         }
 
         std::optional<value_ptr_t> get(const key_t& key) const
@@ -137,6 +132,8 @@ namespace hedgehog::db
         std::vector<meta_index_entry> _meta_index;
         sorted_index_footer _footer;
 
+        std::unique_ptr<std::mutex> _compaction_mutex = std::make_unique<std::mutex>(); // let sorted_index to be mutable
+
     public:
         sorted_index(fs::file_descriptor fd, std::vector<index_key_t> index, std::vector<meta_index_entry> meta_index, sorted_index_footer footer);
         sorted_index() = default;
@@ -149,6 +146,7 @@ namespace hedgehog::db
 
         [[nodiscard]] hedgehog::expected<std::optional<value_ptr_t>> lookup(const key_t& key) const;
         [[nodiscard]] async::task<expected<std::optional<value_ptr_t>>> lookup_async(const key_t& key, const std::shared_ptr<async::executor_context>& executor) const;
+        [[nodiscard]] async::task<hedgehog::status> try_update_async(const index_key_t& entry, const std::shared_ptr<async::executor_context>& executor);
 
         hedgehog::status load_index();
 
@@ -189,9 +187,11 @@ namespace hedgehog::db
         void clear_index();
 
     private:
-        [[nodiscard]] std::optional<size_t> _find_page_id(const key_t& key) const;
         static std::optional<value_ptr_t> _find_in_page(const key_t& key, const index_key_t* page_start, const index_key_t* page_end);
+
+        [[nodiscard]] std::optional<size_t> _find_page_id(const key_t& key) const;
         [[nodiscard]] async::task<expected<std::unique_ptr<uint8_t>>> _load_page_async(size_t offset, const std::shared_ptr<async::executor_context>& executor) const;
+        [[nodiscard]] async::task<hedgehog::status> _update_in_page(const index_key_t& entry, size_t page_id, const index_key_t* start, const index_key_t* end, const std::shared_ptr<async::executor_context>& executor);
     };
 
 } // namespace hedgehog::db
