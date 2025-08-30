@@ -143,15 +143,23 @@ namespace hedgehog::db
             return this->_ready_item.has_value();
         }
 
-        index_key_t pop()
+        index_key_t force_pop()
         {
             if(this->_ready_item.has_value())
-                return std::exchange(this->_ready_item, std::nullopt).value();
+                throw std::runtime_error("Ready item still present, cannot pop last");
 
             if(!this->_buffered_item.has_value())
                 throw std::runtime_error("No item to pop");
 
             return this->_buffered_item.value();
+        }
+
+        index_key_t pop()
+        {
+            if(this->_ready_item.has_value())
+                return std::exchange(this->_ready_item, std::nullopt).value();
+
+            throw std::runtime_error("No ready item to pop");
         }
     };
 

@@ -25,13 +25,14 @@ namespace hedgehog::db
         static std::vector<index_key_t> merge_memtables_in_mem(std::vector<mem_index>&& indices);
         static hedgehog::expected<sorted_index> load_sorted_index(const std::filesystem::path& path, bool load_index = false);
         static hedgehog::expected<sorted_index> save_as_sorted_index(const std::filesystem::path& path, std::vector<index_key_t>&& sorted_keys, size_t upper_bound, bool merge_with_existent = false);
-        static hedgehog::expected<std::vector<sorted_index>> merge_and_flush(const std::filesystem::path& base_path, std::vector<mem_index>&& indices, size_t num_partition_exponent, size_t flush_iteration);
+        static hedgehog::expected<std::vector<sorted_index>> flush_mem_index(const std::filesystem::path& base_path, std::vector<mem_index>&& indices, size_t num_partition_exponent, size_t flush_iteration);
 
         struct merge_config
         {
             size_t read_ahead_size{};
             size_t new_index_id{};
             std::filesystem::path base_path{};
+            bool filter_deleted_keys{false};
         };
 
         static async::task<hedgehog::expected<sorted_index>> two_way_merge_async(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
@@ -101,10 +102,6 @@ namespace hedgehog::db
 
         // partition identifier, every key belonging to this sorted index is <= upper_bound
         uint64_t upper_bound{};
-
-        // min/max keys
-        uuids::uuid min_key{};
-        uuids::uuid max_key{};
 
         // sizes section
         uint64_t indexed_keys{};
