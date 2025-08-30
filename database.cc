@@ -65,8 +65,8 @@ namespace hedgehog::db
             if(auto status = this->_flush_mem_index(); !status)
                 co_return hedgehog::error("An error occurred while flushing the mem_index: " + status.error().to_string());
 
-            // trigger compactation
-            if(this->_config.auto_compactation)
+            // trigger compaction
+            if(this->_config.auto_compaction)
                 this->compact_sorted_indices(false, executor);
         }
 
@@ -271,7 +271,7 @@ namespace hedgehog::db
         return hedgehog::ok();
     }
 
-    hedgehog::status database::_compactation_job(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor)
+    hedgehog::status database::_compaction_job(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor)
     {
         this->_logger.log("Starting compaction job");
 
@@ -304,7 +304,7 @@ namespace hedgehog::db
                 auto second_last_it = last_it - 1;
 
                 auto merge_config = hedgehog::db::index_ops::merge_config{
-                    .read_ahead_size = this->_config.compactation_read_ahead_size_bytes,
+                    .read_ahead_size = this->_config.compaction_read_ahead_size_bytes,
                     .new_index_id = this_iteration_id,
                     .base_path = this->_indices_path,
                 };
@@ -352,7 +352,7 @@ namespace hedgehog::db
                 auto lhs_size = static_cast<double>(index_vec[index_vec.size() - 1]->size());
                 auto rhs_size = static_cast<double>(index_vec[index_vec.size() - 2]->size());
 
-                if(!ignore_ratio && lhs_size / rhs_size <= this->_config.compactation_size_ratio)
+                if(!ignore_ratio && lhs_size / rhs_size <= this->_config.compaction_size_ratio)
                 {
                     wg.decr();
                     continue;
@@ -362,21 +362,21 @@ namespace hedgehog::db
                 executor->submit_io_task(make_compaction_sub_task(index_vec));
             }
 
-            bool done = wg.wait_for(this->_config.compacation_timeout);
+            bool done = wg.wait_for(this->_config.compaction_timeout);
 
             if(!done)
-                return hedgehog::error("Compactation timeout.");
+                return hedgehog::error("compaction timeout.");
 
             if(!errors.empty())
             {
                 for(auto& error : errors)
-                    std::cerr << "Compactation sub-task error: " + error.to_string() << std::endl;
+                    std::cerr << "compaction sub-task error: " + error.to_string() << std::endl;
 
-                return hedgehog::error("Compactation error.");
+                return hedgehog::error("compaction error.");
             }
         }
 
-        // finalize compactation: replace the database's indices
+        // finalize compaction: replace the database's indices
         {
             std::lock_guard lk(this->_sorted_index_mutex);
 
@@ -400,27 +400,27 @@ namespace hedgehog::db
 
     std::future<hedgehog::status> database::compact_sorted_indices(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor)
     {
-        auto compactation_promise_ptr = std::make_shared<std::promise<hedgehog::status>>();
-        std::future<hedgehog::status> compactation_future = compactation_promise_ptr->get_future();
+        auto compaction_promise_ptr = std::make_shared<std::promise<hedgehog::status>>();
+        std::future<hedgehog::status> compaction_future = compaction_promise_ptr->get_future();
 
         this->compaction_worker.submit(
-            [weak_db = this->weak_from_this(), promise = std::move(compactation_promise_ptr), executor, ignore_ratio]()
+            [weak_db = this->weak_from_this(), promise = std::move(compaction_promise_ptr), executor, ignore_ratio]()
             {
                 auto db = weak_db.lock();
                 if(!db)
                 {
-                    std::cerr << "Cannot start compactation job. DB not available. returning." << std::endl;
+                    std::cerr << "Cannot start compaction job. DB not available. returning." << std::endl;
                     return;
                 }
 
-                auto status = db->_compactation_job(ignore_ratio, executor);
+                auto status = db->_compaction_job(ignore_ratio, executor);
                 if(!status)
                     std::cerr << status.error().to_string() << std::endl;
 
                 promise->set_value(std::move(status));
             });
 
-        return compactation_future;
+        return compaction_future;
     }
 
     [[nodiscard]] double database::load_factor()
