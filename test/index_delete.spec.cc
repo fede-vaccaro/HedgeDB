@@ -213,7 +213,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
             .read_ahead_size = _this->READ_AHEAD_SIZE_BYTES,
             .new_index_id = _this->N_RUNS + 1,
             .base_path = _this->_base_path,
-            .filter_deleted_keys = true};
+            .discard_deleted_keys = true};
 
         auto new_index = co_await hedgehog::db::index_ops::two_way_merge_async(
             merge_config,

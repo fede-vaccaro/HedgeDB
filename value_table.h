@@ -51,8 +51,8 @@ namespace hedgehog::db
 
     /**
         The value table is where the all the values are stored.
-        
-        The layout is 
+
+        The layout is
 
         output_file0
         output_file1
@@ -62,16 +62,16 @@ namespace hedgehog::db
         EOF marker
         value_table_info
     */
-    class value_table
+    class value_table : public fs::file
     {
         uint32_t _unique_id;
         size_t _current_offset{0};
-        fs::file_descriptor _fd;
-        fs::tmp_mmap _mmap{};
+        fs::non_owning_mmap _mmap{};
+        std::unique_ptr<std::mutex> _delete_mutex{std::make_unique<std::mutex>()};
 
         value_table() = default;
-        value_table(uint32_t unique_id, size_t current_offset, fs::file_descriptor file_descriptor, fs::tmp_mmap mmap)
-            : _unique_id(unique_id), _current_offset(current_offset), _fd(std::move(file_descriptor)), _mmap(std::move(mmap)) {}
+        value_table(uint32_t unique_id, size_t current_offset, fs::file file_descriptor, fs::non_owning_mmap mmap)
+            : fs::file(std::move(file_descriptor)), _unique_id(unique_id), _current_offset(current_offset), _mmap(std::move(mmap)) {}
 
     public:
         static constexpr std::string_view TABLE_FILE_EXTENSION = ".vt";
@@ -88,11 +88,6 @@ namespace hedgehog::db
         [[nodiscard]] size_t current_offset() const
         {
             return this->_current_offset;
-        }
-
-        [[nodiscard]] const fs::file_descriptor& fd() const
-        {
-            return this->_fd;
         }
 
         [[nodiscard]] size_t free_space() const
@@ -116,13 +111,13 @@ namespace hedgehog::db
         async::task<expected<output_file>> read_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor, bool skip_delete_check = false);
 
         // this class method is needed to iterate over the table (and skip deleted entries)
-        async::task<expected<file_header>> get_first_header_async(const std::shared_ptr<async::executor_context>& executor);
+        async::task<expected<std::pair<file_header, std::unique_lock<std::mutex>>>> get_first_header_async(const std::shared_ptr<async::executor_context>& executor);
         async::task<expected<std::pair<output_file, next_offset_and_size_t>>> read_file_and_next_header_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor);
 
         async::task<status> delete_async(key_t key, size_t offset, const std::shared_ptr<async::executor_context>& executor);
 
-        static hedgehog::expected<value_table> make_new(const std::filesystem::path& base_path, uint32_t table_id);
-        static hedgehog::expected<value_table> load(const std::filesystem::path& path, fs::file_descriptor::open_mode open_mode);
+        static hedgehog::expected<value_table> make_new(const std::filesystem::path& base_path, uint32_t table_id, bool preallocate = true);
+        static hedgehog::expected<value_table> load(const std::filesystem::path& path, fs::file::open_mode open_mode);
 
     private:
         constexpr static fs::range _page_align_for_mmap()
@@ -130,13 +125,13 @@ namespace hedgehog::db
             constexpr size_t last_page_size = TABLE_ACTUAL_MAX_SIZE % PAGE_SIZE_IN_BYTES;
 
             constexpr size_t mmap_begin_range = TABLE_ACTUAL_MAX_SIZE - last_page_size - PAGE_SIZE_IN_BYTES;
-            
+
             constexpr size_t mmap_size = last_page_size + PAGE_SIZE_IN_BYTES;
 
             return fs::range{.start = mmap_begin_range, .size = mmap_size};
         }
 
-        static value_table_info& _get_info_from_mmap(const fs::tmp_mmap& mmap);
+        static value_table_info& _get_info_from_mmap(const fs::non_owning_mmap& mmap);
         [[nodiscard]] value_table_info& _info();
     };
 } // namespace hedgehog::db

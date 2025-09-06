@@ -9,6 +9,7 @@
 #include <sys/mman.h>
 
 #include <error.hpp>
+#include <utility>
 
 #include "io_executor.h"
 #include "mailbox_impl.h"
@@ -28,7 +29,7 @@ namespace hedgehog::fs
         return strerror(errno);
     }
 
-    class file_descriptor
+    class file
     {
     public:
         enum class open_mode : int32_t // NOLINT(performance-enum-size) this will translate to int32_t anyway in the syscall
@@ -46,9 +47,10 @@ namespace hedgehog::fs
         std::filesystem::path _path;
         open_mode _mode{open_mode::undefined};
         bool _use_direct{false};
+        bool _deletion_triggered{false};
 
     public:
-        [[nodiscard]] int get() const
+        [[nodiscard]] int get_fd() const
         {
             return this->_fd;
         }
@@ -73,7 +75,12 @@ namespace hedgehog::fs
             return this->_use_direct;
         }
 
-        static hedgehog::expected<file_descriptor> from_path(const std::filesystem::path& path, open_mode mode, bool use_direct = false, std::optional<size_t> expected_size = std::nullopt)
+        void set_delete_on_obj_destruction(bool val)
+        {
+            this->_deletion_triggered = val;
+        }
+
+        static hedgehog::expected<file> from_path(const std::filesystem::path& path, open_mode mode, bool use_direct = false, std::optional<size_t> expected_size = std::nullopt)
         {
             auto exists = std::filesystem::exists(path);
 
@@ -125,7 +132,7 @@ namespace hedgehog::fs
                 };
             }
 
-            file_descriptor fd_wrapped{};
+            file fd_wrapped{};
 
             fd_wrapped._fd = fd;
             fd_wrapped._file_size = file_size;
@@ -136,7 +143,7 @@ namespace hedgehog::fs
             return std::move(fd_wrapped);
         }
 
-        static async::task<hedgehog::expected<file_descriptor>> from_path_async(const std::filesystem::path& path, open_mode mode, std::shared_ptr<async::executor_context> executor, bool use_direct = false, std::optional<size_t> expected_size = std::nullopt)
+        static async::task<hedgehog::expected<file>> from_path_async(const std::filesystem::path& path, open_mode mode, std::shared_ptr<async::executor_context> executor, bool use_direct = false, std::optional<size_t> expected_size = std::nullopt)
         {
             // auto exists = std::filesystem::exists(path);
             auto stats = co_await executor->submit_request(async::file_info_request{
@@ -205,7 +212,7 @@ namespace hedgehog::fs
                 };
             }
 
-            file_descriptor fd_wrapped{};
+            file fd_wrapped{};
 
             fd_wrapped._fd = fd;
             fd_wrapped._file_size = file_size;
@@ -216,17 +223,18 @@ namespace hedgehog::fs
             co_return std::move(fd_wrapped);
         }
 
-        file_descriptor() = default;
+        file() = default;
 
-        file_descriptor(file_descriptor&& other) noexcept : _fd(std::exchange(other._fd, -1)),
-                                                            _file_size(std::exchange(other._file_size, 0)),
-                                                            _path(std::move(other._path)),
-                                                            _mode(std::exchange(other._mode, open_mode::undefined)),
-                                                            _use_direct(std::exchange(other._use_direct, false))
+        file(file&& other) noexcept : _fd(std::exchange(other._fd, -1)),
+                                      _file_size(std::exchange(other._file_size, 0)),
+                                      _path(std::move(other._path)),
+                                      _mode(std::exchange(other._mode, open_mode::undefined)),
+                                      _use_direct(std::exchange(other._use_direct, false)),
+                                      _deletion_triggered(std::exchange(other._deletion_triggered, false))
         {
         }
 
-        file_descriptor& operator=(file_descriptor&& other) noexcept
+        file& operator=(file&& other) noexcept
         {
             if(this == &other)
                 return *this;
@@ -234,31 +242,39 @@ namespace hedgehog::fs
             this->_fd = std::exchange(other._fd, -1);
             this->_file_size = std::exchange(other._file_size, 0);
             this->_path = std::move(other._path);
+            this->_mode = std::exchange(other._mode, open_mode::undefined);
+            this->_use_direct = std::exchange(other._use_direct, false);
+            this->_deletion_triggered = std::exchange(other._deletion_triggered, false);
 
             return *this;
         };
 
-        file_descriptor(const file_descriptor&) = delete;
-        file_descriptor& operator=(const file_descriptor&) = delete;
+        file(const file&) = delete;
+        file& operator=(const file&) = delete;
 
-        ~file_descriptor()
+        ~file()
         {
-            if(this->_fd >= 0)
-                close(this->_fd);
+            if(this->_fd < 0)
+                return;
+
+            close(this->_fd);
+
+            if(this->_deletion_triggered)
+                std::filesystem::remove(this->_path);
         }
     };
 
     class mmap_owning
     {
     private:
-        file_descriptor _fd_wrapper;
+        file _fd_wrapper;
         void* _mapped_ptr = nullptr;
         size_t _mapped_size = 0;
 
     public:
-        static hedgehog::expected<mmap_owning> from_fd_wrapper(file_descriptor&& fd_w)
+        static hedgehog::expected<mmap_owning> from_fd_wrapper(file&& fd_w)
         {
-            if(fd_w.get() == -1)
+            if(fd_w.get_fd() == -1)
             {
                 return hedgehog::error("Cannot map an invalid file descriptor.");
             }
@@ -266,7 +282,7 @@ namespace hedgehog::fs
             {
             }
 
-            void* mapped_ptr = mmap(nullptr, fd_w.file_size(), PROT_READ, MAP_PRIVATE, fd_w.get(), 0);
+            void* mapped_ptr = mmap(nullptr, fd_w.file_size(), PROT_READ, MAP_PRIVATE, fd_w.get_fd(), 0);
 
             if(mapped_ptr == MAP_FAILED)
             {
@@ -284,7 +300,7 @@ namespace hedgehog::fs
 
         static hedgehog::expected<mmap_owning> from_path(const std::filesystem::path& path, std::optional<size_t> expected_size = std::nullopt)
         {
-            auto fd_res = file_descriptor::from_path(path, file_descriptor::open_mode::read_only, false, expected_size);
+            auto fd_res = file::from_path(path, file::open_mode::read_only, false, expected_size);
             if(!fd_res.has_value())
                 return hedgehog::error("Failed to get file descriptor for mmap: " + fd_res.error().to_string());
 
@@ -347,7 +363,7 @@ namespace hedgehog::fs
 
         [[nodiscard]] int get_fd() const
         {
-            return _fd_wrapper.get();
+            return _fd_wrapper.get_fd();
         }
     };
 
@@ -357,7 +373,7 @@ namespace hedgehog::fs
         size_t size;
     };
 
-    class tmp_mmap
+    class non_owning_mmap
     {
     private:
         int32_t _fd{-1};
@@ -366,15 +382,15 @@ namespace hedgehog::fs
         std::optional<range> _range;
 
     public:
-        static hedgehog::expected<tmp_mmap> from_fd_wrapper(const file_descriptor& fd_w, std::optional<range> range = std::nullopt)
+        static hedgehog::expected<non_owning_mmap> from_fd_wrapper(const file& fd_w, std::optional<range> range = std::nullopt)
         {
-            if(fd_w.get() == -1)
+            if(fd_w.get_fd() == -1)
                 return hedgehog::error("Cannot map an invalid file descriptor.");
 
             if(fd_w.file_size() == 0)
                 return hedgehog::error("Cannot mmap an empty file.");
 
-            void* mapped_ptr = mmap(nullptr, range ? range->size : fd_w.file_size(), PROT_READ | PROT_WRITE, MAP_PRIVATE, fd_w.get(), range ? range->start : 0);
+            void* mapped_ptr = mmap(nullptr, range ? range->size : fd_w.file_size(), PROT_READ | PROT_WRITE, MAP_PRIVATE, fd_w.get_fd(), range ? range->start : 0);
 
             if(mapped_ptr == MAP_FAILED)
             {
@@ -382,8 +398,8 @@ namespace hedgehog::fs
                 return hedgehog::error("Failed to mmap file: " + err_msg);
             }
 
-            tmp_mmap wrapper;
-            wrapper._fd = fd_w.get();
+            non_owning_mmap wrapper;
+            wrapper._fd = fd_w.get_fd();
             wrapper._mapped_ptr = mapped_ptr;
             wrapper._mapped_size = range ? range->size : fd_w.file_size();
             wrapper._range = range;
@@ -391,9 +407,9 @@ namespace hedgehog::fs
             return std::move(wrapper);
         }
 
-        tmp_mmap() = default;
+        non_owning_mmap() = default;
 
-        tmp_mmap(tmp_mmap&& other) noexcept
+        non_owning_mmap(non_owning_mmap&& other) noexcept
             : _fd(std::exchange(other._fd, -1)),
               _mapped_ptr(std::exchange(other._mapped_ptr, nullptr)),
               _mapped_size(std::exchange(other._mapped_size, 0)),
@@ -401,7 +417,7 @@ namespace hedgehog::fs
         {
         }
 
-        tmp_mmap& operator=(tmp_mmap&& other) noexcept
+        non_owning_mmap& operator=(non_owning_mmap&& other) noexcept
         {
             if(this != &other)
             {
@@ -413,10 +429,10 @@ namespace hedgehog::fs
             return *this;
         }
 
-        tmp_mmap(const tmp_mmap&) = delete;
-        tmp_mmap& operator=(const tmp_mmap&) = delete;
+        non_owning_mmap(const non_owning_mmap&) = delete;
+        non_owning_mmap& operator=(const non_owning_mmap&) = delete;
 
-        ~tmp_mmap()
+        ~non_owning_mmap()
         {
             if(_mapped_ptr != nullptr && _mapped_ptr != MAP_FAILED)
             {
