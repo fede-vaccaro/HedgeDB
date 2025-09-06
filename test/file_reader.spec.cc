@@ -10,7 +10,7 @@
 
 #include "error.hpp"
 
-namespace hedgehog::async
+namespace hedge::async
 {
 
     struct test_paginated_view : public ::testing::Test
@@ -294,4 +294,4 @@ namespace hedgehog::async
         ASSERT_EQ(maybe_vector.value(), sub_vector);
     }
 
-} // namespace hedgehog::async
+} // namespace hedge::async

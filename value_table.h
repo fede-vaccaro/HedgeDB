@@ -13,7 +13,7 @@
 #include "io_executor.h"
 #include "task.h"
 
-namespace hedgehog::db
+namespace hedge::db
 {
     // two uuids to reduce the chance of collision in case of recovery
     constexpr std::array<uint8_t, 16> FILE_SEPARATOR = {0x59, 0x34, 0xef, 0xdc, 0x74, 0x62, 0x11, 0xf0, 0x95, 0x44, 0x33, 0x9d, 0x15, 0x81, 0x8d, 0x1e};
@@ -105,7 +105,7 @@ namespace hedgehog::db
         using next_offset_and_size_t = std::pair<size_t, size_t>;
 
         expected<write_reservation> get_write_reservation(size_t file_size);
-        async::task<expected<hedgehog::value_ptr_t>> write_async(key_t key, const std::vector<uint8_t>& value, const write_reservation& reservation, const std::shared_ptr<async::executor_context>& executor);
+        async::task<expected<hedge::value_ptr_t>> write_async(key_t key, const std::vector<uint8_t>& value, const write_reservation& reservation, const std::shared_ptr<async::executor_context>& executor);
 
         // nb file_size includes the size of the header
         async::task<expected<output_file>> read_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor, bool skip_delete_check = false);
@@ -116,8 +116,8 @@ namespace hedgehog::db
 
         async::task<status> delete_async(key_t key, size_t offset, const std::shared_ptr<async::executor_context>& executor);
 
-        static hedgehog::expected<value_table> make_new(const std::filesystem::path& base_path, uint32_t table_id, bool preallocate = true);
-        static hedgehog::expected<value_table> load(const std::filesystem::path& path, fs::file::open_mode open_mode);
+        static hedge::expected<value_table> make_new(const std::filesystem::path& base_path, uint32_t table_id, bool preallocate = true);
+        static hedge::expected<value_table> load(const std::filesystem::path& path, fs::file::open_mode open_mode);
 
     private:
         constexpr static fs::range _page_align_for_mmap()
@@ -134,4 +134,4 @@ namespace hedgehog::db
         static value_table_info& _get_info_from_mmap(const fs::non_owning_mmap& mmap);
         [[nodiscard]] value_table_info& _info();
     };
-} // namespace hedgehog::db
+} // namespace hedge::db

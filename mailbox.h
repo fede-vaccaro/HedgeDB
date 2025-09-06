@@ -8,7 +8,7 @@
 
 #include "mailbox_impl.h"
 
-namespace hedgehog::async
+namespace hedge::async
 {
 
     struct mailbox
@@ -105,4 +105,4 @@ namespace hedgehog::async
         }
     };
 
-} // namespace hedgehog::async
+} // namespace hedge::async

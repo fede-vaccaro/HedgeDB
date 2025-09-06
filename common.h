@@ -6,7 +6,7 @@
 #include <type_traits>
 #include <uuid.h>
 
-namespace hedgehog
+namespace hedge
 {
     using key_t = uuids::uuid;
 
@@ -181,4 +181,4 @@ namespace hedgehog
 
     std::vector<std::pair<size_t, std::filesystem::path>> get_prefixes(const std::filesystem::path& base_path, size_t num_space_partitions);
 
-} // namespace hedgehog
+} // namespace hedge

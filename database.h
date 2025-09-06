@@ -16,7 +16,7 @@
 #include "value_table.h"
 #include "worker.h"
 
-namespace hedgehog::db
+namespace hedge::db
 {
 
     struct db_config
@@ -45,7 +45,7 @@ namespace hedgehog::db
         db_config _config;
 
         // persisted state
-        using sorted_index_ptr_t = std::shared_ptr<hedgehog::db::sorted_index>;
+        using sorted_index_ptr_t = std::shared_ptr<hedge::db::sorted_index>;
         using sorted_indices_map_t = std::map<uint16_t, std::vector<sorted_index_ptr_t>>;
 
         size_t _flush_iteration{0};
@@ -72,17 +72,17 @@ namespace hedgehog::db
 
         async::task<expected<byte_buffer_t>> get_async(key_t key, const std::shared_ptr<async::executor_context>& executor);
 
-        async::task<hedgehog::status> put_async(key_t key, const byte_buffer_t& value, const std::shared_ptr<async::executor_context>& executor);
-        async::task<hedgehog::status> put_async(key_t key, byte_buffer_t&& value, const std::shared_ptr<async::executor_context>& executor);
+        async::task<hedge::status> put_async(key_t key, const byte_buffer_t& value, const std::shared_ptr<async::executor_context>& executor);
+        async::task<hedge::status> put_async(key_t key, byte_buffer_t&& value, const std::shared_ptr<async::executor_context>& executor);
 
-        async::task<hedgehog::status> remove_async(key_t key, const std::shared_ptr<async::executor_context>& executor);
-        std::future<hedgehog::status> compact_sorted_indices(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor);
+        async::task<hedge::status> remove_async(key_t key, const std::shared_ptr<async::executor_context>& executor);
+        std::future<hedge::status> compact_sorted_indices(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor);
 
         static expected<std::shared_ptr<database>> make_new(const std::filesystem::path& base_path, const db_config& config);
         static expected<std::shared_ptr<database>> load(const std::filesystem::path& base_path);
 
-        hedgehog::status flush();
-        std::future<hedgehog::status> garbage_collect_tables(const std::shared_ptr<async::executor_context>& executor);
+        hedge::status flush();
+        std::future<hedge::status> garbage_collect_tables(const std::shared_ptr<async::executor_context>& executor);
 
         [[nodiscard]] double load_factor();
 
@@ -91,11 +91,11 @@ namespace hedgehog::db
 
         [[nodiscard]] size_t _find_matching_partition_for_key(const key_t& key) const;
 
-        hedgehog::status _rotate_value_table();
-        hedgehog::status _flush_mem_index();
-        hedgehog::status _compaction_job(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor);
-        async::task<hedgehog::status> _garbage_collect_table(std::shared_ptr<value_table> table, size_t id, const std::shared_ptr<async::executor_context>& executor);
+        hedge::status _rotate_value_table();
+        hedge::status _flush_mem_index();
+        hedge::status _compaction_job(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor);
+        async::task<hedge::status> _garbage_collect_table(std::shared_ptr<value_table> table, size_t id, const std::shared_ptr<async::executor_context>& executor);
         async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> _find_value_ptr_and_value_table(key_t key, const std::shared_ptr<async::executor_context>& executor);
     };
 
-} // namespace hedgehog::db
+} // namespace hedge::db

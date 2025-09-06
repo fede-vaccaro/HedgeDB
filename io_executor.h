@@ -20,7 +20,7 @@
 #include "mailbox.h"
 #include "task.h"
 
-namespace hedgehog::async
+namespace hedge::async
 {
     class executor_context
     {
@@ -59,7 +59,7 @@ namespace hedgehog::async
 
             auto future = promise.get_future();
 
-            auto task_lambda = [promise = std::move(promise), &task]() mutable -> hedgehog::async::task<void>
+            auto task_lambda = [promise = std::move(promise), &task]() mutable -> hedge::async::task<void>
             {
                 auto value = co_await task;
 
@@ -100,4 +100,4 @@ namespace hedgehog::async
         static std::pair<uint64_t, uint8_t> parse_request_key(uint64_t key);
     };
 
-} // namespace hedgehog::async
+} // namespace hedge::async

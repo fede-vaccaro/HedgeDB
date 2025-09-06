@@ -9,7 +9,7 @@
 
 // Ensure the correct namespace alias for Outcome
 
-namespace hedgehog
+namespace hedge
 {
 
     enum class errc
@@ -55,32 +55,32 @@ namespace hedgehog
 
     struct status
     {
-        using error_t = std::variant<std::monostate, hedgehog::error>;
+        using error_t = std::variant<std::monostate, hedge::error>;
 
         error_t err = std::monostate{};
 
         status() = default;
-        status(hedgehog::error err_) : err(err_) {}
+        status(hedge::error err_) : err(err_) {}
 
         inline operator bool() const
         {
             return std::holds_alternative<std::monostate>(err);
         }
 
-        inline hedgehog::error error()
+        inline hedge::error error()
         {
             if(!*this)
-                return std::get<hedgehog::error>(this->err);
+                return std::get<hedge::error>(this->err);
 
             throw std::runtime_error("not an error, check before calling this method!");
 
-            return hedgehog::error{""};
+            return hedge::error{""};
         }
     };
 
-    inline hedgehog::status ok()
+    inline hedge::status ok()
     {
         return status{};
     }
 
-} // namespace hedgehog
+} // namespace hedge

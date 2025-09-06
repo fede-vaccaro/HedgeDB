@@ -12,7 +12,7 @@
 #include "common.h"
 #include "io_executor.h"
 
-namespace hedgehog::db
+namespace hedge::db
 {
     class mem_index;
     class sorted_index;
@@ -23,9 +23,9 @@ namespace hedgehog::db
     struct index_ops
     {
         static std::vector<index_key_t> merge_memtables_in_mem(std::vector<mem_index>&& indices);
-        static hedgehog::expected<sorted_index> load_sorted_index(const std::filesystem::path& path, bool load_index = false);
-        static hedgehog::expected<sorted_index> save_as_sorted_index(const std::filesystem::path& path, std::vector<index_key_t>&& sorted_keys, size_t upper_bound, bool merge_with_existent = false);
-        static hedgehog::expected<std::vector<sorted_index>> flush_mem_index(const std::filesystem::path& base_path, std::vector<mem_index>&& indices, size_t num_partition_exponent, size_t flush_iteration);
+        static hedge::expected<sorted_index> load_sorted_index(const std::filesystem::path& path, bool load_index = false);
+        static hedge::expected<sorted_index> save_as_sorted_index(const std::filesystem::path& path, std::vector<index_key_t>&& sorted_keys, size_t upper_bound, bool merge_with_existent = false);
+        static hedge::expected<std::vector<sorted_index>> flush_mem_index(const std::filesystem::path& base_path, std::vector<mem_index>&& indices, size_t num_partition_exponent, size_t flush_iteration);
 
         struct merge_config
         {
@@ -35,8 +35,8 @@ namespace hedgehog::db
             bool discard_deleted_keys{false};
         };
 
-        static async::task<hedgehog::expected<sorted_index>> two_way_merge_async(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
-        static hedgehog::expected<sorted_index> two_way_merge(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
+        static async::task<hedge::expected<sorted_index>> two_way_merge_async(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
+        static hedge::expected<sorted_index> two_way_merge(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
     };
 
     class mem_index
@@ -95,7 +95,7 @@ namespace hedgehog::db
         static constexpr uint32_t CURRENT_FOOTER_VERSION = 1;
 
         // textual header, useful for inspecting the binary
-        char header[16] = "HEDGEHOG_FOOTER";
+        char header[16] = "hedge_FOOTER";
 
         // versioning for future use
         uint8_t version{CURRENT_FOOTER_VERSION};
@@ -140,11 +140,11 @@ namespace hedgehog::db
         sorted_index(const sorted_index&) = delete;
         sorted_index& operator=(const sorted_index&) = delete;
 
-        [[nodiscard]] hedgehog::expected<std::optional<value_ptr_t>> lookup(const key_t& key) const;
+        [[nodiscard]] hedge::expected<std::optional<value_ptr_t>> lookup(const key_t& key) const;
         [[nodiscard]] async::task<expected<std::optional<value_ptr_t>>> lookup_async(const key_t& key, const std::shared_ptr<async::executor_context>& executor) const;
-        [[nodiscard]] async::task<hedgehog::status> try_update_async(const index_key_t& entry, const std::shared_ptr<async::executor_context>& executor);
+        [[nodiscard]] async::task<hedge::status> try_update_async(const index_key_t& entry, const std::shared_ptr<async::executor_context>& executor);
 
-        hedgehog::status load_index();
+        hedge::status load_index();
 
         [[nodiscard]] size_t upper_bound() const
         {
@@ -182,7 +182,7 @@ namespace hedgehog::db
 
         [[nodiscard]] std::optional<size_t> _find_page_id(const key_t& key) const;
         [[nodiscard]] async::task<expected<std::unique_ptr<uint8_t>>> _load_page_async(size_t offset, const std::shared_ptr<async::executor_context>& executor) const;
-        [[nodiscard]] async::task<hedgehog::status> _update_in_page(const index_key_t& entry, size_t page_id, const index_key_t* start, const index_key_t* end, const std::shared_ptr<async::executor_context>& executor);
+        [[nodiscard]] async::task<hedge::status> _update_in_page(const index_key_t& entry, size_t page_id, const index_key_t* start, const index_key_t* end, const std::shared_ptr<async::executor_context>& executor);
     };
 
-} // namespace hedgehog::db
+} // namespace hedge::db

@@ -12,7 +12,7 @@
 
 #include <liburing.h>
 
-namespace hedgehog::async
+namespace hedge::async
 {
 
     template <typename Derived>
@@ -494,4 +494,4 @@ namespace hedgehog::async
             file_info_mailbox,
             fsync_mailbox>;
 
-} // namespace hedgehog::async
+} // namespace hedge::async

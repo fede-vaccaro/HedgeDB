@@ -3,7 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 
-namespace hedgehog::async
+namespace hedge::async
 {
     class working_group
     {
@@ -49,4 +49,4 @@ namespace hedgehog::async
         }
     };
 
-} // namespace hedgehog::async
+} // namespace hedge::async
