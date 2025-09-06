@@ -6,7 +6,7 @@
 
 HedgeDB is a prototype of a larger-than-memory key-value embeddable storage, inspired by [BadgerDB](https://github.com/hypermodeinc/badger) and [RocksDB](https://github.com/facebook/rocksdb), optimized for modern high throughput SSDs. It aims to be performance oriented with low memory footprint.
 
-**Disclaimer**: as you might expect from a prototype it was not extensively tested, nor the code can be considered production ready. _Also, the code itself might have gotten a bit messy. Hopefully, I'll take care of this_
+**Disclaimer**: as you might expect from a prototype it was not extensively tested, nor the code can be considered production ready. _Also, the code itself might have gotten a bit messy. Hopefully, I'll take care of this in a second time._
 
 So far it is only Linux compatible as it heavily leverage [liburing](https://github.com/axboe/liburing), amongst other Linux syscalls.
 
