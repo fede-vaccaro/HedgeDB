@@ -4,7 +4,7 @@
 
 #include <gtest/gtest.h>
 
-#include "../worker.h"
+#include "worker.h"
 
 TEST(worker_test, basic_test)
 {

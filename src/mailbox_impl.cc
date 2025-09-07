@@ -1,7 +1,7 @@
 #include <cstdint>
 #include <liburing.h>
 #include <liburing/io_uring.h>
-#include <stdlib.h>
+#include <cstdlib>
 
 #include <logger.h>
 
@@ -82,7 +82,7 @@ namespace hedge::async
 
         this->response.bytes_written = cqe->res;
 
-        if(cqe->res != this->request.size)
+        if(cqe->res != static_cast<__s32>(this->request.size))
             log("Wrong read: expected ", this->request.size, ", got ", cqe->res, " (user_data: ", cqe->user_data, ")");
 
         return true;

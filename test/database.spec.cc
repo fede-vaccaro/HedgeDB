@@ -4,9 +4,9 @@
 #include <gtest/gtest.h>
 #include <random>
 
-#include "../database.h"
-#include "../io_executor.h"
-#include "../working_group.h"
+#include "database.h"
+#include "io_executor.h"
+#include "working_group.h"
 
 namespace hedge::db
 {

@@ -13,7 +13,7 @@ namespace hedge
 
         for(size_t i = 1; i <= num_space_partitions + 1; ++i)
         {
-            auto last_prefix_of_partition = (i * partition_size - 1);
+            auto last_prefix_of_partition = ((i * partition_size) - 1);
 
             prefixes.push_back(last_prefix_of_partition);
 

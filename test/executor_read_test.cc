@@ -131,7 +131,7 @@ int main()
     wg.set(N_REQUESTS);
 
     auto t0 = std::chrono::steady_clock::now();
-    for(size_t i = 0; i < N_REQUESTS; i++)
+    for(size_t i = 0; i < static_cast<size_t>(N_REQUESTS); i++)
     {
         auto task = get_obj(hedge::async::read_request{.fd = fd, .offset = dist(rng) * PAGE_SIZE, .size = PAGE_SIZE}, context, wg);
         context.submit_io_task(std::move(task));

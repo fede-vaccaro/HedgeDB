@@ -18,9 +18,8 @@ namespace hedge::async
     {
         const fs::file& _fd;
         file_reader_config _config;
-        size_t _current_offset{0};
-
         std::shared_ptr<async::executor_context> _executor;
+        size_t _current_offset{0};
 
     public:
         file_reader(const fs::file& fd, const file_reader_config& config, std::shared_ptr<async::executor_context> executor);

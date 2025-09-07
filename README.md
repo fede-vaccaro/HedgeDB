@@ -51,7 +51,10 @@ One of the core design element is to avoid 3rd party dependencies as much as pos
 For compiling with `cmake`:
 
 ```bash
-cmake . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev && cmake --build build -j 16
+cmake . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev && cmake --build build
+
+# Parallel version using maximum number of cores
+cmake . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev && cmake --build build -j $nproc
 ```
 
 Of course you can change build type to `Debug`, or change the number of jobs.

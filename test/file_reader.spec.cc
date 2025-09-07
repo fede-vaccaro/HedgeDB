@@ -2,11 +2,11 @@
 #include <gtest/gtest.h>
 #include <numeric>
 
-#include "../file_reader.h"
-#include "../fs.hpp"
-#include "../io_executor.h"
-#include "../task.h"
-#include "../common.h"
+#include "file_reader.h"
+#include "fs.hpp"
+#include "io_executor.h"
+#include "task.h"
+#include "common.h"
 
 #include "error.hpp"
 
@@ -180,7 +180,7 @@ namespace hedge::async
         file.write(reinterpret_cast<const char*>(data.data()), data.size());
         file.close();
 
-        auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
+        auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false);
         ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
 
         auto view = file_reader{
