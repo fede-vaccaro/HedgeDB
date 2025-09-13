@@ -37,10 +37,7 @@ namespace hedgehog::async
         auto it_end = it_start + std::min(n, queue.size());
 
         if(it_start == it_end)
-        {
-            log("[pop_n] no tasks to pop");
             return {};
-        }
 
         std::vector<T> slice;
 
@@ -60,8 +57,6 @@ namespace hedgehog::async
         if(ret < 0)
             throw std::runtime_error("error with io_uring_queue_init: "s + strerror(-ret));
 
-        log("[executor_context] io_uring initialized with QUEUE_DEPTH: ", this->_queue_depth);
-
         this->_worker = std::thread([this]()
                                     { this->_run(); });
     }
@@ -71,7 +66,6 @@ namespace hedgehog::async
         this->shutdown();
 
         io_uring_queue_exit(&this->_ring);
-        log("[executor_context] io_uring exited");
     }
 
     uint64_t executor_context::forge_request_key(uint64_t request_id, uint8_t sub_request_idx)
@@ -171,7 +165,6 @@ namespace hedgehog::async
         }
 
         auto ready = io_uring_sq_ready(&this->_ring);
-        log("Submitting ", ready, " requests.");
 
         if(ready > 0)
         {

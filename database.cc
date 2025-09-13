@@ -1,8 +1,8 @@
 #include <algorithm>
+#include <future>
 #include <iterator>
 #include <memory>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 
 #include "common.h"
@@ -16,7 +16,7 @@ namespace hedgehog::db
 {
     expected<std::shared_ptr<database>> database::make_new(const std::filesystem::path& base_path, const db_config& config)
     {
-        auto db = std::make_shared<database>();
+        auto db = std::shared_ptr<database>(new database());
 
         db->_base_path = base_path;
         db->_indices_path = base_path / "indices";
@@ -58,28 +58,19 @@ namespace hedgehog::db
     async::task<hedgehog::status> database::put_async(key_t key, const byte_buffer_t& value, const std::shared_ptr<async::executor_context>& executor)
     {
         // lazy flush the memtable if no space left in the memtable
-        if(this->_mem_index.size() == this->_config.keys_in_mem_before_flush)
+        if(this->_mem_index.size() >= this->_config.keys_in_mem_before_flush)
         {
             if(auto status = this->_flush_mem_index(); !status)
                 co_return hedgehog::error("An error occurred while flushing the mem_index: " + status.error().to_string());
 
             // trigger compactation
-            this->worker.submit(
-                [weak_db = this->weak_from_this(), executor]()
-                {
-                    auto db = weak_db.lock();
-                    if(!db)
-                    {
-                        std::cerr << "Cannot start compactation job. DB not available. returning." << std::endl;
-                        return;
-                    }
-
-                    db->_compactation_job(executor);
-                });
+            if(this->_config.auto_compactation)
+                this->compact_sorted_indices(false, executor);
         }
 
         // first it tries writing the data to the value table
-        auto reservation = this->_current_value_table->get_write_reservation(value.size());
+        auto value_table = this->_current_value_table; // acquire ownership of the current value table
+        auto reservation = value_table->get_write_reservation(value.size());
 
         // make a new value table if the space limit is reached
         if(!reservation && reservation.error().code() == hedgehog::errc::VALUE_TABLE_NOT_ENOUGH_SPACE)
@@ -87,14 +78,15 @@ namespace hedgehog::db
             if(auto status = this->_rotate_value_table(); !status)
                 co_return hedgehog::error("Failed to rotate value table: " + status.error().to_string());
 
-            reservation = this->_current_value_table->get_write_reservation(value.size());
+            value_table = this->_current_value_table; // acquire ownership of the new value table
+            reservation = value_table->get_write_reservation(value.size());
         }
 
         if(!reservation)
             co_return hedgehog::error("Failed to reserve space in value table: " + reservation.error().to_string());
 
         // execute the actual writes
-        auto write_response = co_await this->_current_value_table->write_async(key, value, reservation.value(), executor);
+        auto write_response = co_await value_table->write_async(key, value, reservation.value(), executor);
 
         if(!write_response)
             co_return hedgehog::error("Failed to write value to value table: " + write_response.error().to_string());
@@ -102,6 +94,11 @@ namespace hedgehog::db
         this->_mem_index.add(key, write_response.value());
 
         co_return hedgehog::ok();
+    }
+
+    async::task<hedgehog::status> database::put_async(key_t key, byte_buffer_t&& value, const std::shared_ptr<async::executor_context>& executor)
+    {
+        co_return co_await this->put_async(key, value, executor);
     }
 
     async::task<expected<database::byte_buffer_t>> database::get_async(key_t key, const std::shared_ptr<async::executor_context>& executor)
@@ -123,7 +120,7 @@ namespace hedgehog::db
                     co_return hedgehog::error("Cannot find matching sorted index", errc::KEY_NOT_FOUND);
 
                 // acquire (temporary) ownership of the sorted_indices
-                auto sorted_indices = sorted_indices_it->second;
+                sorted_indices = sorted_indices_it->second;
             }
 
             // lookup for the key in every sorted index with same key
@@ -186,19 +183,22 @@ namespace hedgehog::db
 
     hedgehog::status database::_rotate_value_table()
     {
+        this->_logger.log("Rotating value table");
+
         auto new_value_table = value_table::make_new(this->_values_path, this->_current_value_table->id() + 1);
         if(!new_value_table)
             return hedgehog::error("Failed to create new value table: " + new_value_table.error().to_string());
 
-        this->_current_value_table->close_writes();
         this->_value_tables[this->_current_value_table->id()] = std::move(this->_current_value_table);
-
         this->_current_value_table = std::make_shared<value_table>(std::move(new_value_table.value()));
+
         return hedgehog::ok();
     }
 
     hedgehog::status database::_flush_mem_index()
     {
+        this->_logger.log("Flushing mem index to ", this->_indices_path, " with number of items: ", this->_mem_index.size());
+
         if(this->_mem_index.size() < this->_config.keys_in_mem_before_flush)
             return hedgehog::error(std::format("Not enough keys in mem_index to flush: {} < {}", this->_mem_index.size(), this->_config.keys_in_mem_before_flush));
 
@@ -229,8 +229,10 @@ namespace hedgehog::db
         return hedgehog::ok();
     }
 
-    void database::_compactation_job(const std::shared_ptr<async::executor_context>& executor)
+    hedgehog::status database::_compactation_job(const std::shared_ptr<async::executor_context>& executor)
     {
+        this->_logger.log("Starting compaction job");
+
         sorted_indices_map_t indices;
 
         // we'll need it for later to know how to update the database's indices
@@ -260,7 +262,6 @@ namespace hedgehog::db
                 auto second_last_it = last_it - 1;
 
                 auto maybe_compacted_table = co_await index_ops::two_way_merge_async(
-                    this->_indices_path,
                     this->_config.compactation_read_ahead_size_bytes,
                     **second_last_it,
                     **last_it,
@@ -316,16 +317,14 @@ namespace hedgehog::db
             bool done = wg.wait_for(this->_config.compacation_timeout);
 
             if(!done)
-            {
-                std::cerr << "Compactation is taking longer than timeout. Returning";
-                return;
-            };
+                return hedgehog::error("Compactation timeout.");
 
             if(!errors.empty())
             {
                 for(auto& error : errors)
                     std::cerr << "Compactation sub-task error: " + error.to_string();
-                return;
+
+                return hedgehog::error("Compactation error.");
             }
         }
 
@@ -347,6 +346,36 @@ namespace hedgehog::db
                                              std::move_iterator(new_sorted_index_vec.end()));
             }
         }
+
+        return hedgehog::ok();
+    }
+
+    hedgehog::status database::compact_sorted_indices(bool wait_sync, const std::shared_ptr<async::executor_context>& executor)
+    {
+        auto compactation_promise_ptr = std::make_shared<std::promise<hedgehog::status>>();
+        std::future<hedgehog::status> compactation_future = compactation_promise_ptr->get_future();
+
+        this->async_worker.submit(
+            [weak_db = this->weak_from_this(), promise = std::move(compactation_promise_ptr), executor]()
+            {
+                auto db = weak_db.lock();
+                if(!db)
+                {
+                    std::cerr << "Cannot start compactation job. DB not available. returning." << std::endl;
+                    return;
+                }
+
+                auto status = db->_compactation_job(executor);
+                if(!status)
+                    std::cerr << status.error().to_string() << std::endl;
+
+                promise->set_value(std::move(status));
+            });
+
+        if(!wait_sync)
+            return hedgehog::ok();
+
+        return compactation_future.get();
     }
 
 } // namespace hedgehog::db

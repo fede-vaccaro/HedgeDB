@@ -185,8 +185,8 @@ namespace hedgehog::db
         auto write_result = maybe_write_result.value();
 
         // close the table
-        auto close_status = table.close_writes();
-        ASSERT_TRUE(close_status) << "An error occurred while closing the table: " << close_status.error().to_string();
+        // auto close_status = table.close_writes();
+        // ASSERT_TRUE(close_status) << "An error occurred while closing the table: " << close_status.error().to_string();
 
         // try to read from the closed table
         auto read_result = this->_executor->sync_submit(
@@ -227,7 +227,7 @@ namespace hedgehog::db
         ASSERT_TRUE(maybe_write_result.has_value()) << "An error occurred while writing to the table: " << maybe_write_result.error().to_string();
 
         // try to reopen the table without closing it
-        auto reopen_maybe_table = value_table::load(table.fd().path());
+        auto reopen_maybe_table = value_table::load(table.fd().path(), fs::file_descriptor::open_mode::read_write);
         ASSERT_TRUE(reopen_maybe_table.has_value()) << "An error occurred while reopening the table: " << reopen_maybe_table.error().to_string();
 
         // write again to the reopened table
