@@ -31,6 +31,7 @@ namespace hedgehog::db
         size_t compactation_read_ahead_size_bytes = 16384;     // it will read from each table 16 KB at a time
         std::chrono::milliseconds compacation_timeout{120000}; // stop waiting if this timeout is due
         bool auto_compactation = true;                         // compactation is automatically triggered when the memtable reaches its limit
+        size_t max_pending_compactations = 16;                 // maximum number of pending compactations before the database stops accepting new writes: TODO: implement this
     };
 
     class database : public std::enable_shared_from_this<database>
@@ -72,10 +73,12 @@ namespace hedgehog::db
         async::task<hedgehog::status> put_async(key_t key, byte_buffer_t&& value, const std::shared_ptr<async::executor_context>& executor);
 
         async::task<hedgehog::status> remove_async(key_t key, const std::shared_ptr<async::executor_context>& executor);
-        hedgehog::status compact_sorted_indices(bool wait_sync, const std::shared_ptr<async::executor_context>& executor);
+        hedgehog::status compact_sorted_indices(bool wait_sync, bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor);
 
         static expected<std::shared_ptr<database>> make_new(const std::filesystem::path& base_path, const db_config& config);
         static expected<std::shared_ptr<database>> load(const std::filesystem::path& base_path);
+
+        [[nodiscard]] double get_read_amplification();
 
     private:
         database() = default;
@@ -83,7 +86,7 @@ namespace hedgehog::db
         [[nodiscard]] size_t _find_matching_partition_for_key(const key_t& key) const;
         hedgehog::status _rotate_value_table();
         hedgehog::status _flush_mem_index();
-        hedgehog::status _compactation_job(const std::shared_ptr<async::executor_context>& executor);
+        hedgehog::status _compactation_job(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor);
     };
 
 } // namespace hedgehog::db

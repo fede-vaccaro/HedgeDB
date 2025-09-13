@@ -88,7 +88,7 @@ namespace hedgehog::db
         write_wg.set(this->N_KEYS);
 
         db_config config;
-        config.auto_compactation = false;
+        config.auto_compactation = true;
         config.keys_in_mem_before_flush = this->MEMTABLE_CAPACITY;
 
         auto maybe_db = database::make_new(this->_base_path, config);
@@ -120,6 +120,16 @@ namespace hedgehog::db
         std::cout << "Total duration for insertion: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
         std::cout << "Average duration per insertion: " << (double)duration.count() / this->N_KEYS << " us" << std::endl;
         std::cout << "Insertion bandwidth: " << (double)this->N_KEYS * (this->PAYLOAD_SIZE / 1024.0) / (duration.count() / 1000.0) << " MB/s" << std::endl;
+
+        // compactation
+        t0 = std::chrono::high_resolution_clock::now();
+        auto compactation_status = db->compact_sorted_indices(true, true, this->_executor);
+        ASSERT_TRUE(compactation_status) << "An error occurred during compactation: " << compactation_status.error().to_string();
+        t1 = std::chrono::high_resolution_clock::now();
+        duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+        std::cout << "Total duration for compactation: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
+
+        EXPECT_DOUBLE_EQ(db->get_read_amplification(), 1.0) << "Read amplification should be 1.0 after compactation";
 
         async::working_group read_wg;
         read_wg.set(this->N_KEYS);
@@ -173,9 +183,9 @@ namespace hedgehog::db
         test_suite,
         database_test,
         testing::Combine(
-            testing::Values(8'000'000), // n keys
-            testing::Values(8192),      // payload size
-            testing::Values(2'000'000)  // memtable capacity
+            testing::Values(5'000'000), // n keys
+            testing::Values(1024),      // payload size
+            testing::Values(1'000'000)  // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)
         {

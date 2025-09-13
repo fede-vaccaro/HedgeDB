@@ -108,6 +108,7 @@ namespace hedgehog::fs
                     case open_mode::read_only:
                         if(file_size != expected_size.value())
                             return hedgehog::error("Invalid file size! " + std::to_string(file_size) + " != " + std::to_string(expected_size.value()));
+                        break;
                     case open_mode::write_new:
                     case open_mode::read_write_new:
                         auto res = fallocate(fd, 0, 0, expected_size.value());
@@ -173,6 +174,7 @@ namespace hedgehog::fs
                     case open_mode::read_only:
                         if(file_size != expected_size.value())
                             co_return hedgehog::error("File size different than expected: " + std::to_string(file_size) + " != " + std::to_string(expected_size.value()));
+                        break;
                     case open_mode::write_new:
                     case open_mode::read_write_new:
                         auto res = co_await executor->submit_request(async::fallocate_request{

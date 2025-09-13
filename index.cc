@@ -603,26 +603,26 @@ namespace hedgehog::db
                 .footer_start_offset = meta_index_end_pos,
             };
 
+       
         auto lhs_view = async::file_reader(
             left._fd,
             {
-                .start_offset = 0,
-                .end_offset = left._footer.index_end_offset,
+                .start_offset=0,
+                .end_offset=left._footer.index_end_offset,
             },
             executor);
 
         auto rhs_view = async::file_reader(
             right._fd,
             {
-                .start_offset = 0,
-                .end_offset = right._footer.index_end_offset,
+                .start_offset=0,
+                .end_offset=right._footer.index_end_offset,
             },
             executor);
 
-        auto new_path_id = std::max(left.get_index_id(), right.get_index_id()) + 1;
-        auto new_path = left.get_path().parent_path() / (left.get_path().stem().string() + std::format(".{}", new_path_id));
+        auto new_path = with_extension(std::min(left._fd.path(), right._fd.path()).string(), ".tmp");
 
-        auto fd_maybe = co_await fs::file_descriptor::from_path_async(new_path, fs::file_descriptor::open_mode::write_new, executor, false, footer_start_offset + sizeof(sorted_index_footer));
+        auto fd_maybe = co_await fs::file_descriptor::from_path_async(new_path, fs::file_descriptor::open_mode::write_new, executor, false);
 
         if(!fd_maybe.has_value())
             co_return hedgehog::error("Failed to create file descriptor for merged index at " + new_path.string() + ": " + fd_maybe.error().to_string());

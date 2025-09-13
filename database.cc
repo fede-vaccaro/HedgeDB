@@ -65,7 +65,7 @@ namespace hedgehog::db
 
             // trigger compactation
             if(this->_config.auto_compactation)
-                this->compact_sorted_indices(false, executor);
+                this->compact_sorted_indices(false, false, executor);
         }
 
         // first it tries writing the data to the value table
@@ -219,7 +219,7 @@ namespace hedgehog::db
                 auto prefix = new_sorted_index.upper_bound();
 
                 auto sorted_index_ptr = std::make_shared<sorted_index>(std::move(new_sorted_index));
-                this->_sorted_indices[prefix].emplace_back(std::move(sorted_index_ptr)); // todo: there might be a race condition between this and the compactation job
+                this->_sorted_indices[prefix].emplace_back(std::move(sorted_index_ptr));
             }
         }
 
@@ -229,21 +229,21 @@ namespace hedgehog::db
         return hedgehog::ok();
     }
 
-    hedgehog::status database::_compactation_job(const std::shared_ptr<async::executor_context>& executor)
+    hedgehog::status database::_compactation_job(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor)
     {
         this->_logger.log("Starting compaction job");
 
-        sorted_indices_map_t indices;
-
-        // we'll need it for later to know how to update the database's indices
-        std::unordered_map<size_t, size_t> initial_vec_sizes;
-        for(auto& [prefix, vec] : indices)
-            initial_vec_sizes.emplace(prefix, indices.size());
+        sorted_indices_map_t indices_local_copy;
 
         {
             std::lock_guard lk(this->_sorted_index_mutex);
-            indices = this->_sorted_indices;
+            indices_local_copy = this->_sorted_indices;
         }
+
+        // we'll need it for later to know how to update the database's indices
+        std::unordered_map<size_t, size_t> initial_vec_sizes;
+        for(auto& [prefix, vec] : indices_local_copy)
+            initial_vec_sizes.emplace(prefix, vec.size());
 
         bool stability_reached = false;
 
@@ -254,7 +254,7 @@ namespace hedgehog::db
             std::vector<hedgehog::error> errors;
             async::working_group wg;
 
-            wg.set(indices.size());
+            wg.set(indices_local_copy.size());
 
             auto make_compactation_sub_task = [this, &wg, &executor, &errors](std::vector<sorted_index_ptr_t>& index_vec) -> async::task<void>
             {
@@ -286,7 +286,7 @@ namespace hedgehog::db
                 wg.decr();
             };
 
-            for(auto& [prefix, index_vec] : indices)
+            for(auto& [prefix, index_vec] : indices_local_copy)
             {
                 if(index_vec.size() <= 1) // nothing to compact
                 {
@@ -298,13 +298,13 @@ namespace hedgehog::db
                     index_vec,
                     [](const sorted_index_ptr_t& a, const sorted_index_ptr_t& b)
                     {
-                        return a->size() >= b->size();
+                        return a->size() > b->size();
                     });
 
                 auto lhs_size = static_cast<double>(index_vec[index_vec.size() - 1]->size());
                 auto rhs_size = static_cast<double>(index_vec[index_vec.size() - 2]->size());
 
-                if(lhs_size / rhs_size <= this->_config.compactation_size_ratio)
+                if(!ignore_ratio && lhs_size / rhs_size <= this->_config.compactation_size_ratio)
                 {
                     wg.decr();
                     continue;
@@ -322,7 +322,7 @@ namespace hedgehog::db
             if(!errors.empty())
             {
                 for(auto& error : errors)
-                    std::cerr << "Compactation sub-task error: " + error.to_string();
+                    std::cerr << "Compactation sub-task error: " + error.to_string() << std::endl;
 
                 return hedgehog::error("Compactation error.");
             }
@@ -332,7 +332,7 @@ namespace hedgehog::db
         {
             std::lock_guard lk(this->_sorted_index_mutex);
 
-            for(auto& [prefix, new_sorted_index_vec] : indices) // remember that new_sorted_index_vecs hold the compacted sorted indices
+            for(auto& [prefix, new_sorted_index_vec] : indices_local_copy) // remember that new_sorted_index_vecs hold the compacted sorted indices
             {
                 auto& db_sorted_indices_vec = this->_sorted_indices[prefix];
 
@@ -350,13 +350,13 @@ namespace hedgehog::db
         return hedgehog::ok();
     }
 
-    hedgehog::status database::compact_sorted_indices(bool wait_sync, const std::shared_ptr<async::executor_context>& executor)
+    hedgehog::status database::compact_sorted_indices(bool wait_sync, bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor)
     {
         auto compactation_promise_ptr = std::make_shared<std::promise<hedgehog::status>>();
         std::future<hedgehog::status> compactation_future = compactation_promise_ptr->get_future();
 
         this->async_worker.submit(
-            [weak_db = this->weak_from_this(), promise = std::move(compactation_promise_ptr), executor]()
+            [weak_db = this->weak_from_this(), promise = std::move(compactation_promise_ptr), executor, ignore_ratio]()
             {
                 auto db = weak_db.lock();
                 if(!db)
@@ -365,7 +365,7 @@ namespace hedgehog::db
                     return;
                 }
 
-                auto status = db->_compactation_job(executor);
+                auto status = db->_compactation_job(ignore_ratio, executor);
                 if(!status)
                     std::cerr << status.error().to_string() << std::endl;
 
@@ -376,6 +376,17 @@ namespace hedgehog::db
             return hedgehog::ok();
 
         return compactation_future.get();
+    }
+
+    [[nodiscard]] double database::get_read_amplification()
+    {
+        std::lock_guard lk(this->_sorted_index_mutex);
+        double total_read_amplification = 0.0;
+
+        for(const auto& [prefix, indices] : this->_sorted_indices)
+            total_read_amplification += indices.size();
+
+        return total_read_amplification / this->_sorted_indices.size();
     }
 
 } // namespace hedgehog::db
