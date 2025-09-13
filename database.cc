@@ -247,7 +247,7 @@ namespace hedgehog::db
 
         // todo: the mem indices contained in _gc_mem_indices should be flushed too, maybe would be better one at a time to avoid working with large vectors
 
-        auto partitioned_sorted_indices = index_ops::merge_and_flush(this->_indices_path, std::move(vec_memtable), this->_config.num_partition_exponent, this->_flush_iteration++);
+        auto partitioned_sorted_indices = index_ops::flush_mem_index(this->_indices_path, std::move(vec_memtable), this->_config.num_partition_exponent, this->_flush_iteration++);
 
         if(!partitioned_sorted_indices)
             return hedgehog::error("An error occurred while flushing the mem index: " + partitioned_sorted_indices.error().to_string());

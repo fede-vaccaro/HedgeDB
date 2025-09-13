@@ -546,6 +546,11 @@ namespace uuids
          return uuid{ data };
       }
 
+      [[nodiscard]] std::string to_string() const
+      {
+         return uuids::to_string(*this);
+      }
+
    private:
       std::array<value_type, 16> data{ { 0 } };
 

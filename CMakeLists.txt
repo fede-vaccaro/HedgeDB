@@ -65,9 +65,14 @@ target_link_libraries(executor_read_test uring)
 add_executable(executor_test ${IO_EXECUTOR_SRCS} test/io_executor.spec.cc)
 target_link_libraries(executor_test uring gtest gtest_main)
 
-# index tests
+# index (merge) tests
 add_executable(index_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index.spec.cc)
 target_link_libraries(index_test gtest gtest_main uring)
+
+# index (delete and merge) tests
+add_executable(index_delete_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_delete.spec.cc)
+target_link_libraries(index_delete_test gtest gtest_main uring)
+
 
 # paginated_view tests
 add_executable(file_reader_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/file_reader.spec.cc)

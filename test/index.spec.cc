@@ -15,18 +15,6 @@ uint32_t uuid_fake_size(const uuids::uuid& uuid)
     return uuids_as_std_array[0] + (uuids_as_std_array[1] % 125); // Just a fake size based on the first two bytes
 };
 
-struct test_configuration
-{
-    size_t number_of_keys_to_push;
-    size_t num_partition_exponent;
-    size_t num_runs;
-
-    std::ostream& operator<<(std::ostream& o)
-    {
-        o << "number_of_keys_to_push: " << number_of_keys_to_push << "; num_partition_exponent: " << num_partition_exponent << "; num runs: " << num_runs << "\n";
-        return o;
-    }
-};
 
 struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, size_t>>
 {
@@ -71,7 +59,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
             auto vec_memtable = std::vector<hedgehog::db::mem_index>{};
             vec_memtable.emplace_back(std::move(memtable));
 
-            auto partitioned_sorted_indices = hedgehog::db::index_ops::merge_and_flush(this->_base_path, std::move(vec_memtable), NUM_PARTITION_EXPONENT, i);
+            auto partitioned_sorted_indices = hedgehog::db::index_ops::flush_mem_index(this->_base_path, std::move(vec_memtable), NUM_PARTITION_EXPONENT, i);
 
             if(!partitioned_sorted_indices)
             {

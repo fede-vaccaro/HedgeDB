@@ -33,7 +33,7 @@ namespace hedgehog::async
         uint8_t _data[sizeof(RETURN_VALUE)];
         RETURN_VALUE* _value;
         std::coroutine_handle<> _continuation;
-        
+
         int id = counter++;
 
         TASK get_return_object()
@@ -57,7 +57,8 @@ namespace hedgehog::async
             this->_value = new(this->_data) RETURN_VALUE{std::move(value)};
         }
 
-        void unhandled_exception() {
+        void unhandled_exception()
+        {
             throw;
         }
     };
@@ -90,7 +91,7 @@ namespace hedgehog::async
         {
         }
 
-        void unhandled_exception() {}
+        void unhandled_exception() { throw; }
     };
 
     template <typename RETURN_VALUE>
