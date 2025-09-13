@@ -58,3 +58,6 @@ target_link_libraries(
     asio_test
     uring
 )
+
+add_executable(executor_test io_executor.cc mailbox_impl.cc executor_test.cc)
+target_link_libraries(executor_test uring)
