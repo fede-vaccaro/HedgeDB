@@ -6,7 +6,7 @@
 
 #include "fs.hpp"
 #include "io_executor.h"
-namespace hedgehog::async
+namespace hedge::async
 {
     struct file_reader_config
     {
@@ -33,4 +33,4 @@ namespace hedgehog::async
         void reset_it(size_t it);
     };
 
-} // namespace hedgehog::async
+} // namespace hedge::async

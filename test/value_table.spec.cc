@@ -9,7 +9,7 @@
 #include "../io_executor.h"
 #include "../value_table.h"
 
-namespace hedgehog::db
+namespace hedge::db
 {
 
     struct value_table_test : public ::testing::Test
@@ -21,7 +21,7 @@ namespace hedgehog::db
 
             std::filesystem::create_directories(this->_base_path);
 
-            this->_executor = std::make_shared<hedgehog::async::executor_context>(128);
+            this->_executor = std::make_shared<hedge::async::executor_context>(128);
         }
 
         void TearDown() override
@@ -58,7 +58,7 @@ namespace hedgehog::db
             ASSERT_EQ(output_file.binaries, value);
         }
 
-        std::shared_ptr<hedgehog::async::executor_context> _executor;
+        std::shared_ptr<hedge::async::executor_context> _executor;
 
         size_t seed{107279581};
         std::mt19937 _generator{seed};
@@ -125,7 +125,7 @@ namespace hedgehog::db
         std::vector<std::vector<uint8_t>> values;
         std::vector<value_table::write_reservation> reservations;
         std::vector<key_t> keys;
-        std::vector<hedgehog::value_ptr_t> write_results;
+        std::vector<hedge::value_ptr_t> write_results;
 
         for(auto i = 0UL; i < value_table::TABLE_MAX_SIZE_BYTES / payload_size; ++i)
         {
@@ -300,7 +300,7 @@ namespace hedgehog::db
         std::vector<std::vector<uint8_t>> values;
         std::vector<value_table::write_reservation> reservations;
         std::vector<key_t> keys;
-        std::vector<hedgehog::value_ptr_t> write_results;
+        std::vector<hedge::value_ptr_t> write_results;
 
         auto constexpr N_ITEMS = 10;
 
@@ -378,7 +378,7 @@ namespace hedgehog::db
         std::vector<std::vector<uint8_t>> values;
         std::vector<value_table::write_reservation> reservations;
         std::vector<key_t> keys;
-        std::vector<hedgehog::value_ptr_t> write_results;
+        std::vector<hedge::value_ptr_t> write_results;
 
         auto constexpr N_ITEMS = 10;
 
@@ -470,4 +470,4 @@ namespace hedgehog::db
         EXPECT_EQ(values, readback_values) << "Read values do not match expected values after deletion";
     }
 
-} // namespace hedgehog::db
+} // namespace hedge::db

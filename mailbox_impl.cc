@@ -7,7 +7,7 @@
 
 #include "mailbox_impl.h"
 
-namespace hedgehog::async
+namespace hedge::async
 {
 
     constexpr size_t PAGE_SIZE = 4096;
@@ -202,4 +202,4 @@ namespace hedgehog::async
         return true;
     }
 
-} // namespace hedgehog::async
+} // namespace hedge::async

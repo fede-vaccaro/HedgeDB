@@ -9,18 +9,18 @@
 #include "mailbox_impl.h"
 #include "value_table.h"
 
-namespace hedgehog::db
+namespace hedge::db
 {
     expected<value_table::write_reservation> value_table::get_write_reservation(size_t file_size)
     {
         if(file_size > value_table::MAX_FILE_SIZE)
-            return hedgehog::error(std::format("Requested file size ({}) is larger than max allowed ({})", file_size, value_table::MAX_FILE_SIZE));
+            return hedge::error(std::format("Requested file size ({}) is larger than max allowed ({})", file_size, value_table::MAX_FILE_SIZE));
 
         auto file_w_header_size = file_size + sizeof(file_header);
 
         if(this->_current_offset + file_w_header_size > value_table::TABLE_MAX_SIZE_BYTES)
         {
-            return hedgehog::error(
+            return hedge::error(
                 std::format("Adding this file (of size: {}) to this table will exceed maximum table size ({} > {})",
                             file_w_header_size,
                             this->_current_offset + file_w_header_size,
@@ -39,7 +39,7 @@ namespace hedgehog::db
         return value_table::write_reservation{ret_offset};
     }
 
-    async::task<expected<hedgehog::value_ptr_t>> value_table::write_async(key_t key, const std::vector<uint8_t>& value, const value_table::write_reservation& reservation, const std::shared_ptr<async::executor_context>& executor)
+    async::task<expected<hedge::value_ptr_t>> value_table::write_async(key_t key, const std::vector<uint8_t>& value, const value_table::write_reservation& reservation, const std::shared_ptr<async::executor_context>& executor)
     {
         auto header = file_header{
             .separator = FILE_SEPARATOR,
@@ -64,10 +64,10 @@ namespace hedgehog::db
         });
 
         if(write_value_response.error_code != 0)
-            co_return hedgehog::error(std::format("Failed to write value to value table (path: {}): {}", this->path().string(), strerror(-write_value_response.error_code)));
+            co_return hedge::error(std::format("Failed to write value to value table (path: {}): {}", this->path().string(), strerror(-write_value_response.error_code)));
 
         if(write_value_response.bytes_written != value_with_header.size())
-            co_return hedgehog::error(std::format("Failed to write value to value table (path: {}): expected {}, got {}", this->path().string(), value_with_header.size(), write_value_response.bytes_written));
+            co_return hedge::error(std::format("Failed to write value to value table (path: {}): expected {}, got {}", this->path().string(), value_with_header.size(), write_value_response.bytes_written));
 
         // update infos
         auto& info = this->_info();
@@ -75,7 +75,7 @@ namespace hedgehog::db
         info.items_count++;
         info.occupied_space += value.size() + sizeof(file_header);
 
-        co_return hedgehog::value_ptr_t(
+        co_return hedge::value_ptr_t(
             reservation.offset,
             static_cast<uint32_t>(value.size() + sizeof(file_header)),
             this->_unique_id);
@@ -85,7 +85,7 @@ namespace hedgehog::db
     {
         if(file_offset + file_size > this->_current_offset)
         {
-            co_return hedgehog::error(std::format("Requested file offset ({}) + size ({}) exceeds current table offset ({})",
+            co_return hedge::error(std::format("Requested file offset ({}) + size ({}) exceeds current table offset ({})",
                                                   file_offset,
                                                   file_size,
                                                   this->_current_offset));
@@ -99,14 +99,14 @@ namespace hedgehog::db
 
         if(read_response.error_code != 0)
         {
-            co_return hedgehog::error(std::format("Failed to read file from value table (path: {}): {}",
+            co_return hedge::error(std::format("Failed to read file from value table (path: {}): {}",
                                                   this->path().string(),
                                                   strerror(-read_response.error_code)));
         }
 
         if(read_response.bytes_read != file_size)
         {
-            co_return hedgehog::error(std::format("Failed to read file from value table (path: {}): expected {}, got {}",
+            co_return hedge::error(std::format("Failed to read file from value table (path: {}): expected {}, got {}",
                                                   this->path().string(),
                                                   file_size,
                                                   read_response.bytes_read));
@@ -117,23 +117,23 @@ namespace hedgehog::db
 
         if(!skip_delete_check && header.deleted_flag)
         {
-            co_return hedgehog::error(std::format("File with key '{}' is marked as deleted in value table (path: {}) at offset {}",
+            co_return hedge::error(std::format("File with key '{}' is marked as deleted in value table (path: {}) at offset {}",
                                                   uuids::to_string(header.key),
                                                   this->path().string(),
                                                   file_offset),
-                                      hedgehog::errc::DELETED);
+                                      hedge::errc::DELETED);
         }
 
         if(header.separator != FILE_SEPARATOR)
         {
-            co_return hedgehog::error(std::format("Invalid file header separator in value table (path: {}) at offset {}",
+            co_return hedge::error(std::format("Invalid file header separator in value table (path: {}) at offset {}",
                                                   this->path().string(),
                                                   file_offset));
         }
 
         if(header.file_size != file_size - sizeof(file_header))
         {
-            co_return hedgehog::error(std::format("Invalid file size in value table (path: {}): expected {}, got {}",
+            co_return hedge::error(std::format("Invalid file size in value table (path: {}): expected {}, got {}",
                                                   this->path().string(),
                                                   header.file_size,
                                                   file_size - sizeof(file_header)));
@@ -147,13 +147,13 @@ namespace hedgehog::db
         };
     }
 
-    hedgehog::expected<value_table> value_table::make_new(const std::filesystem::path& base_path, uint32_t id, bool preallocate)
+    hedge::expected<value_table> value_table::make_new(const std::filesystem::path& base_path, uint32_t id, bool preallocate)
     {
         auto file_path = base_path / std::to_string(id);
         file_path = with_extension(file_path, TABLE_FILE_EXTENSION);
 
         if(std::filesystem::exists(file_path))
-            return hedgehog::error("File already exists: " + file_path.string());
+            return hedge::error("File already exists: " + file_path.string());
 
         auto file_desc = fs::file::from_path(file_path,
                                                         fs::file::open_mode::read_write_new,
@@ -161,14 +161,14 @@ namespace hedgehog::db
                                                         preallocate ? std::optional{value_table::TABLE_ACTUAL_MAX_SIZE} : std::nullopt);
 
         if(!file_desc)
-            return hedgehog::error("Failed to create file descriptor: " + file_desc.error().to_string());
+            return hedge::error("Failed to create file descriptor: " + file_desc.error().to_string());
 
         auto tmp_mmap = fs::non_owning_mmap::from_fd_wrapper(
             file_desc.value(),
             value_table::_page_align_for_mmap());
 
         if(!tmp_mmap.has_value())
-            return hedgehog::error("Failed to create temporary mmap: " + tmp_mmap.error().to_string());
+            return hedge::error("Failed to create temporary mmap: " + tmp_mmap.error().to_string());
 
         return value_table{
             id,
@@ -177,15 +177,15 @@ namespace hedgehog::db
             std::move(tmp_mmap.value())};
     }
 
-    hedgehog::expected<value_table> value_table::load(const std::filesystem::path& path, fs::file::open_mode open_mode)
+    hedge::expected<value_table> value_table::load(const std::filesystem::path& path, fs::file::open_mode open_mode)
     {
         if(!std::filesystem::exists(path))
-            return hedgehog::error("File does not exist: " + path.string());
+            return hedge::error("File does not exist: " + path.string());
 
         auto file_descriptor = fs::file::from_path(path, open_mode, false);
 
         if(!file_descriptor)
-            return hedgehog::error("Failed to open file descriptor: " + file_descriptor.error().to_string());
+            return hedge::error("Failed to open file descriptor: " + file_descriptor.error().to_string());
 
         auto table_id = std::stoul(path.stem().string());
 
@@ -209,10 +209,10 @@ namespace hedgehog::db
         // std::unique_lock<std::mutex> try_lock(*this->_delete_mutex, std::try_to_lock); 
 
         // if(!try_lock.owns_lock())
-            // co_return hedgehog::error("Cannot delete object, garbage collection is running and the table is locked", errc::BUSY);
+            // co_return hedge::error("Cannot delete object, garbage collection is running and the table is locked", errc::BUSY);
 
         if(offset + sizeof(file_header) > this->_current_offset)
-            co_return hedgehog::error(std::format("Requested file offset ({}) + size ({}) exceeds current table offset ({})",
+            co_return hedge::error(std::format("Requested file offset ({}) + size ({}) exceeds current table offset ({})",
                                                   offset,
                                                   sizeof(file_header),
                                                   this->_current_offset));
@@ -225,14 +225,14 @@ namespace hedgehog::db
 
         if(read_response.error_code != 0)
         {
-            co_return hedgehog::error(std::format("Failed to read file header from value table (path: {}): {}",
+            co_return hedge::error(std::format("Failed to read file header from value table (path: {}): {}",
                                                   this->path().string(),
                                                   strerror(-read_response.error_code)));
         }
 
         if(read_response.bytes_read != sizeof(file_header))
         {
-            co_return hedgehog::error(std::format("Failed to read file header from value table (path: {}): expected {}, got {}",
+            co_return hedge::error(std::format("Failed to read file header from value table (path: {}): expected {}, got {}",
                                                   this->path().string(),
                                                   sizeof(file_header),
                                                   read_response.bytes_read));
@@ -243,21 +243,21 @@ namespace hedgehog::db
 
         if(header.separator != FILE_SEPARATOR)
         {
-            co_return hedgehog::error(std::format("Invalid file header separator in value table (path: {}) at offset {}",
+            co_return hedge::error(std::format("Invalid file header separator in value table (path: {}) at offset {}",
                                                   this->path().string(),
                                                   offset));
         }
 
         if(header.key != key)
         {
-            co_return hedgehog::error(
+            co_return hedge::error(
                 std::format("Key mismatch on delete: expected {}, got {}",
                             uuids::to_string(key),
                             uuids::to_string(header.key)));
         }
 
         if(header.deleted_flag)
-            co_return hedgehog::ok();
+            co_return hedge::ok();
 
         header.deleted_flag = true;
 
@@ -276,19 +276,19 @@ namespace hedgehog::db
 
         if(write_response.error_code != 0)
         {
-            co_return hedgehog::error(std::format("Failed to write delete marker to value table (path: {}): {}",
+            co_return hedge::error(std::format("Failed to write delete marker to value table (path: {}): {}",
                                                   this->path().string(),
                                                   strerror(-write_response.error_code)));
         }
 
         if(write_response.bytes_written != sizeof(file_header))
         {
-            co_return hedgehog::error(std::format("Failed to write delete marker to value table (path: {}): expected {}, got {}",
+            co_return hedge::error(std::format("Failed to write delete marker to value table (path: {}): expected {}, got {}",
                                                   this->path().string(),
                                                   sizeof(file_header),
                                                   write_response.bytes_written));
         }
-        co_return hedgehog::ok();
+        co_return hedge::ok();
     }
 
     value_table_info& value_table::_info()
@@ -327,14 +327,14 @@ namespace hedgehog::db
 
         if(get_next_header.error_code != 0)
         {
-            co_return hedgehog::error(std::format("Failed to read next file header from value table (path: {}): {}",
+            co_return hedge::error(std::format("Failed to read next file header from value table (path: {}): {}",
                                                   this->path().string(),
                                                   strerror(-get_next_header.error_code)));
         }
 
         if(get_next_header.bytes_read != sizeof(file_header))
         {
-            co_return hedgehog::error(std::format("Failed to read next file header from value table (path: {}): expected {}, got {}",
+            co_return hedge::error(std::format("Failed to read next file header from value table (path: {}): expected {}, got {}",
                                                   this->path().string(),
                                                   sizeof(file_header),
                                                   get_next_header.bytes_read));
@@ -352,7 +352,7 @@ namespace hedgehog::db
 
         if(next_header.separator != FILE_SEPARATOR)
         {
-            co_return hedgehog::error(std::format("Invalid next file header separator in value table (path: {}) at offset {}",
+            co_return hedge::error(std::format("Invalid next file header separator in value table (path: {}) at offset {}",
                                                   this->path().string(),
                                                   next_header_offset));
         }
@@ -376,7 +376,7 @@ namespace hedgehog::db
 
         if(get_first_header.error_code != 0)
         {
-            co_return hedgehog::error(std::format("Failed to read next file header from value table (path: {}): {}",
+            co_return hedge::error(std::format("Failed to read next file header from value table (path: {}): {}",
                                                   this->path().string(),
                                                   strerror(-get_first_header.error_code)));
         }
@@ -389,4 +389,4 @@ namespace hedgehog::db
         co_return {header, std::move(lk)};
     }
 
-} // namespace hedgehog::db
+} // namespace hedge::db

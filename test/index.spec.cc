@@ -45,7 +45,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
             if(i == 1)
                 n_keys = std::min(n_keys, 20000000UL); // for the second run, limit to 20000000 keys
 
-            auto memtable = hedgehog::db::mem_index{};
+            auto memtable = hedge::db::mem_index{};
 
             memtable.reserve(n_keys);
 
@@ -56,10 +56,10 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
                 memtable.put(uuid, {static_cast<uint64_t>(j), uuid_fake_size(uuid), 0});
             }
 
-            auto vec_memtable = std::vector<hedgehog::db::mem_index>{};
+            auto vec_memtable = std::vector<hedge::db::mem_index>{};
             vec_memtable.emplace_back(std::move(memtable));
 
-            auto partitioned_sorted_indices = hedgehog::db::index_ops::flush_mem_index(this->_base_path, std::move(vec_memtable), NUM_PARTITION_EXPONENT, i);
+            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, std::move(vec_memtable), NUM_PARTITION_EXPONENT, i);
 
             if(!partitioned_sorted_indices)
             {
@@ -75,7 +75,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
             }
         }
 
-        this->_executor = std::make_shared<hedgehog::async::executor_context>(128);
+        this->_executor = std::make_shared<hedge::async::executor_context>(128);
     }
 
     void TearDown() override
@@ -102,7 +102,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
             std::back_inserter(result),
             [prefix, this](const uuids::uuid& uuid)
             {
-                auto matching_partition = hedgehog::find_partition_prefix_for_key(uuid, (1 << 16) / (1 << this->NUM_PARTITION_EXPONENT));
+                auto matching_partition = hedge::find_partition_prefix_for_key(uuid, (1 << 16) / (1 << this->NUM_PARTITION_EXPONENT));
                 return matching_partition == prefix;
             });
 
@@ -111,7 +111,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
 
     [[nodiscard]] uint16_t get_partition_prefix(const uuids::uuid& uuid) const
     {
-        return hedgehog::find_partition_prefix_for_key(uuid, (1 << 16) / (1 << this->NUM_PARTITION_EXPONENT));
+        return hedge::find_partition_prefix_for_key(uuid, (1 << 16) / (1 << this->NUM_PARTITION_EXPONENT));
     }
 
     size_t NUM_PARTITION_EXPONENT = 0; // 2^4 = 16 partitions
@@ -120,9 +120,9 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
     size_t READ_AHEAD_SIZE_BYTES = 4096;
 
     std::vector<uuids::uuid> _uuids;
-    std::map<uint16_t, std::vector<hedgehog::db::sorted_index>> _sorted_indices;
+    std::map<uint16_t, std::vector<hedge::db::sorted_index>> _sorted_indices;
     std::string _base_path = "/tmp/hh/test";
-    std::shared_ptr<hedgehog::async::executor_context> _executor{};
+    std::shared_ptr<hedge::async::executor_context> _executor{};
 
     size_t seed{107279581};
     std::mt19937 generator{seed};
@@ -132,7 +132,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
 
 TEST_P(sorted_string_merge_test, DISABLED_test_merge_unified)
 {
-    std::map<uint16_t, hedgehog::db::sorted_index> unified_sorted_indices;
+    std::map<uint16_t, hedge::db::sorted_index> unified_sorted_indices;
 
     std::chrono::microseconds total_duration{0};
     for(auto& [prefix, sorted_indices] : this->_sorted_indices)
@@ -154,18 +154,18 @@ TEST_P(sorted_string_merge_test, DISABLED_test_merge_unified)
 
         std::ranges::sort(
             sorted_indices,
-            [](const hedgehog::db::sorted_index& a, const hedgehog::db::sorted_index& b)
+            [](const hedge::db::sorted_index& a, const hedge::db::sorted_index& b)
             {
                 return a.size() >= b.size();
             });
 
-        auto merge_config = hedgehog::db::index_ops::merge_config{
+        auto merge_config = hedge::db::index_ops::merge_config{
             .read_ahead_size = this->READ_AHEAD_SIZE_BYTES,
             .new_index_id = this->N_RUNS + 1,
             .base_path = this->_base_path};
 
         auto t0 = std::chrono::high_resolution_clock::now();
-        auto maybe_new_index = hedgehog::db::index_ops::two_way_merge(
+        auto maybe_new_index = hedge::db::index_ops::two_way_merge(
             merge_config,
             sorted_indices[0],
             sorted_indices[1],
@@ -205,31 +205,31 @@ TEST_P(sorted_string_merge_test, DISABLED_test_merge_unified)
 
 TEST_P(sorted_string_merge_test, test_merge_unified_async)
 {
-    using sorted_indices_map_t = std::map<uint16_t, hedgehog::db::sorted_index>;
+    using sorted_indices_map_t = std::map<uint16_t, hedge::db::sorted_index>;
 
     sorted_indices_map_t unified_sorted_indices;
 
-    std::vector<std::future<hedgehog::status>> futures;
-    hedgehog::async::working_group merge_wg;
+    std::vector<std::future<hedge::status>> futures;
+    hedge::async::working_group merge_wg;
 
     auto merge_task_factory =
         [](
-            const hedgehog::db::sorted_index& left,
-            const hedgehog::db::sorted_index& right,
-            std::vector<std::future<hedgehog::status>>& futures,
-            std::map<uint16_t, hedgehog::db::sorted_index>& index_map,
-            hedgehog::async::working_group& wg,
-            auto* _this) -> hedgehog::async::task<void>
+            const hedge::db::sorted_index& left,
+            const hedge::db::sorted_index& right,
+            std::vector<std::future<hedge::status>>& futures,
+            std::map<uint16_t, hedge::db::sorted_index>& index_map,
+            hedge::async::working_group& wg,
+            auto* _this) -> hedge::async::task<void>
     {
-        auto promise = std::promise<hedgehog::status>{};
+        auto promise = std::promise<hedge::status>{};
         futures.emplace_back(promise.get_future());
 
-        auto merge_config = hedgehog::db::index_ops::merge_config{
+        auto merge_config = hedge::db::index_ops::merge_config{
             .read_ahead_size = _this->READ_AHEAD_SIZE_BYTES,
             .new_index_id = _this->N_RUNS + 1,
             .base_path = _this->_base_path};
 
-        auto new_index = co_await hedgehog::db::index_ops::two_way_merge_async(
+        auto new_index = co_await hedge::db::index_ops::two_way_merge_async(
             merge_config,
             left,
             right,
@@ -241,7 +241,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
         auto prefix = new_index.value().upper_bound();
         index_map.insert({prefix, std::move(new_index.value())});
 
-        promise.set_value(hedgehog::ok());
+        promise.set_value(hedge::ok());
 
         wg.decr();
     };
@@ -264,7 +264,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
 
         std::ranges::sort(
             sorted_indices,
-            [](const hedgehog::db::sorted_index& a, const hedgehog::db::sorted_index& b)
+            [](const hedge::db::sorted_index& a, const hedge::db::sorted_index& b)
             {
                 return a.size() >= b.size();
             });
@@ -288,7 +288,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
         ASSERT_TRUE(status) << "Expected successful merge of two sorted indices; Error: " << status.error().to_string();
     }
 
-    futures = std::vector<std::future<hedgehog::status>>{}; // clear some memory
+    futures = std::vector<std::future<hedge::status>>{}; // clear some memory
 
     auto t1 = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
@@ -298,7 +298,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
     std::cout << "Total duration for merging: " << total_duration_ms << " ms" << std::endl;
     std::cout << "Average duration per merge: " << (static_cast<double>(total_duration_ms) / this->_sorted_indices.size()) << " ms" << std::endl;
 
-    hedgehog::async::working_group query_wg;
+    hedge::async::working_group query_wg;
 
     query_wg.set(this->_uuids.size());
 
@@ -306,9 +306,9 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
 
     auto lookup_task_factory = [&](
                                    const uuids::uuid& uuid,
-                                   const hedgehog::db::sorted_index& index,
-                                   const std::shared_ptr<hedgehog::async::executor_context>& executor,
-                                   hedgehog::async::working_group& wg) -> hedgehog::async::task<void>
+                                   const hedge::db::sorted_index& index,
+                                   const std::shared_ptr<hedge::async::executor_context>& executor,
+                                   hedge::async::working_group& wg) -> hedge::async::task<void>
     {
         seen_uuids.insert(uuid);
 

@@ -31,7 +31,7 @@
 #include "bloom_filter.h"
 #include "db.h"
 
-namespace hedgehog::db
+namespace hedge::db
 {
     static constexpr std::string_view INDEX_EXT = ".index.ss";
     static constexpr std::string_view VALUE_EXT = ".values.v";
@@ -48,16 +48,16 @@ namespace hedgehog::db
         this->_tombstone_log = std::ofstream(this->_tombstone_path, std::ios::binary | std::ios::app);
     }
 
-    hedgehog::status tombstone::add(key_t key)
+    hedge::status tombstone::add(key_t key)
     {
         this->_keys_cache.insert(key);
 
         this->_tombstone_log.write(reinterpret_cast<const char*>(&key), sizeof(key_t));
 
         if(!this->_tombstone_log.good())
-            return hedgehog::error("an error occurred with tombstone log");
+            return hedge::error("an error occurred with tombstone log");
 
-        return hedgehog::ok();
+        return hedge::ok();
     }
 
     bool tombstone::contains(key_t key)
@@ -65,17 +65,17 @@ namespace hedgehog::db
         return this->_keys_cache.contains(key);
     }
 
-    hedgehog::expected<tombstone> tombstone::recovery_tombstone(const std::filesystem::path& base_path, const std::string& db_name)
+    hedge::expected<tombstone> tombstone::recovery_tombstone(const std::filesystem::path& base_path, const std::string& db_name)
     {
         auto ts_path = base_path / with_extension(db_name, TOMBSTONE_EXT);
 
         if(!std::filesystem::exists(ts_path))
-            return hedgehog::error("error: tombstone file does not exist: " + ts_path.string());
+            return hedge::error("error: tombstone file does not exist: " + ts_path.string());
 
         auto tombstone_log = std::ifstream(ts_path, std::ios::binary);
 
         if(!tombstone_log.good())
-            return hedgehog::error("error: tombstone file exists but cannot be read from: " + ts_path.string());
+            return hedge::error("error: tombstone file exists but cannot be read from: " + ts_path.string());
 
         tombstone tombstone{};
 
@@ -129,38 +129,38 @@ namespace hedgehog::db
         return memtable_db(db_attrs::make(base_path, db_name), tombstone{base_path, db_name});
     }
 
-    hedgehog::expected<memtable_db> memtable_db::existing_from_path(const std::filesystem::path& base_path, const std::string& db_name)
+    hedge::expected<memtable_db> memtable_db::existing_from_path(const std::filesystem::path& base_path, const std::string& db_name)
     {
         auto maybe_tombstone = tombstone::recovery_tombstone(base_path, db_name);
 
         if(!maybe_tombstone)
-            return hedgehog::error("Failed to recover tombstone: " + maybe_tombstone.error().to_string());
+            return hedge::error("Failed to recover tombstone: " + maybe_tombstone.error().to_string());
 
         memtable_db mem_db(base_path, db_name, std::move(maybe_tombstone.value()));
 
-        return hedgehog::error("NOT IMPLEMENTED");
+        return hedge::error("NOT IMPLEMENTED");
 
         // auto maybe_memtable = load_memtable_from<decltype(mem_db._memtable)>(with_extension(mem_db._index_path, ".tmp"));
 
         // if(!maybe_memtable)
-        //     return hedgehog::error("Failed to load memtable: " + maybe_memtable.error().to_string());
+        //     return hedge::error("Failed to load memtable: " + maybe_memtable.error().to_string());
 
         // mem_db._memtable = std::move(maybe_memtable.value());
 
         // return mem_db;
     }
 
-    hedgehog::status memtable_db::insert(key_t key, const std::vector<uint8_t>& data)
+    hedge::status memtable_db::insert(key_t key, const std::vector<uint8_t>& data)
     {
         // check if key already exists
         if(this->_memtable.get_item(key))
-            return hedgehog::error("Update non supported");
+            return hedge::error("Update non supported");
 
         auto size = data.size();
         auto offset = _push_data_to_stream(this->_value_log_out, data);
 
         if(!this->_value_log_out)
-            return hedgehog::error("an error occurred with value_log file");
+            return hedge::error("an error occurred with value_log file");
 
         auto index_key = index_key_t{key, {.offset = static_cast<uint64_t>(offset), .size = static_cast<uint64_t>(size)}};
 
@@ -169,12 +169,12 @@ namespace hedgehog::db
         this->_tmp_index.write(reinterpret_cast<const char*>(&index_key), sizeof(index_key_t)); // len(index) % sizeof(index_key_t) != 0
 
         if(!this->_tmp_index)
-            return hedgehog::error("an error occurred with the tmp index");
+            return hedge::error("an error occurred with the tmp index");
 
-        return hedgehog::ok();
+        return hedge::ok();
     }
 
-    hedgehog::expected<std::vector<uint8_t>> memtable_db::get(key_t key)
+    hedge::expected<std::vector<uint8_t>> memtable_db::get(key_t key)
     {
         if(this->_tombstone.contains(key))
             return std::vector<uint8_t>{};
@@ -189,7 +189,7 @@ namespace hedgehog::db
         auto values = std::ifstream(this->_value_log_path, std::ios::binary);
 
         if(!values.good())
-            return hedgehog::error("Failed to open value log file");
+            return hedge::error("Failed to open value log file");
 
         values.seekg(static_cast<std::streamoff>(offset.offset), std::ios::beg);
 
@@ -200,14 +200,14 @@ namespace hedgehog::db
         if(values.fail())
         {
             values.clear();
-            return hedgehog::error("Failed to read data from log: bad bit");
+            return hedge::error("Failed to read data from log: bad bit");
         }
 
         values.clear();
         return data;
     }
 
-    hedgehog::status memtable_db::del(key_t key)
+    hedge::status memtable_db::del(key_t key)
     {
         // if(auto it = this->_memtable.find(key); it != this->_memtable.end())
         //     this->_memtable.erase(it);
@@ -228,18 +228,18 @@ namespace hedgehog::db
     }
 
 
-    hedgehog::expected<sortedstring_db> sortedstring_db::existing_from_path(const std::filesystem::path& base_path, const std::string& db_name)
+    hedge::expected<sortedstring_db> sortedstring_db::existing_from_path(const std::filesystem::path& base_path, const std::string& db_name)
     {
         auto index_path = base_path / with_extension(db_name, INDEX_EXT);
         auto value_path = base_path / with_extension(db_name, VALUE_EXT);
 
         if(!std::filesystem::exists(index_path) || !std::filesystem::exists(value_path))
-            return hedgehog::error("index or value log file does not exist");
+            return hedge::error("index or value log file does not exist");
 
         auto maybe_tombstone = tombstone::recovery_tombstone(base_path, db_name);
 
         if(!maybe_tombstone)
-            return hedgehog::error("Failed to recover tombstone: " + maybe_tombstone.error().to_string());
+            return hedge::error("Failed to recover tombstone: " + maybe_tombstone.error().to_string());
 
         sortedstring_db ss_db{base_path, db_name, std::move(maybe_tombstone.value())};
 
@@ -252,24 +252,24 @@ namespace hedgehog::db
         return ss_db;
     }
 
-    hedgehog::status sortedstring_db::_init()
+    hedge::status sortedstring_db::_init()
     {
         this->_value_log_ifs = std::ifstream(this->_value_log_path, std::ios::binary);
 
         if(!this->_value_log_ifs.good())
-            return hedgehog::error("Failed to open value log file");
+            return hedge::error("Failed to open value log file");
 
         auto fd = fd_wrapper::from_path(this->_index_path);
 
         if(!fd)
-            return hedgehog::error("Failed to open file descriptor at " + this->_index_path.string());
+            return hedge::error("Failed to open file descriptor at " + this->_index_path.string());
 
         this->_fd = std::move(fd.value());
 
-        return hedgehog::ok();
+        return hedge::ok();
     }
 
-    hedgehog::expected<std::vector<uint8_t>> sortedstring_db::get(key_t key)
+    hedge::expected<std::vector<uint8_t>> sortedstring_db::get(key_t key)
     {
         if(this->_tombstone.contains(key))
             return std::vector<uint8_t>{};
@@ -301,13 +301,13 @@ namespace hedgehog::db
 
             std::string error_msg = std::format("Failed to read data from log: bad bit. File size: {}, Current position: {}, Requested position: {}, Value size: {}", std::to_string(file_size), std::to_string(current_pos), std::to_string(requested_pos), std::to_string(value_size));
 
-            return hedgehog::error(error_msg);
+            return hedge::error(error_msg);
         }
 
         return data;
     }
 
-    hedgehog::expected<std::optional<value_ptr_t>> sortedstring_db::get_offset_from_key(key_t key) // NOLINT
+    hedge::expected<std::optional<value_ptr_t>> sortedstring_db::get_offset_from_key(key_t key) // NOLINT
     {
         if(this->_tombstone.contains(key))
             return std::nullopt;
@@ -328,12 +328,12 @@ namespace hedgehog::db
         return maybe_item;
     }
 
-    hedgehog::status sortedstring_db::compact()
+    hedge::status sortedstring_db::compact()
     {
         auto maybe_index = load_memtable_from<std::vector<index_key_t>>(this->_index_path);
 
         if(!maybe_index)
-            return hedgehog::error("Failed to load index file: " + maybe_index.error().to_string());
+            return hedge::error("Failed to load index file: " + maybe_index.error().to_string());
 
         auto index = std::move(maybe_index.value());
 
@@ -348,10 +348,10 @@ namespace hedgehog::db
         std::ofstream values_ofs(cmpt_value_path, std::ios::binary);
 
         if(!index_ofs.good())
-            return hedgehog::error("Failed to open index file");
+            return hedge::error("Failed to open index file");
 
         if(!values_ofs.good())
-            return hedgehog::error("Failed to open values file");
+            return hedge::error("Failed to open values file");
 
         for(auto& [key, offset] : index)
         {
@@ -364,18 +364,18 @@ namespace hedgehog::db
             auto maybe_data = this->get(key);
 
             if(!maybe_data)
-                return hedgehog::error(std::format("Cannot retrieve file with key {}", uuids::to_string(key)));
+                return hedge::error(std::format("Cannot retrieve file with key {}", uuids::to_string(key)));
 
             auto data = std::move(maybe_data.value());
 
             if(data.empty())
-                return hedgehog::error("Failed to get data for key: ");
+                return hedge::error("Failed to get data for key: ");
 
             auto size = data.size();
             auto data_offset = _push_data_to_stream(values_ofs, data);
 
             if(!values_ofs.good())
-                return hedgehog::error("Failed to write values");
+                return hedge::error("Failed to write values");
 
             auto new_offset = value_ptr_t{
                 .offset = data_offset,
@@ -391,7 +391,7 @@ namespace hedgehog::db
             index_ofs.write(reinterpret_cast<const char*>(&key), sizeof(index_key_t));
 
             if(!index_ofs.good())
-                return hedgehog::error("Failed to write index");
+                return hedge::error("Failed to write index");
         }
 
         std::filesystem::path old_index_path = with_extension(this->_index_path, ".old");
@@ -408,10 +408,10 @@ namespace hedgehog::db
 
         this->_tombstone.clear();
 
-        return hedgehog::ok();
+        return hedge::ok();
     }
 
-    hedgehog::status sortedstring_db::del(key_t key)
+    hedge::status sortedstring_db::del(key_t key)
     {
         return this->_tombstone.add(key);
     }
@@ -420,7 +420,7 @@ namespace hedgehog::db
 
     sortedstring_db::sortedstring_db(db_attrs attrs, tombstone tombstone) : db_attrs(std::move(attrs)), _tombstone(std::move(tombstone)){};
 
-    hedgehog::expected<sortedstring_db> flush_memtable_db(memtable_db&& db_)
+    hedge::expected<sortedstring_db> flush_memtable_db(memtable_db&& db_)
     {
         auto mem_db = std::move(db_);
 
@@ -438,10 +438,10 @@ namespace hedgehog::db
         // index.write(reinterpret_cast<const char*>(index_sorted.data()), static_cast<std::streamsize>(index_sorted.size() * sizeof(index_key_t)));
 
         // if(!index.good())
-        // return hedgehog::error("An error occurred with index file");
+        // return hedge::error("An error occurred with index file");
 
         if(auto status = mem_db._memtable.serialize_to(mem_db._index_path); !status)
-            return hedgehog::error("An error occurred while serializing index file: " + status.error().to_string());
+            return hedge::error("An error occurred while serializing index file: " + status.error().to_string());
 
         std::filesystem::remove(with_extension(mem_db._index_path, ".tmp"));
 
@@ -450,9 +450,9 @@ namespace hedgehog::db
         sortedstring_db ss_db(std::move(attrs), std::move(mem_db._tombstone));
 
         if(auto status = ss_db._init(); !status)
-            return hedgehog::error("Failed to initialize sortedstring_db: " + status.error().to_string());
+            return hedge::error("Failed to initialize sortedstring_db: " + status.error().to_string());
 
         return ss_db;
     }
 
-} // namespace hedgehog::db
+} // namespace hedge::db

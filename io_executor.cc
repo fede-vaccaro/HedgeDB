@@ -27,7 +27,7 @@
 
 using namespace std::string_literals;
 
-namespace hedgehog::async
+namespace hedge::async
 {
 
     template <typename T>
@@ -339,4 +339,4 @@ namespace hedgehog::async
         }
     }
 
-} // namespace hedgehog::async
+} // namespace hedge::async

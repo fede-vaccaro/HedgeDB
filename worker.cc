@@ -2,7 +2,7 @@
 
 #include "worker.h"
 
-namespace hedgehog::async
+namespace hedge::async
 {
 
     template <typename T>
@@ -86,4 +86,4 @@ namespace hedgehog::async
         }
     }
 
-} // namespace hedgehog::db
+} // namespace hedge::db
