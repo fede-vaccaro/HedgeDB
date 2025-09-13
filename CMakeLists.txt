@@ -2,14 +2,6 @@ cmake_minimum_required(VERSION 3.10)
 
 project(HedgehogDB CXX)
 
-include(FetchContent)
-FetchContent_Declare(
-        asio-standalone
-        URL https://github.com/chriskohlhoff/asio/archive/refs/heads/master.zip
-)
-
-FetchContent_MakeAvailable(asio-standalone)
-
 enable_testing()
 
 include(FetchContent)
@@ -38,26 +30,14 @@ endif()
 
 include_directories(include ${asio-standalone_SOURCE_DIR}/asio/include)
 
-set(SOURCES
+set(DB_SOURCES
     index.cc
     index.h
     fs.hpp
 )
 
-add_executable(index_test_w test_index_w.cc ${SOURCES})
-add_executable(index_test_r from_disk_test.cc ${SOURCES})
-add_executable(test_odirect test_odirect.cc)
-
-add_executable(asio_test asio_test_2.cc)
-target_compile_definitions(asio_test PRIVATE ASIO_HAS_FILE ASIO_HAS_IO_URING ASIO_HAS_IO_URING_AS_DEFAULT ASIO_DISABLE_EPOLL)
-
-add_executable(uring_test uring_reader.cc)
-target_link_libraries(uring_test uring)
-
-target_link_libraries(
-    asio_test
-    uring
-)
+add_executable(index_test_w test_index_w.cc ${DB_SOURCES})
+add_executable(index_test_r from_disk_test.cc ${DB_SOURCES})
 
 ## io_executor files
 set(IO_EXECUTOR_SRCS io_executor.cc mailbox_impl.cc)
@@ -67,6 +47,5 @@ add_executable(executor_read_test ${IO_EXECUTOR_SRCS} executor_read_test.cc)
 target_link_libraries(executor_read_test uring)
 
 # executor tests
-
 add_executable(executor_test ${IO_EXECUTOR_SRCS} test/io_executor.spec.cc)
 target_link_libraries(executor_test uring gtest gtest_main)
