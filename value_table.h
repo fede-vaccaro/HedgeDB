@@ -33,19 +33,37 @@ namespace hedgehog::db
         std::vector<uint8_t> binaries{};
     };
 
+    struct value_table_info
+    {
+        size_t current_offset{};
+
+        // gc related info
+        size_t items_count{};
+        size_t occupied_space{};
+
+        size_t deleted_count{};
+        size_t freed_space{};
+
+        uint8_t padding[8]; // NOLINT
+
+        bool operator==(const value_table_info& other) const = default;
+    };
+
     class value_table
     {
         uint32_t _unique_id;
         size_t _current_offset{0};
         fs::file_descriptor _fd;
+        fs::tmp_mmap _mmap{};
 
         value_table() = default;
-        value_table(uint32_t unique_id, size_t current_offset, fs::file_descriptor file_descriptor)
-            : _unique_id(unique_id), _current_offset(current_offset), _fd(std::move(file_descriptor)) {}
+        value_table(uint32_t unique_id, size_t current_offset, fs::file_descriptor file_descriptor, fs::tmp_mmap mmap)
+            : _unique_id(unique_id), _current_offset(current_offset), _fd(std::move(file_descriptor)), _mmap(std::move(mmap)) {}
 
     public:
         static constexpr std::string_view TABLE_FILE_EXTENSION = ".vt";
-        static constexpr size_t TABLE_MAX_SIZE_BYTES = std::numeric_limits<uint32_t>::max();
+        static constexpr size_t TABLE_MAX_SIZE_BYTES = std::numeric_limits<uint32_t>::max(); // addressable space in a uint32_t
+        static constexpr size_t TABLE_ACTUAL_MAX_SIZE = TABLE_MAX_SIZE_BYTES + sizeof(EOF_MARKER) + sizeof(value_table_info);
         static constexpr size_t TABLE_MAX_ID = std::numeric_limits<uint32_t>::max();
         static constexpr size_t MAX_FILE_SIZE = (((1UL << 17) - 1) * PAGE_SIZE_IN_BYTES) - sizeof(file_header);
 
@@ -69,17 +87,41 @@ namespace hedgehog::db
             return value_table::TABLE_MAX_SIZE_BYTES - this->_current_offset;
         }
 
+        [[nodiscard]] value_table_info info() const;
+
         struct write_reservation
         {
             size_t offset{};
         };
 
+        using next_offset_and_size_t = std::pair<size_t, size_t>;
+
         expected<write_reservation> get_write_reservation(size_t file_size);
         async::task<expected<hedgehog::value_ptr_t>> write_async(key_t key, const std::vector<uint8_t>& value, const write_reservation& reservation, const std::shared_ptr<async::executor_context>& executor);
+
+        // nb file_size includes the size of the header
         async::task<expected<output_file>> read_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor);
+
+        // this class method is needed to iterate over the table (and skip deleted entries)
+        async::task<expected<std::pair<output_file, next_offset_and_size_t>>> read_file_and_next_header_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor);
         async::task<status> delete_async(key_t key, size_t offset, const std::shared_ptr<async::executor_context>& executor);
 
         static hedgehog::expected<value_table> make_new(const std::filesystem::path& base_path, uint32_t table_id);
-        static hedgehog::expected<value_table> load(const std::filesystem::path& path, fs::file_descriptor::open_mode open_mode, std::optional<size_t> offset = std::nullopt);
+        static hedgehog::expected<value_table> load(const std::filesystem::path& path, fs::file_descriptor::open_mode open_mode);
+
+    private:
+        constexpr static fs::range _page_align_for_mmap()
+        {
+            constexpr size_t last_page_size = TABLE_ACTUAL_MAX_SIZE % PAGE_SIZE_IN_BYTES;
+
+            constexpr size_t mmap_begin_range = TABLE_ACTUAL_MAX_SIZE - last_page_size - PAGE_SIZE_IN_BYTES;
+            
+            constexpr size_t mmap_size = last_page_size + PAGE_SIZE_IN_BYTES;
+
+            return fs::range{.start = mmap_begin_range, .size = mmap_size};
+        }
+
+        static value_table_info& _get_info_from_mmap(const fs::tmp_mmap& mmap);
+        [[nodiscard]] value_table_info& _info();
     };
 } // namespace hedgehog::db

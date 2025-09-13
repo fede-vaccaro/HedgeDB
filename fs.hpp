@@ -120,6 +120,7 @@ namespace hedgehog::fs
                             close(fd);
                             return hedgehog::error("Failed to allocate space for file: " + err);
                         }
+                        file_size = expected_size.value();
                         break;
                 };
             }
@@ -350,32 +351,30 @@ namespace hedgehog::fs
         }
     };
 
+    struct range
+    {
+        size_t start;
+        size_t size;
+    };
+
     class tmp_mmap
     {
     private:
-        const file_descriptor* _fd_wrapper;
+        int32_t _fd{-1};
         void* _mapped_ptr = nullptr;
         size_t _mapped_size = 0;
+        std::optional<range> _range;
 
     public:
-        struct range
+        static hedgehog::expected<tmp_mmap> from_fd_wrapper(const file_descriptor& fd_w, std::optional<range> range = std::nullopt)
         {
-            size_t start;
-            size_t size;
-        };
-
-        static hedgehog::expected<tmp_mmap> from_fd_wrapper(const file_descriptor* fd_w, std::optional<range> range = std::nullopt)
-        {
-            if(fd_w == nullptr)
-                return hedgehog::error("Cannot map a null file descriptor.");
-
-            if(fd_w->get() == -1)
+            if(fd_w.get() == -1)
                 return hedgehog::error("Cannot map an invalid file descriptor.");
 
-            if(fd_w->file_size() == 0)
+            if(fd_w.file_size() == 0)
                 return hedgehog::error("Cannot mmap an empty file.");
 
-            void* mapped_ptr = mmap(nullptr, range ? range->size : fd_w->file_size(), PROT_READ, MAP_PRIVATE, fd_w->get(), range ? range->start : 0);
+            void* mapped_ptr = mmap(nullptr, range ? range->size : fd_w.file_size(), PROT_READ | PROT_WRITE, MAP_PRIVATE, fd_w.get(), range ? range->start : 0);
 
             if(mapped_ptr == MAP_FAILED)
             {
@@ -384,9 +383,10 @@ namespace hedgehog::fs
             }
 
             tmp_mmap wrapper;
-            wrapper._fd_wrapper = fd_w;
+            wrapper._fd = fd_w.get();
             wrapper._mapped_ptr = mapped_ptr;
-            wrapper._mapped_size = wrapper._fd_wrapper->file_size();
+            wrapper._mapped_size = range ? range->size : fd_w.file_size();
+            wrapper._range = range;
 
             return std::move(wrapper);
         }
@@ -394,21 +394,21 @@ namespace hedgehog::fs
         tmp_mmap() = default;
 
         tmp_mmap(tmp_mmap&& other) noexcept
-            : _fd_wrapper(other._fd_wrapper),
-              _mapped_ptr(other._mapped_ptr),
-              _mapped_size(other._mapped_size)
+            : _fd(std::exchange(other._fd, -1)),
+              _mapped_ptr(std::exchange(other._mapped_ptr, nullptr)),
+              _mapped_size(std::exchange(other._mapped_size, 0)),
+              _range(std::exchange(other._range, std::nullopt))
         {
-            other._mapped_ptr = nullptr;
-            other._mapped_size = 0;
         }
 
         tmp_mmap& operator=(tmp_mmap&& other) noexcept
         {
             if(this != &other)
             {
-                this->_fd_wrapper = other._fd_wrapper;
+                this->_fd = std::exchange(other._fd, -1);
                 this->_mapped_ptr = std::exchange(other._mapped_ptr, nullptr);
                 this->_mapped_size = std::exchange(other._mapped_size, 0);
+                this->_range = std::exchange(other._range, std::nullopt);
             }
             return *this;
         }
@@ -427,17 +427,17 @@ namespace hedgehog::fs
 
         [[nodiscard]] void* get_ptr() const
         {
-            return _mapped_ptr;
+            return this->_mapped_ptr;
         }
 
         [[nodiscard]] size_t size() const
         {
-            return _mapped_size;
+            return this->_mapped_size;
         }
 
         [[nodiscard]] int get_fd() const
         {
-            return _fd_wrapper->get();
+            return this->_fd;
         }
     };
 
