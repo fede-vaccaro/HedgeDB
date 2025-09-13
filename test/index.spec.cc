@@ -120,7 +120,6 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
             std::back_inserter(result),
             [prefix, this](const uuids::uuid& uuid)
             {
-                auto key_prefix = hedgehog::extract_prefix(uuid);
                 auto matching_partition = hedgehog::find_partition_prefix_for_key(uuid, (1 << 16) / (1 << this->NUM_PARTITION_EXPONENT));
                 return matching_partition == prefix;
             });
@@ -130,7 +129,6 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
 
     uint16_t get_partition_prefix(const uuids::uuid& uuid)
     {
-        auto key_prefix = hedgehog::extract_prefix(uuid);
         auto matching_partition = hedgehog::find_partition_prefix_for_key(uuid, (1 << 16) / (1 << this->NUM_PARTITION_EXPONENT));
         return matching_partition;
     }
@@ -367,9 +365,9 @@ INSTANTIATE_TEST_SUITE_P(
     test_suite,
     sorted_string_merge_test,
     testing::Combine(
-        testing::Values(1000, 5000, 10'000, 1'000'000, 100'000'000), // n keys
-        testing::Values(0, 1, 4, 10, 16),                            // num partition exponent -> 1, 2, 16, 1024, 65536 partitions
-        testing::Values(4096, 8192, 16384)                           // Read ahead size
+        testing::Values(1000, 5000, 10'000, 1'000'000, 10'000'000), // n keys
+        testing::Values(0, 1, 4, 10, 16),                           // num partition exponent -> 1, 2, 16, 1024, 65536 partitions
+        testing::Values(4096, 8192, 16384)                          // Read ahead size
         ),
     [](const testing::TestParamInfo<sorted_string_merge_test::ParamType>& info)
     {

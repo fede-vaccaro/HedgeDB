@@ -4,12 +4,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <limits>
 #include <unistd.h>
 #include <vector>
 
 #include <error.hpp>
-#include <thread>
 
 #include "common.h"
 #include "file_reader.h"
@@ -23,112 +21,6 @@
 
 namespace hedgehog::db
 {
-
-    struct partitioned_view
-    {
-        std::vector<index_key_t>::const_iterator start;
-        std::vector<index_key_t>::const_iterator end;
-
-        size_t size() const
-        {
-            return std::distance(start, end);
-        }
-    };
-
-    hedgehog::status merge_with_target(const std::filesystem::path& target_path, const partitioned_view& partition)
-    {
-        bool first_creation = !std::filesystem::exists(target_path);
-
-        std::vector<index_key_t> partitioned_data;
-
-        if(!first_creation)
-        {
-            auto file_size = std::filesystem::file_size(target_path);
-
-            auto reader = std::ifstream(target_path, std::ios::binary);
-
-            if(!reader.good())
-                return hedgehog::error("Failed to open partition file: " + target_path.string());
-
-            partitioned_data.reserve(file_size / sizeof(index_key_t) + partition.size());
-
-            partitioned_data.resize(file_size / sizeof(index_key_t));
-
-            reader.read(reinterpret_cast<char*>(partitioned_data.data()), static_cast<std::streamsize>(file_size));
-        }
-
-        partitioned_data.insert(partitioned_data.end(), partition.start, partition.end);
-        std::sort(partitioned_data.begin(), partitioned_data.end());
-
-        auto tmp_path = with_extension(target_path, ".tmp");
-        {
-            auto partitioned_file = std::ofstream(tmp_path, std::ios::binary | std::ios::trunc);
-            if(!partitioned_file.good())
-                return hedgehog::error("Failed to open partition file for writing: " + tmp_path.string());
-
-            partitioned_file.write(reinterpret_cast<const char*>(partitioned_data.data()), static_cast<std::streamsize>(partitioned_data.size() * sizeof(index_key_t)));
-
-            if(!partitioned_file.good())
-                return hedgehog::error("Failed to write partition data to file: " + tmp_path.string());
-        }
-
-        if(!first_creation)
-            std::filesystem::rename(target_path, with_extension(target_path, ".old"));
-
-        std::filesystem::rename(tmp_path, target_path);
-
-        if(!first_creation)
-            std::filesystem::remove(with_extension(target_path, ".old"));
-
-        return hedgehog::ok();
-    }
-
-    index_key_t _key_from_prefix(uint16_t prefix)
-    {
-        auto key = uuids::uuid{};
-
-        auto& uuids_as_std_array = reinterpret_cast<std::array<uint16_t, 16 / sizeof(uint16_t)>&>(key);
-
-        std::fill(uuids_as_std_array.begin(), uuids_as_std_array.end(), 0);
-
-        uuids_as_std_array[0] = prefix;
-
-        return index_key_t{key, {}};
-    };
-
-    // std::vector<partitioned_view> find_partitions(const std::vector<index_key_t>& index_sorted)
-    // {
-    //     constexpr auto PREFIX_MAX = std::numeric_limits<uint16_t>::max();
-
-    //     std::vector<partitioned_view> partitions;
-    //     partitions.reserve(PREFIX_MAX);
-
-    //     partitioned_view current_partition;
-
-    //     current_partition.prefix = extract_prefix(index_sorted.begin()->key);
-    //     current_partition.start = index_sorted.begin();
-
-    //     // auto range_start = index_sorted.begin();
-    //     for(auto it = index_sorted.begin() + 1; it != index_sorted.end(); ++it)
-    //     {
-    //         auto prefix = extract_prefix(it->key);
-
-    //         if(prefix != current_partition.prefix)
-    //         {
-    //             current_partition.end = it;
-    //             partitions.emplace_back(current_partition);
-
-    //             current_partition.prefix = prefix;
-    //             current_partition.start = it;
-    //         }
-    //     }
-
-    //     current_partition.end = index_sorted.end();
-    //     partitions.emplace_back(current_partition);
-
-    //     return partitions;
-    // }
-
     std::vector<meta_index_entry> create_meta_index(const std::vector<index_key_t>& sorted_keys)
     {
         auto meta_index_size = (sorted_keys.size() + INDEX_PAGE_NUM_ENTRIES - 1) / INDEX_PAGE_NUM_ENTRIES;
@@ -139,7 +31,7 @@ namespace hedgehog::db
 
         for(size_t i = 0; i < meta_index_size; ++i)
         {
-            auto idx = std::min(i * INDEX_PAGE_NUM_ENTRIES + INDEX_PAGE_NUM_ENTRIES - 1, sorted_keys.size() - 1);
+            auto idx = std::min((i * INDEX_PAGE_NUM_ENTRIES) + INDEX_PAGE_NUM_ENTRIES - 1, sorted_keys.size() - 1);
             meta_index.push_back({.page_max_id = sorted_keys[idx].key});
         }
 
@@ -304,7 +196,7 @@ namespace hedgehog::db
                 page_end_ptr = page_start_ptr + last_page_size;
         }
 
-        return this->_find_in_page(key, page_start_ptr, page_end_ptr);
+        return sorted_index::_find_in_page(key, page_start_ptr, page_end_ptr);
     }
 
     async::task<expected<std::optional<value_ptr_t>>> sorted_index::lookup_async(const key_t& key, const std::shared_ptr<async::executor_context>& executor) const
@@ -315,14 +207,14 @@ namespace hedgehog::db
 
         auto page_id = maybe_page_id.value();
 
-        auto page_start_offset = this->_footer.index_start_offset + page_id * PAGE_SIZE_IN_BYTES;
+        auto page_start_offset = this->_footer.index_start_offset + (page_id * PAGE_SIZE_IN_BYTES);
 
         auto maybe_page_ptr = co_await this->_load_page_async(page_start_offset, executor);
 
         if(!maybe_page_ptr)
             co_return maybe_page_ptr.error();
 
-        auto page_start_ptr = reinterpret_cast<index_key_t*>(maybe_page_ptr.value().get());
+        auto *page_start_ptr = reinterpret_cast<index_key_t*>(maybe_page_ptr.value().get());
         index_key_t* page_end_ptr = page_start_ptr + INDEX_PAGE_NUM_ENTRIES;
 
         if(bool is_last_page = page_id == this->_meta_index.size() - 1; is_last_page)
@@ -332,7 +224,7 @@ namespace hedgehog::db
                 page_end_ptr = page_start_ptr + last_page_size;
         }
 
-        co_return this->_find_in_page(key, page_start_ptr, page_end_ptr);
+        co_return sorted_index::_find_in_page(key, page_start_ptr, page_end_ptr);
     }
 
     async::task<expected<std::unique_ptr<uint8_t>>> sorted_index::_load_page_async(size_t offset, const std::shared_ptr<async::executor_context>& executor) const
@@ -343,7 +235,7 @@ namespace hedgehog::db
                 .offset = offset,
                 .size = PAGE_SIZE_IN_BYTES});
 
-        if(response.error_code)
+        if(response.error_code != 0)
         {
             auto err_msg = std::format("An error occurred while reading page at offset {} from file {}:  {}", offset, this->_fd.path().string(), strerror(response.error_code));
             co_return hedgehog::error(err_msg);
@@ -358,15 +250,9 @@ namespace hedgehog::db
         co_return std::move(response.data);
     }
 
-    std::optional<value_ptr_t> sorted_index::_find_in_page(const key_t& key, const index_key_t* start, const index_key_t* end) const
+    std::optional<value_ptr_t> sorted_index::_find_in_page(const key_t& key, const index_key_t* start, const index_key_t* end)
     {
-
-        for(auto* ptr = start; ptr < end; ++ptr)
-        {
-            // std::cout << "Checking key: " << ptr->key << std::endl;
-        }
-
-        auto it = std::lower_bound(start, end, index_key_t{key, {}});
+        const auto *it = std::lower_bound(start, end, index_key_t{.key=key, .value_ptr={}});
 
         if(it != end && it->key == key)
             return it->value_ptr;
@@ -397,7 +283,7 @@ namespace hedgehog::db
     }
 
     sorted_index::sorted_index(fs::file_descriptor fd, std::vector<index_key_t> index, std::vector<meta_index_entry> meta_index, sorted_index_footer footer)
-        : _fd(std::move(fd)), _index(std::move(index)), _meta_index(std::move(meta_index)), _footer(std::move(footer))
+        : _fd(std::move(fd)), _index(std::move(index)), _meta_index(std::move(meta_index)), _footer(footer)
     {
     }
 
@@ -567,7 +453,7 @@ namespace hedgehog::db
         return {index_end_pos - padding, index_end_pos};
     }
 
-    async::task<hedgehog::expected<sorted_index>> index_ops::two_way_merge_async(size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor)
+    async::task<hedgehog::expected<sorted_index>> index_ops::two_way_merge_async(size_t read_ahead_size, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor)
     {
         if(read_ahead_size < PAGE_SIZE_IN_BYTES)
             co_return hedgehog::error("Read ahead size must be at least one page size");
@@ -586,7 +472,6 @@ namespace hedgehog::db
         auto [index_end_pos, meta_index_start_pos] = infer_index_end_pos(new_table_num_keys);
         auto meta_index_entries = ceil(new_table_num_keys, INDEX_PAGE_NUM_ENTRIES);
         auto meta_index_end_pos = meta_index_start_pos + (meta_index_entries * sizeof(meta_index_entry));
-        auto footer_start_offset = meta_index_end_pos + compute_alignment_padding<meta_index_entry>(meta_index_entries);
 
         sorted_index_footer footer =
             {
@@ -603,20 +488,19 @@ namespace hedgehog::db
                 .footer_start_offset = meta_index_end_pos,
             };
 
-       
         auto lhs_view = async::file_reader(
             left._fd,
             {
-                .start_offset=0,
-                .end_offset=left._footer.index_end_offset,
+                .start_offset = 0,
+                .end_offset = left._footer.index_end_offset,
             },
             executor);
 
         auto rhs_view = async::file_reader(
             right._fd,
             {
-                .start_offset=0,
-                .end_offset=right._footer.index_end_offset,
+                .start_offset = 0,
+                .end_offset = right._footer.index_end_offset,
             },
             executor);
 
@@ -832,7 +716,7 @@ namespace hedgehog::db
         co_return result;
     }
 
-    hedgehog::expected<sorted_index> index_ops::two_way_merge(size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor)
+    hedgehog::expected<sorted_index> index_ops::two_way_merge(size_t read_ahead_size, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor)
     {
         if(!executor)
             return hedgehog::error("Executor context is null");

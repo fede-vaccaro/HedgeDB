@@ -26,8 +26,8 @@ namespace hedgehog::db
         static hedgehog::expected<sorted_index> load_sorted_index(const std::filesystem::path& path, bool load_index = false);
         static hedgehog::expected<sorted_index> save_as_sorted_index(const std::filesystem::path& path, std::vector<index_key_t>&& sorted_keys, size_t upper_bound, bool merge_with_existent = false);
         static hedgehog::expected<std::vector<sorted_index>> merge_and_flush(const std::filesystem::path& base_path, std::vector<mem_index>&& indices, size_t num_partition_exponent);
-        static async::task<hedgehog::expected<sorted_index>> two_way_merge_async(size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor);
-        static hedgehog::expected<sorted_index> two_way_merge(size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor);
+        static async::task<hedgehog::expected<sorted_index>> two_way_merge_async(size_t read_ahead_size, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
+        static hedgehog::expected<sorted_index> two_way_merge(size_t read_ahead_size, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
     };
 
     class mem_index
@@ -182,7 +182,7 @@ namespace hedgehog::db
 
     private:
         [[nodiscard]] std::optional<size_t> _find_page_id(const key_t& key) const;
-        [[nodiscard]] std::optional<value_ptr_t> _find_in_page(const key_t& key, const index_key_t* page_start, const index_key_t* page_end) const;
+        static std::optional<value_ptr_t> _find_in_page(const key_t& key, const index_key_t* page_start, const index_key_t* page_end);
         [[nodiscard]] async::task<expected<std::unique_ptr<uint8_t>>> _load_page_async(size_t offset, const std::shared_ptr<async::executor_context>& executor) const;
     };
 
