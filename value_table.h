@@ -24,7 +24,7 @@ namespace hedgehog::db
         std::array<uint8_t, 16> separator{FILE_SEPARATOR};
         key_t key{};
         size_t file_size{};
-        bool deleted_marker{false};
+        bool deleted_flag{false};
     };
 
     struct output_file
@@ -49,6 +49,19 @@ namespace hedgehog::db
         bool operator==(const value_table_info& other) const = default;
     };
 
+    /**
+        The value table is where the all the values are stored.
+        
+        The layout is 
+
+        output_file0
+        output_file1
+        output_file2
+        ...
+        output_fileN
+        EOF marker
+        value_table_info
+    */
     class value_table
     {
         uint32_t _unique_id;
@@ -100,10 +113,12 @@ namespace hedgehog::db
         async::task<expected<hedgehog::value_ptr_t>> write_async(key_t key, const std::vector<uint8_t>& value, const write_reservation& reservation, const std::shared_ptr<async::executor_context>& executor);
 
         // nb file_size includes the size of the header
-        async::task<expected<output_file>> read_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor);
+        async::task<expected<output_file>> read_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor, bool skip_delete_check = false);
 
         // this class method is needed to iterate over the table (and skip deleted entries)
+        async::task<expected<file_header>> get_first_header_async(const std::shared_ptr<async::executor_context>& executor);
         async::task<expected<std::pair<output_file, next_offset_and_size_t>>> read_file_and_next_header_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor);
+
         async::task<status> delete_async(key_t key, size_t offset, const std::shared_ptr<async::executor_context>& executor);
 
         static hedgehog::expected<value_table> make_new(const std::filesystem::path& base_path, uint32_t table_id);

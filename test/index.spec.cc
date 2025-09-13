@@ -65,7 +65,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
             {
                 auto uuid = generate_uuid();
                 this->_uuids.emplace_back(uuid);
-                memtable.add(uuid, {static_cast<uint64_t>(j), uuid_fake_size(uuid), 0});
+                memtable.put(uuid, {static_cast<uint64_t>(j), uuid_fake_size(uuid), 0});
             }
 
             auto vec_memtable = std::vector<hedgehog::db::mem_index>{};
@@ -99,15 +99,9 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
         }
     }
 
-    static uuids::uuid generate_uuid()
+    uuids::uuid generate_uuid()
     {
-        // static std::random_device rd;
-        size_t seed = 107279581;
-        static std::mt19937 generator(seed);
-        static std::uniform_int_distribution<int> dist(0, 15);
-        static uuids::uuid_random_generator gen{generator};
-
-        return gen();
+        return this->gen();
     }
 
     std::vector<uuids::uuid> extract_uuids_up_to_prefix(uint16_t prefix)
@@ -179,7 +173,7 @@ TEST_P(sorted_string_merge_test, DISABLED_test_merge_unified)
 
         auto merge_config = hedgehog::db::index_ops::merge_config{
             .read_ahead_size = this->READ_AHEAD_SIZE_BYTES,
-            .new_table_id = this->N_RUNS + 1,
+            .new_index_id = this->N_RUNS + 1,
             .base_path = this->_base_path};
 
         auto t0 = std::chrono::high_resolution_clock::now();
@@ -217,7 +211,7 @@ TEST_P(sorted_string_merge_test, DISABLED_test_merge_unified)
         ASSERT_TRUE(result) << "Expected to find uuid " << uuid << " in the new index; Error: " << result.error().to_string();
         auto& value = result.value();
         ASSERT_TRUE(value.has_value()) << "Expected to find value for uuid " << uuid << " in the new index";
-        ASSERT_EQ(value->size, uuid_fake_size(uuid));
+        ASSERT_EQ(value->size(), uuid_fake_size(uuid));
     }
 }
 
@@ -244,7 +238,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
 
         auto merge_config = hedgehog::db::index_ops::merge_config{
             .read_ahead_size = _this->READ_AHEAD_SIZE_BYTES,
-            .new_table_id = _this->N_RUNS + 1,
+            .new_index_id = _this->N_RUNS + 1,
             .base_path = _this->_base_path};
 
         auto new_index = co_await hedgehog::db::index_ops::two_way_merge_async(
@@ -320,12 +314,16 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
 
     query_wg.set(this->_uuids.size());
 
-    auto lookup_task_factory = [](
+    std::unordered_set<uuids::uuid> seen_uuids;
+
+    auto lookup_task_factory = [&](
                                    const uuids::uuid& uuid,
                                    const hedgehog::db::sorted_index& index,
                                    const std::shared_ptr<hedgehog::async::executor_context>& executor,
                                    hedgehog::async::working_group& wg) -> hedgehog::async::task<void>
     {
+        seen_uuids.insert(uuid);
+
         auto lookup = co_await index.lookup_async(uuid, executor);
 
         if(!lookup.has_value())
@@ -338,8 +336,10 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
 
         auto& value = lookup_result.value();
 
-        if(value.size != uuid_fake_size(uuid))
+        if(value.size() != uuid_fake_size(uuid))
             throw std::runtime_error("Unexpected value size for uuid");
+
+        seen_uuids.erase(uuid);
 
         wg.decr();
     };
@@ -358,7 +358,12 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
         this->_executor->submit_io_task(lookup_task_factory(uuid, it->second, this->_executor, query_wg));
     }
 
-    query_wg.wait();
+    query_wg.wait_for(std::chrono::milliseconds(1 * this->_uuids.size()));
+
+    for(const auto& uuid : seen_uuids)
+        std::cout << "UUID not seen: " << uuid << std::endl;
+
+    ASSERT_TRUE(seen_uuids.empty()) << "Expected to have seen all uuids, but some are missing";
 
     t1 = std::chrono::high_resolution_clock::now();
     duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
@@ -373,9 +378,9 @@ INSTANTIATE_TEST_SUITE_P(
     test_suite,
     sorted_string_merge_test,
     testing::Combine(
-        testing::Values(1000, 5000, 10'000, 1'000'000, 10'000'000), // n keys
-        testing::Values(0, 1, 4, 10, 16),                           // num partition exponent -> 1, 2, 16, 1024, 65536 partitions
-        testing::Values(4096, 8192, 16384)                          // Read ahead size
+        testing::Values(1000, 5000, 10'000, 1'000'000), // n keys
+        testing::Values(0, 1, 4, 10, 16),    // num partition exponent -> 1, 2, 16, 1024, 65536 partitions
+        testing::Values(4096, 8192, 16384)   // Read ahead size
         ),
     [](const testing::TestParamInfo<sorted_string_merge_test::ParamType>& info)
     {

@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <type_traits>
 #include <uuid.h>
 
@@ -12,9 +13,92 @@ namespace hedgehog
 
     struct value_ptr_t
     {
-        uint64_t offset{};
-        uint32_t size{};
-        uint32_t table_id{};
+    private:
+        uint64_t _offset{};
+        uint32_t _size{};
+        uint32_t _table_id{};
+
+    public:
+        [[nodiscard]] bool is_deleted() const
+        {
+#ifdef __BYTE_ORDER__
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            return (_offset >> 63) == 1;
+#else
+            return (offset & 1) == 1;
+#endif
+#else
+#error "Byte order not defined. Please define __BYTE_ORDER__."
+#endif
+        }
+
+        [[nodiscard]] uint64_t offset() const
+        {
+            constexpr uint64_t deleted_mask = (1ULL << 63);
+            return this->_offset & ~deleted_mask;
+        }
+
+        [[nodiscard]] uint32_t size() const
+        {
+            return this->_size;
+        }
+
+        [[nodiscard]] uint32_t table_id() const
+        {
+            return this->_table_id;
+        }
+
+        static value_ptr_t apply_delete(value_ptr_t value_ptr)
+        {
+#ifdef __BYTE_ORDER__
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            constexpr uint64_t deleted_mask = (1ULL << 63);
+#else
+            constexpr uint64_t deleted_mask = 1UL;
+#endif
+#else
+#error "Byte order not defined. Please define __BYTE_ORDER__."
+#endif
+            value_ptr._offset |= deleted_mask;
+
+            return value_ptr;
+        }
+
+        /**
+            Lower means highest "priority".
+         */
+        bool operator<(const value_ptr_t& other) const
+        {
+            /**
+            This might looks weird but it follows a design choice on how to implement updates and deletion.
+
+            Every time we apply some change to a key-value, we put into the mem_index a new entry
+            At the current time, the only allowed updates are key/value deletion and the update is possible when a value
+            is moved to a new table when garbage-collection is occurring. However, through this way, we still anticipate the
+            value update.
+
+            Keep in mind that the table_id is strictly monotonic increasing by design. This implies that:
+
+            - every time a value is moved to a table, the destination table has higher index (it checks the highest priority definition)
+            - if we update the key/value, it might get pushed to the same table but necessarily with higher offset (it checks the highest priority definition)
+            - if we delete a key, an index_key_t is pushed with "make_deleted_value_ptr" (it checks the highest priority definition)
+            - but if we make an insert-after-delete, the table_id will be necessarily higher.
+              ...actually, this is not true, because we might be pushing the new value to the same original table.
+              this needs to be handled ASAP because insert-after-delete IS ALLOWED.
+              I'm not sure this case can handled. FUCK.
+
+              I could use a bit from the offset or the size and call it the "deleted bit".
+
+              todo: update the code that use ::offset
+
+              It looks that with this change, it fits all of the cases
+            */
+
+            return this->table_id() > other.table_id() || offset() > other.offset() || (this->is_deleted() && !other.is_deleted());
+        }
+
+        value_ptr_t() = default;
+        value_ptr_t(uint64_t offset, uint32_t size, uint32_t table_id) : _offset(offset), _size(size), _table_id(table_id) {}
     };
 
     struct index_key_t
@@ -24,7 +108,7 @@ namespace hedgehog
 
         bool operator<(const index_key_t& other) const
         {
-            return key < other.key;
+            return key < other.key || (key == other.key && value_ptr.table_id() < other.value_ptr.table_id());
         }
     };
 

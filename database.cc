@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <cstdint>
 #include <future>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -91,7 +93,7 @@ namespace hedgehog::db
         if(!write_response)
             co_return hedgehog::error("Failed to write value to value table: " + write_response.error().to_string());
 
-        this->_mem_index.add(key, write_response.value());
+        this->_mem_index.put(key, write_response.value());
 
         co_return hedgehog::ok();
     }
@@ -101,7 +103,7 @@ namespace hedgehog::db
         co_return co_await this->put_async(key, value, executor);
     }
 
-    async::task<expected<database::byte_buffer_t>> database::get_async(key_t key, const std::shared_ptr<async::executor_context>& executor)
+    async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> database::_find_value_ptr_and_value_table(key_t key, const std::shared_ptr<async::executor_context>& executor)
     {
         // try from memtable
         auto value_ptr = this->_mem_index.get(key);
@@ -132,8 +134,10 @@ namespace hedgehog::db
 
                 if(auto& opt_value_ptr = maybe_value_ptr.value(); opt_value_ptr.has_value())
                 {
-                    value_ptr = opt_value_ptr.value();
-                    break;
+                    if(!value_ptr.has_value())
+                        value_ptr = opt_value_ptr.value();
+                    else if(value_ptr && *opt_value_ptr < *value_ptr)
+                        value_ptr = opt_value_ptr.value();
                 }
             }
         }
@@ -146,18 +150,35 @@ namespace hedgehog::db
             if(this->_current_value_table->id() == id)
                 return this->_current_value_table;
 
-            auto it = this->_value_tables.find(id);
-            if(it != this->_value_tables.end())
-                return it->second;
-
+            {
+                std::lock_guard lk(this->_value_tables_mutex);
+                auto it = this->_value_tables.find(id);
+                if(it != this->_value_tables.end())
+                    return it->second;
+            }
             return nullptr;
         };
 
-        auto table_ptr = table_finder(value_ptr->table_id);
+        auto table_ptr = table_finder(value_ptr->table_id());
         if(table_ptr == nullptr)
-            co_return hedgehog::error("Could not find the matching table " + std::to_string(value_ptr->table_id));
+            co_return hedgehog::error("Could not find the matching table " + std::to_string(value_ptr->table_id()));
 
-        auto maybe_file = co_await table_ptr->read_async(value_ptr->offset, value_ptr->size, executor);
+        co_return {value_ptr.value(), std::move(table_ptr)};
+    }
+
+    async::task<expected<database::byte_buffer_t>> database::get_async(key_t key, const std::shared_ptr<async::executor_context>& executor)
+    {
+        auto maybe_value_ptr_table = co_await this->_find_value_ptr_and_value_table(key, executor);
+
+        if(!maybe_value_ptr_table)
+            co_return maybe_value_ptr_table.error();
+
+        auto [value_ptr, table_ptr] = std::move(maybe_value_ptr_table.value());
+
+        if(value_ptr.is_deleted())
+            co_return hedgehog::error("The requested key was deleted", errc::DELETED);
+
+        auto maybe_file = co_await table_ptr->read_async(value_ptr.offset(), value_ptr.size(), executor);
         if(!maybe_file)
             co_return hedgehog::error(std::format("An error occurred while reading from table {}: {}", table_ptr->fd().path().string(), maybe_file.error().to_string()));
 
@@ -175,21 +196,40 @@ namespace hedgehog::db
         return matching_partition_id;
     }
 
-    // NOLINTNEXTLINE
-    async::task<hedgehog::status> database::remove_async(key_t /* key */, const std::shared_ptr<async::executor_context>& /* executor */)
+    async::task<hedgehog::status> database::remove_async(key_t key, const std::shared_ptr<async::executor_context>& executor)
     {
-        co_return hedgehog::error("Remove op implemented");
+        auto maybe_value_ptr_table = co_await this->_find_value_ptr_and_value_table(key, executor);
+
+        if(!maybe_value_ptr_table)
+            co_return maybe_value_ptr_table.error();
+
+        auto [value_ptr, table_ptr] = std::move(maybe_value_ptr_table.value());
+
+        auto table_delete_result = co_await table_ptr->delete_async(key, value_ptr.offset(), executor);
+
+        if(!table_delete_result)
+            co_return hedgehog::error("An error occurred while deleting an object form table: {}" + table_delete_result.error().to_string());
+
+        this->_mem_index.put(
+            key,
+            value_ptr_t::apply_delete(value_ptr));
+
+        co_return hedgehog::ok();
     }
 
     hedgehog::status database::_rotate_value_table()
     {
         this->_logger.log("Rotating value table");
 
-        auto new_value_table = value_table::make_new(this->_values_path, this->_current_value_table->id() + 1);
+        auto new_value_table = value_table::make_new(this->_values_path, ++this->_last_table_id);
         if(!new_value_table)
             return hedgehog::error("Failed to create new value table: " + new_value_table.error().to_string());
 
-        this->_value_tables[this->_current_value_table->id()] = std::move(this->_current_value_table);
+        {
+            std::lock_guard lk(this->_value_tables_mutex);
+            this->_value_tables[this->_current_value_table->id()] = std::move(this->_current_value_table);
+        }
+
         this->_current_value_table = std::make_shared<value_table>(std::move(new_value_table.value()));
 
         return hedgehog::ok();
@@ -204,6 +244,8 @@ namespace hedgehog::db
 
         std::vector<mem_index> vec_memtable;
         vec_memtable.emplace_back(std::move(this->_mem_index));
+
+        // todo: the mem indices contained in _gc_mem_indices should be flushed too, maybe would be better one at a time to avoid working with large vectors
 
         auto partitioned_sorted_indices = index_ops::merge_and_flush(this->_indices_path, std::move(vec_memtable), this->_config.num_partition_exponent, this->_flush_iteration++);
 
@@ -256,15 +298,16 @@ namespace hedgehog::db
 
             wg.set(indices_local_copy.size());
 
-            auto make_compactation_sub_task = [this, &wg, &executor, &errors, this_iteration_id = this->_flush_iteration++](std::vector<sorted_index_ptr_t>& index_vec) -> async::task<void>
+            auto make_compaction_sub_task = [this, &wg, &executor, &errors, this_iteration_id = this->_flush_iteration++](std::vector<sorted_index_ptr_t>& index_vec) -> async::task<void>
             {
                 auto last_it = index_vec.begin() + (index_vec.size() - 1);
                 auto second_last_it = last_it - 1;
 
                 auto merge_config = hedgehog::db::index_ops::merge_config{
                     .read_ahead_size = this->_config.compactation_read_ahead_size_bytes,
-                    .new_table_id = this_iteration_id,
-                    .base_path = this->_indices_path};
+                    .new_index_id = this_iteration_id,
+                    .base_path = this->_indices_path,
+                };
 
                 auto maybe_compacted_table = co_await index_ops::two_way_merge_async(
                     merge_config,
@@ -316,7 +359,7 @@ namespace hedgehog::db
                 }
 
                 stability_reached = false;
-                executor->submit_io_task(make_compactation_sub_task(index_vec));
+                executor->submit_io_task(make_compaction_sub_task(index_vec));
             }
 
             bool done = wg.wait_for(this->_config.compacation_timeout);
@@ -337,7 +380,7 @@ namespace hedgehog::db
         {
             std::lock_guard lk(this->_sorted_index_mutex);
 
-            for(auto& [prefix, new_sorted_index_vec] : indices_local_copy) // remember that new_sorted_index_vecs hold the compacted sorted indices
+            for(auto& [prefix, new_sorted_index_vec] : indices_local_copy) // remember that new_sorted_index_vecs holds the compacted sorted indices
             {
                 auto& db_sorted_indices_vec = this->_sorted_indices[prefix];
 
@@ -360,7 +403,7 @@ namespace hedgehog::db
         auto compactation_promise_ptr = std::make_shared<std::promise<hedgehog::status>>();
         std::future<hedgehog::status> compactation_future = compactation_promise_ptr->get_future();
 
-        this->async_worker.submit(
+        this->compaction_worker.submit(
             [weak_db = this->weak_from_this(), promise = std::move(compactation_promise_ptr), executor, ignore_ratio]()
             {
                 auto db = weak_db.lock();
@@ -389,6 +432,86 @@ namespace hedgehog::db
             total_read_amplification += indices.size();
 
         return total_read_amplification / this->_sorted_indices.size();
+    }
+
+    async::task<hedgehog::status> database::_garbage_collect_table(std::shared_ptr<value_table> table, size_t id, const std::shared_ptr<async::executor_context>& executor)
+    {
+        auto maybe_new_table = value_table::make_new(this->_values_path, id); // todo: here maybe we should avoid preallocating
+
+        if(!maybe_new_table)
+        {
+            co_return hedgehog::error(std::format(
+                "Failed to create new value table: {}",
+                maybe_new_table.error().to_string()));
+        }
+
+        auto compacted_table = std::move(maybe_new_table.value());
+
+        auto maybe_header = co_await table->get_first_header_async(executor);
+
+        if(!maybe_header)
+        {
+            co_return hedgehog::error(std::format(
+                "Failed to read next file header from value table (path: {}): {}",
+                table->fd().path().string(),
+                maybe_header.error().to_string()));
+        }
+
+        mem_index new_keys{};
+
+        auto header = maybe_header.value();
+
+        size_t offset{0};
+        size_t size{header.file_size + sizeof(file_header)};
+
+        while(true)
+        {
+            auto maybe_read_result = co_await table->read_file_and_next_header_async(offset, size, executor);
+
+            auto& [file, next] = maybe_read_result.value();
+
+            auto value_ptr = value_ptr_t(
+                offset,
+                size,
+                compacted_table.id());
+
+            if(!file.header.deleted_flag)
+            {
+                auto reservation = compacted_table.get_write_reservation(file.header.file_size);
+
+                auto write_result = co_await compacted_table.write_async(file.header.key, file.binaries, reservation.value(), executor);
+
+                if(!write_result)
+                    co_return hedgehog::error(std::format("Failed to write file during gc: {}", write_result.error().to_string()));
+
+                value_ptr = value_ptr_t::apply_delete(value_ptr);
+            }
+
+            new_keys.put(header.key, value_ptr);
+
+            std::tie(offset, size) = next;
+
+            if(offset == std::numeric_limits<size_t>::max() && size == 0) // EOF
+                break;
+        }
+
+        {
+            std::lock_guard lk(this->_value_tables_mutex);
+            this->_value_tables.erase(table->id());
+            this->_value_tables.emplace(compacted_table.id(), std::make_shared<value_table>(std::move(compacted_table)));
+        }
+
+        {
+            // todo : maybe is better to flush during this process rather than later
+            std::lock_guard lk(this->_gc_mem_indices_mutex);
+            this->_gc_mem_indices.emplace_back(std::move(new_keys));
+        }
+
+        // todo trigger flush
+        // todo trigger old-table auto-delete
+        // the new table should be deleted if empty as well
+
+        co_return hedgehog::ok();
     }
 
 } // namespace hedgehog::db

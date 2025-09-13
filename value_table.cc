@@ -45,7 +45,7 @@ namespace hedgehog::db
             .separator = FILE_SEPARATOR,
             .key = key,
             .file_size = value.size(),
-            .deleted_marker = false};
+            .deleted_flag = false};
 
         // todo: the entire file should be written in one go
 
@@ -75,14 +75,14 @@ namespace hedgehog::db
         info.items_count++;
         info.occupied_space += value.size() + sizeof(file_header);
 
-        co_return hedgehog::value_ptr_t{
-            .offset = reservation.offset,
-            .size = static_cast<uint32_t>(value.size() + sizeof(file_header)),
-            .table_id = this->_unique_id,
-        };
+        co_return hedgehog::value_ptr_t(
+            reservation.offset,
+            static_cast<uint32_t>(value.size() + sizeof(file_header)),
+            this->_unique_id
+        );
     }
 
-    async::task<expected<output_file>> value_table::read_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor)
+    async::task<expected<output_file>> value_table::read_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor, bool skip_delete_check)
     {
         if(file_offset + file_size > this->_current_offset)
         {
@@ -116,7 +116,7 @@ namespace hedgehog::db
         file_header header;
         std::copy(read_response.data.data(), read_response.data.data() + sizeof(file_header), reinterpret_cast<uint8_t*>(&header));
 
-        if(header.deleted_marker)
+        if(!skip_delete_check && header.deleted_flag)
         {
             co_return hedgehog::error(std::format("File with key '{}' is marked as deleted in value table (path: {}) at offset {}",
                                                   uuids::to_string(header.key),
@@ -156,7 +156,10 @@ namespace hedgehog::db
         if(std::filesystem::exists(file_path))
             return hedgehog::error("File already exists: " + file_path.string());
 
-        auto file_desc = fs::file_descriptor::from_path(file_path, fs::file_descriptor::open_mode::read_write_new, false, value_table::TABLE_ACTUAL_MAX_SIZE);
+        auto file_desc = fs::file_descriptor::from_path(file_path,
+                                                        fs::file_descriptor::open_mode::read_write_new,
+                                                        false,
+                                                        value_table::TABLE_ACTUAL_MAX_SIZE);
 
         if(!file_desc)
             return hedgehog::error("Failed to create file descriptor: " + file_desc.error().to_string());
@@ -228,6 +231,7 @@ namespace hedgehog::db
                                                   sizeof(file_header),
                                                   read_response.bytes_read));
         }
+
         file_header header;
         std::copy(read_response.data.data(), read_response.data.data() + sizeof(file_header), reinterpret_cast<uint8_t*>(&header));
 
@@ -246,10 +250,10 @@ namespace hedgehog::db
                             uuids::to_string(header.key)));
         }
 
-        if(header.deleted_marker)
+        if(header.deleted_flag)
             co_return hedgehog::ok();
 
-        header.deleted_marker = true;
+        header.deleted_flag = true;
 
         // update infos
         auto& info = this->_info();
@@ -302,64 +306,79 @@ namespace hedgehog::db
 
     async::task<expected<std::pair<output_file, value_table::next_offset_and_size_t>>> value_table::read_file_and_next_header_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor)
     {
-        auto read_result = co_await this->read_async(file_offset, file_size, executor);
+        auto read_result = co_await this->read_async(file_offset, file_size, executor, true);
 
         if(!read_result.has_value())
             co_return read_result.error();
 
         auto next_header_offset = file_offset + sizeof(file_header) + read_result.value().header.file_size;
 
-        while(true) // the loop is needed to skip deleted entries
+        auto get_next_header = co_await executor->submit_request(async::unaligned_read_request{
+            .fd = this->_fd.get(),
+            .offset = next_header_offset,
+            .size = sizeof(file_header),
+        });
+
+        if(get_next_header.error_code != 0)
         {
-            auto get_next_header = co_await executor->submit_request(async::unaligned_read_request{
-                .fd = this->_fd.get(),
-                .offset = next_header_offset,
-                .size = sizeof(file_header),
-            });
-
-            if(get_next_header.error_code != 0)
-            {
-                co_return hedgehog::error(std::format("Failed to read next file header from value table (path: {}): {}",
-                                                      this->_fd.path().string(),
-                                                      strerror(-get_next_header.error_code)));
-            }
-
-            if(get_next_header.bytes_read != sizeof(file_header))
-            {
-                co_return hedgehog::error(std::format("Failed to read next file header from value table (path: {}): expected {}, got {}",
-                                                      this->_fd.path().string(),
-                                                      sizeof(file_header),
-                                                      get_next_header.bytes_read));
-            }
-
-            auto next_header = file_header{};
-            std::copy(get_next_header.data.data(), get_next_header.data.data() + sizeof(file_header), reinterpret_cast<uint8_t*>(&next_header));
-
-            if(next_header.separator == EOF_MARKER)
-            {
-                co_return std::pair(
-                    std::move(read_result.value()),
-                    value_table::next_offset_and_size_t{std::numeric_limits<size_t>::max(), 0});
-            }
-
-            if(next_header.separator != FILE_SEPARATOR)
-            {
-                co_return hedgehog::error(std::format("Invalid next file header separator in value table (path: {}) at offset {}",
-                                                      this->_fd.path().string(),
-                                                      next_header_offset));
-            }
-
-            if(!next_header.deleted_marker)
-            {
-                co_return std::pair(
-                    std::move(read_result.value()),
-                    value_table::next_offset_and_size_t{
-                        next_header_offset,
-                        next_header.file_size + sizeof(file_header)});
-            }
-
-            next_header_offset += sizeof(file_header) + next_header.file_size;
+            co_return hedgehog::error(std::format("Failed to read next file header from value table (path: {}): {}",
+                                                  this->_fd.path().string(),
+                                                  strerror(-get_next_header.error_code)));
         }
+
+        if(get_next_header.bytes_read != sizeof(file_header))
+        {
+            co_return hedgehog::error(std::format("Failed to read next file header from value table (path: {}): expected {}, got {}",
+                                                  this->_fd.path().string(),
+                                                  sizeof(file_header),
+                                                  get_next_header.bytes_read));
+        }
+
+        auto next_header = file_header{};
+        std::copy(get_next_header.data.data(), get_next_header.data.data() + sizeof(file_header), reinterpret_cast<uint8_t*>(&next_header));
+
+        if(next_header.separator == EOF_MARKER)
+        {
+            co_return std::pair(
+                std::move(read_result.value()),
+                value_table::next_offset_and_size_t{std::numeric_limits<size_t>::max(), 0});
+        }
+
+        if(next_header.separator != FILE_SEPARATOR)
+        {
+            co_return hedgehog::error(std::format("Invalid next file header separator in value table (path: {}) at offset {}",
+                                                  this->_fd.path().string(),
+                                                  next_header_offset));
+        }
+
+        co_return std::pair(
+            std::move(read_result.value()),
+            value_table::next_offset_and_size_t{
+                next_header_offset,
+                next_header.file_size + sizeof(file_header)});
+    }
+
+    async::task<expected<file_header>> value_table::get_first_header_async(const std::shared_ptr<async::executor_context>& executor)
+    {
+        auto get_first_header = co_await executor->submit_request(async::unaligned_read_request{
+            .fd = this->_fd.get(),
+            .offset = 0,
+            .size = sizeof(file_header),
+        });
+
+        if(get_first_header.error_code != 0)
+        {
+            co_return hedgehog::error(std::format("Failed to read next file header from value table (path: {}): {}",
+                                                  this->_fd.path().string(),
+                                                  strerror(-get_first_header.error_code)));
+        }
+
+        file_header header;
+        std::copy(get_first_header.data.data(),
+                  get_first_header.data.data() + sizeof(file_header),
+                  reinterpret_cast<uint8_t*>(&get_first_header));
+
+        co_return header;
     }
 
 } // namespace hedgehog::db

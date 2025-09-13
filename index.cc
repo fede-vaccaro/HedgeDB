@@ -111,7 +111,7 @@ namespace hedgehog::db
             if(last_entry_for_partition)
             {
                 auto [dir_prefix, file_prefix] = format_prefix(current_partition);
-                
+
                 auto dir_path = base_path / dir_prefix;
                 if(!std::filesystem::exists(dir_path))
                     std::filesystem::create_directories(dir_path);
@@ -262,7 +262,67 @@ namespace hedgehog::db
         if(it != end && it->key == key)
             return it->value_ptr;
 
+        // for(auto* it = start; it != end; ++it)
+        // {
+        // std::cout << "Index entry key: " << it->key << std::endl;
+        // }
+
         return std::nullopt;
+    }
+
+    async::task<hedgehog::status> sorted_index::_update_in_page(const index_key_t& entry, size_t page_id, const index_key_t* start, const index_key_t* end, const std::shared_ptr<async::executor_context>& executor)
+    {
+        const auto* it = std::lower_bound(start, end, index_key_t{.key = entry.key, .value_ptr = {}});
+
+        if(it == end || it->key != entry.key)
+            co_return hedgehog::error("Key not found", errc::KEY_NOT_FOUND);
+
+        const auto* entry_ptr = reinterpret_cast<const uint8_t*>(&entry);
+
+        auto write_response = co_await executor->submit_request(async::write_request{
+            .fd = this->_fd.get(), // todo: use a rw fd or write fd + fsync at the end
+            .data = const_cast<uint8_t*>(entry_ptr),
+            .size = sizeof(index_key_t),
+            .offset = (PAGE_SIZE_IN_BYTES * page_id) + (it - start),
+        });
+
+        if(write_response.error_code != 0)
+            co_return hedgehog::error("An error occurred while updating an index entry: " + std::string(strerror(-write_response.error_code)));
+
+        co_return hedgehog::ok();
+    }
+
+    async::task<hedgehog::status> sorted_index::try_update_async(const index_key_t& entry, const std::shared_ptr<async::executor_context>& executor)
+    {
+        std::unique_lock<std::mutex> lock(*this->_compaction_mutex, std::try_to_lock); // try to acquire
+
+        if(!lock.owns_lock())
+            co_return hedgehog::error("Busy, index is being compacted", errc::BUSY);
+
+        auto maybe_page_id = this->_find_page_id(entry.key);
+        if(!maybe_page_id)
+            co_return hedgehog::error("Not found", errc::KEY_NOT_FOUND);
+
+        auto page_id = maybe_page_id.value();
+
+        auto page_start_offset = this->_footer.index_start_offset + (page_id * PAGE_SIZE_IN_BYTES);
+
+        auto maybe_page_ptr = co_await this->_load_page_async(page_start_offset, executor);
+
+        if(!maybe_page_ptr)
+            co_return maybe_page_ptr.error();
+
+        auto* page_start_ptr = reinterpret_cast<index_key_t*>(maybe_page_ptr.value().get());
+        index_key_t* page_end_ptr = page_start_ptr + INDEX_PAGE_NUM_ENTRIES;
+
+        if(bool is_last_page = page_id == this->_meta_index.size() - 1; is_last_page)
+        {
+            size_t last_page_size = this->_footer.indexed_keys % INDEX_PAGE_NUM_ENTRIES;
+            if(last_page_size != 0)
+                page_end_ptr = page_start_ptr + last_page_size;
+        }
+
+        co_return co_await this->_update_in_page(entry, page_id, page_start_ptr, page_end_ptr, executor);
     }
 
     void sorted_index::clear_index()
@@ -460,6 +520,9 @@ namespace hedgehog::db
 
     async::task<hedgehog::expected<sorted_index>> index_ops::two_way_merge_async(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor)
     {
+        std::unique_lock lk_left(*left._compaction_mutex);
+        std::unique_lock lk_right(*right._compaction_mutex);
+
         if(config.read_ahead_size < PAGE_SIZE_IN_BYTES)
             co_return hedgehog::error("Read ahead size must be at least one page size");
 
@@ -511,7 +574,7 @@ namespace hedgehog::db
 
         // extrapolate path
         auto [dir, file_name] = format_prefix(left.upper_bound());
-        auto new_path = config.base_path / dir / with_extension(file_name, std::format(".{}", config.new_table_id));
+        auto new_path = config.base_path / dir / with_extension(file_name, std::format(".{}", config.new_index_id));
 
         auto fd_maybe = co_await fs::file_descriptor::from_path_async(new_path, fs::file_descriptor::open_mode::write_new, executor, false);
 
@@ -557,6 +620,8 @@ namespace hedgehog::db
             co_return hedgehog::ok();
         };
 
+        unique_buffer ubuf{}; // needed to handle possible duplicated keys between LHS and RHS
+
         while(true)
         {
             std::vector<uint8_t> merged_keys(config.read_ahead_size * 2);
@@ -565,23 +630,31 @@ namespace hedgehog::db
 
             while(lhs.it() != lhs.end() && rhs.it() != rhs.end())
             {
+                [[maybe_unused]] uuids::uuid last_key;
                 if(*lhs.it() < *rhs.it())
                 {
-                    *merged_it = *lhs.it();
+                    last_key = lhs.it()->key;
+                    ubuf.push(*lhs.it());
                     ++lhs.it();
                 }
                 else if(*rhs.it() < *lhs.it())
                 {
-                    *merged_it = *rhs.it();
+                    last_key = rhs.it()->key;
+                    ubuf.push(*rhs.it());
                     ++rhs.it();
                 }
 
-                index_key_count++;
-                if(index_key_count % INDEX_PAGE_NUM_ENTRIES == 0)
-                    merged_meta_index.emplace_back(merged_it->key);
+                if(ubuf.ready())
+                {
+                    *merged_it = ubuf.pop();
 
-                if(++merged_it == merged_keys_span.end())
-                    break;
+                    index_key_count++;
+                    if(index_key_count % INDEX_PAGE_NUM_ENTRIES == 0)
+                        merged_meta_index.emplace_back(merged_it->key);
+
+                    if(++merged_it == merged_keys_span.end())
+                        break;
+                }
             }
 
             auto this_run_keys = std::distance(merged_keys_span.begin(), merged_it);
@@ -606,9 +679,16 @@ namespace hedgehog::db
                 break;
         }
 
-        // std::cout << "Merged " << index_key_count << " keys" << std::endl;
-
         auto& non_empty_view = !lhs.eof() ? lhs : rhs;
+
+        std::vector<index_key_t> remaining_keys;
+        remaining_keys.reserve(non_empty_view.buffer().size() / sizeof(index_key_t));
+
+        remaining_keys.push_back(ubuf.pop());
+        index_key_count++;
+
+        if(index_key_count % INDEX_PAGE_NUM_ENTRIES == 0)
+            merged_meta_index.emplace_back(remaining_keys.back().key);
 
         while(!non_empty_view.eof())
         {
@@ -619,13 +699,14 @@ namespace hedgehog::db
                 if(index_key_count % INDEX_PAGE_NUM_ENTRIES == 0 || index_key_count == new_table_num_keys)
                     merged_meta_index.emplace_back(non_empty_view.it()->key);
 
+                remaining_keys.push_back(*non_empty_view.it());
                 non_empty_view.it()++;
             }
 
             auto res = co_await executor->submit_request(async::write_request{
                 .fd = fd.get(),
-                .data = const_cast<uint8_t*>(non_empty_view.buffer().data()),
-                .size = non_empty_view.buffer().size(),
+                .data = reinterpret_cast<uint8_t*>(remaining_keys.data()),
+                .size = remaining_keys.size() * sizeof(index_key_t),
                 .offset = bytes_written});
 
             if(res.error_code != 0)

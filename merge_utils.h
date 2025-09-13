@@ -1,7 +1,7 @@
 #pragma once
 
 #include <cstdint>
-#include <type_traits>
+#include <optional>
 
 #include "common.h"
 #include "error.hpp"
@@ -11,6 +11,8 @@ namespace hedgehog::db
 {
 
     // rolling_buffer
+    //
+    // Currently needed as a helper class for the secondary memory merge sort.
     //
     // This is a helper class needed for mantaining a rolling buffer while
     // loading pages of subsequent index_key_t from a sorted index file
@@ -31,8 +33,6 @@ namespace hedgehog::db
     // It's important to note that for convenience the iterator "views" the
     // buffer as an array of `index_key_t`, while the underlying type is
     // uint8_t.
-    //
-    // Currently needed as a helper class for the secondary memory merge sort.
     class rolling_buffer
     {
         using byte_buffer_t = std::vector<uint8_t>;
@@ -116,6 +116,42 @@ namespace hedgehog::db
         {
             this->_view = view_as<index_key_t>(this->_buffer);
             this->_it = this->_view.begin();
+        }
+    };
+
+    class unique_buffer
+    {
+        std::optional<index_key_t> _buffered_item{};
+
+        std::optional<index_key_t> _ready_item{};
+
+    public:
+        unique_buffer() = default;
+
+        void push(index_key_t new_item)
+        {
+            if(!this->_buffered_item)
+                this->_buffered_item = new_item;
+            else if(this->_buffered_item->key != new_item.key)
+                this->_ready_item = std::exchange(this->_buffered_item, new_item);
+            else if(new_item.value_ptr < this->_buffered_item->value_ptr)
+                this->_buffered_item = new_item;
+        }
+
+        bool ready()
+        {
+            return this->_ready_item.has_value();
+        }
+
+        index_key_t pop()
+        {
+            if(this->_ready_item.has_value())
+                return std::exchange(this->_ready_item, std::nullopt).value();
+
+            if(!this->_buffered_item.has_value())
+                throw std::runtime_error("No item to pop");
+
+            return this->_buffered_item.value();
         }
     };
 
