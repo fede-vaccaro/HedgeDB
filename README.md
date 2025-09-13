@@ -1,7 +1,7 @@
 ## HedgehogDB
 
 <p align="center">
-<img src="resources/logo.png" width="50%">
+<img src="resources/logo.png" width="100%">
 </p>
 
 HedgehogDB is a prototype, write-intensive key-value store inspired by [BadgerDB](https://github.com/hypermodeinc/badger) and [RocksDB](https://github.com/facebook/rocksdb), specifically optimized for Hard Disk Drives (HDDs). It aims for simplicity in its design and implementation, with also the goal of having low (or at least, predictable) memory footprint.
