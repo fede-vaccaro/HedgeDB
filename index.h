@@ -20,7 +20,6 @@ namespace hedgehog::db
     struct sorted_index_footer;
     struct meta_index_entry;
 
-
     struct index_ops
     {
         static std::vector<index_key_t> merge_memtables_in_mem(std::vector<mem_index>&& indices);
@@ -47,6 +46,11 @@ namespace hedgehog::db
 
         mem_index(const mem_index&) = delete;
         mem_index& operator=(const mem_index&) = delete;
+
+        void reserve(size_t size)
+        {
+            this->_index.reserve(size);
+        }
 
         bool add(const key_t& key, const value_ptr_t& value)
         {
@@ -130,7 +134,8 @@ namespace hedgehog::db
         sorted_index(const sorted_index&) = delete;
         sorted_index& operator=(const sorted_index&) = delete;
 
-        hedgehog::expected<std::optional<value_ptr_t>> lookup(const key_t& key);
+        hedgehog::expected<std::optional<value_ptr_t>> lookup(const key_t& key) const;
+        async::task<expected<std::optional<value_ptr_t>>> lookup_async(const key_t& key, const std::shared_ptr<async::executor_context>& executor) const;
 
         hedgehog::status load_index();
 
@@ -164,8 +169,9 @@ namespace hedgehog::db
         void clear_index();
 
     private:
-        std::optional<size_t> _find_page_id(const key_t& key);
-        std::optional<value_ptr_t> _find_in_page(const key_t& key, const index_key_t* page_start, const index_key_t* page_end);
+        std::optional<size_t> _find_page_id(const key_t& key) const;
+        std::optional<value_ptr_t> _find_in_page(const key_t& key, const index_key_t* page_start, const index_key_t* page_end) const;
+        async::task<expected<std::unique_ptr<uint8_t>>> _load_page_async(size_t offset, const std::shared_ptr<async::executor_context>& executor) const;
     };
 
 } // namespace hedgehog::db

@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -213,9 +214,6 @@ namespace hedgehog::db
         {
             const auto& key = *it;
 
-            if(key.key == uuids::uuid::from_string("53927bbd-4bd5-41db-a6b2-134cf8467fde").value())
-                std::cout << "breakpoint\n";
-
             current_index.push_back(key);
 
             size_t next_partition{};
@@ -249,7 +247,7 @@ namespace hedgehog::db
         return sorted_indices;
     }
 
-    std::optional<size_t> sorted_index::_find_page_id(const key_t& key)
+    std::optional<size_t> sorted_index::_find_page_id(const key_t& key) const
     {
         auto comparator = [](const meta_index_entry& a, const key_t& b)
         {
@@ -273,7 +271,7 @@ namespace hedgehog::db
         return std::distance(this->_meta_index.begin(), it);
     }
 
-    hedgehog::expected<std::optional<value_ptr_t>> sorted_index::lookup(const key_t& key)
+    hedgehog::expected<std::optional<value_ptr_t>> sorted_index::lookup(const key_t& key) const
     {
         auto maybe_page_id = this->_find_page_id(key);
 
@@ -284,7 +282,7 @@ namespace hedgehog::db
 
         // std::cout << "Found page ID: " << page_id << " for key: " << key << std::endl;
 
-        index_key_t* page_start_ptr{};
+        const index_key_t* page_start_ptr{};
 
         fs::tmp_mmap mmap;
 
@@ -301,7 +299,7 @@ namespace hedgehog::db
 
         page_start_ptr += page_id * INDEX_PAGE_NUM_ENTRIES;
 
-        index_key_t* page_end_ptr = page_start_ptr + INDEX_PAGE_NUM_ENTRIES;
+        const index_key_t* page_end_ptr = page_start_ptr + INDEX_PAGE_NUM_ENTRIES;
 
         if(bool is_last_page = page_id == this->_meta_index.size() - 1; is_last_page)
         {
@@ -313,7 +311,58 @@ namespace hedgehog::db
         return this->_find_in_page(key, page_start_ptr, page_end_ptr);
     }
 
-    std::optional<value_ptr_t> sorted_index::_find_in_page(const key_t& key, const index_key_t* start, const index_key_t* end)
+    async::task<expected<std::optional<value_ptr_t>>> sorted_index::lookup_async(const key_t& key, const std::shared_ptr<async::executor_context>& executor) const
+    {
+        auto maybe_page_id = this->_find_page_id(key);
+        if(!maybe_page_id)
+            co_return std::nullopt;
+
+        auto page_id = maybe_page_id.value();
+
+        auto page_start_offset = this->_footer.index_start_offset + page_id * PAGE_SIZE_IN_BYTES;
+
+        auto maybe_page_ptr = co_await this->_load_page_async(page_start_offset, executor);
+
+        if(!maybe_page_ptr)
+            co_return maybe_page_ptr.error();
+
+        auto page_start_ptr = reinterpret_cast<index_key_t*>(maybe_page_ptr.value().get());
+        index_key_t* page_end_ptr = page_start_ptr + INDEX_PAGE_NUM_ENTRIES;
+
+        if(bool is_last_page = page_id == this->_meta_index.size() - 1; is_last_page)
+        {
+            size_t last_page_size = this->_footer.indexed_keys % INDEX_PAGE_NUM_ENTRIES;
+            if(last_page_size != 0)
+                page_end_ptr = page_start_ptr + last_page_size;
+        }
+
+        co_return this->_find_in_page(key, page_start_ptr, page_end_ptr);
+    }
+
+    async::task<expected<std::unique_ptr<uint8_t>>> sorted_index::_load_page_async(size_t offset, const std::shared_ptr<async::executor_context>& executor) const
+    {
+        auto response = co_await executor->submit_request(
+            async::read_request{
+                .fd = this->_fd.get(),
+                .offset = offset,
+                .size = PAGE_SIZE_IN_BYTES});
+
+        if(response.error_code)
+        {
+            auto err_msg = std::format("An error occurred while reading page at offset {} from file {}:  {}", offset, this->_fd.path().string(), strerror(response.error_code));
+            co_return hedgehog::error(err_msg);
+        }
+
+        if(response.bytes_read != PAGE_SIZE_IN_BYTES)
+        {
+            auto err_msg = std::format("Read {} bytes instead of {} from file {} at offset {}", response.bytes_read, PAGE_SIZE_IN_BYTES, this->_fd.path().string(), offset);
+            co_return hedgehog::error(err_msg);
+        }
+
+        co_return std::move(response.data);
+    }
+
+    std::optional<value_ptr_t> sorted_index::_find_in_page(const key_t& key, const index_key_t* start, const index_key_t* end) const
     {
 
         for(auto* ptr = start; ptr < end; ++ptr)
@@ -357,7 +406,7 @@ namespace hedgehog::db
     }
 
     template <typename T>
-    size_t compute_alignment_padding(size_t element_count, size_t page_size = FS_PAGE_SIZE_BYTES)
+    size_t compute_alignment_padding(size_t element_count, size_t page_size = PAGE_SIZE_IN_BYTES)
     {
         size_t complement = page_size - ((element_count * sizeof(T)) % page_size);
 
@@ -367,7 +416,7 @@ namespace hedgehog::db
         return complement;
     }
 
-    static std::vector<uint8_t> PADDING(FS_PAGE_SIZE_BYTES);
+    static std::vector<uint8_t> PADDING(PAGE_SIZE_IN_BYTES);
 
     template <typename T>
     std::pair<size_t, size_t> write_to(std::ofstream& ofs, const T& data, bool align)
@@ -516,7 +565,7 @@ namespace hedgehog::db
     std::pair<size_t, size_t> infer_index_end_pos(size_t indexed_keys)
     {
         size_t num_pages = ceil(indexed_keys, INDEX_PAGE_NUM_ENTRIES);
-        size_t index_end_pos = num_pages * FS_PAGE_SIZE_BYTES;
+        size_t index_end_pos = num_pages * PAGE_SIZE_IN_BYTES;
         size_t padding = compute_alignment_padding<index_key_t>(indexed_keys);
 
         return {index_end_pos - padding, index_end_pos};
@@ -524,8 +573,11 @@ namespace hedgehog::db
 
     async::task<hedgehog::expected<sorted_index>> index_ops::two_way_merge_async(const std::filesystem::path& base_path, size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor)
     {
-        if(read_ahead_size < FS_PAGE_SIZE_BYTES)
+        if(read_ahead_size < PAGE_SIZE_IN_BYTES)
             co_return hedgehog::error("Read ahead size must be at least one page size");
+
+        if(read_ahead_size % PAGE_SIZE_IN_BYTES != 0)
+            co_return hedgehog::error("Read ahead size must be page aligned (page size: " + std::to_string(PAGE_SIZE_IN_BYTES) + ")");
 
         if(left._footer.version != sorted_index_footer::CURRENT_FOOTER_VERSION ||
            right._footer.version != sorted_index_footer::CURRENT_FOOTER_VERSION)
@@ -559,19 +611,9 @@ namespace hedgehog::db
         {
             return footer.indexed_keys % INDEX_PAGE_NUM_ENTRIES == 0 ? INDEX_PAGE_NUM_ENTRIES : footer.indexed_keys % INDEX_PAGE_NUM_ENTRIES;
         };
-
-        auto maybe_left_fd_o_direct = co_await fs::file_descriptor::from_path_async(left._fd.path(), fs::file_descriptor::open_mode::read_only, executor, true);
-
-        if(!maybe_left_fd_o_direct.has_value())
-            co_return hedgehog::error("Failed to open left file descriptor: " + maybe_left_fd_o_direct.error().to_string());
-
-        auto maybe_right_fd_o_direct = co_await fs::file_descriptor::from_path_async(right._fd.path(), fs::file_descriptor::open_mode::read_only, executor, true);
-
-        if(!maybe_right_fd_o_direct.has_value())
-            co_return hedgehog::error("Failed to open right file descriptor: " + maybe_right_fd_o_direct.error().to_string());
-
+        
         auto lhs_view = async::file_reader(
-            maybe_left_fd_o_direct.value(),
+            left._fd,
             {
                 0,
                 left._footer.index_end_offset,
@@ -579,7 +621,7 @@ namespace hedgehog::db
             executor);
 
         auto rhs_view = async::file_reader(
-            maybe_right_fd_o_direct.value(),
+            right._fd,
             {
                 0,
                 right._footer.index_end_offset,
@@ -588,7 +630,7 @@ namespace hedgehog::db
 
         auto new_path = with_extension(std::min(left._fd.path(), right._fd.path()).string(), ".tmp");
 
-        auto fd_maybe = co_await fs::file_descriptor::from_path_async(new_path, fs::file_descriptor::open_mode::write_new, executor, false, index_end_pos + meta_index_start_pos);
+        auto fd_maybe = co_await fs::file_descriptor::from_path_async(new_path, fs::file_descriptor::open_mode::write_new, executor, false, footer_start_offset + sizeof(sorted_index_footer));
 
         if(!fd_maybe.has_value())
             co_return hedgehog::error("Failed to create file descriptor for merged index at " + new_path.string() + ": " + fd_maybe.error().to_string());
@@ -598,12 +640,12 @@ namespace hedgehog::db
         auto lhs_rbuf = rolling_buffer(std::move(lhs_view));
         auto rhs_rbuf = rolling_buffer(std::move(rhs_view));
 
-        auto init_lhs = co_await lhs_rbuf.next(FS_PAGE_SIZE_BYTES);
+        auto init_lhs = co_await lhs_rbuf.next(read_ahead_size);
 
         if(!init_lhs)
             co_return hedgehog::error("Some error occurred while getting the first page from LHS inde: " + init_lhs.error().to_string());
 
-        auto init_rhs = co_await rhs_rbuf.next(FS_PAGE_SIZE_BYTES);
+        auto init_rhs = co_await rhs_rbuf.next(read_ahead_size);
 
         if(!init_rhs)
             co_return hedgehog::error("Some error occurred while getting the first page from RHS inde: " + init_rhs.error().to_string());
@@ -619,12 +661,12 @@ namespace hedgehog::db
 
         auto refresh_buffers = [&]() -> async::task<hedgehog::status>
         {
-            auto status = co_await lhs.next(FS_PAGE_SIZE_BYTES);
+            auto status = co_await lhs.next(read_ahead_size);
 
             if(!status)
                 co_return hedgehog::error("Cannot refresh LHS view: " + status.error().to_string());
 
-            status = co_await rhs.next(FS_PAGE_SIZE_BYTES);
+            status = co_await rhs.next(read_ahead_size);
 
             if(!status)
                 co_return hedgehog::error("Cannot refresh RHS view: " + status.error().to_string());
@@ -708,7 +750,7 @@ namespace hedgehog::db
 
             bytes_written += res.bytes_written;
 
-            auto refresh_status = co_await non_empty_view.next(FS_PAGE_SIZE_BYTES);
+            auto refresh_status = co_await non_empty_view.next(PAGE_SIZE_IN_BYTES);
 
             if(!refresh_status)
                 co_return hedgehog::error("Failed to refresh view: " + refresh_status.error().to_string());

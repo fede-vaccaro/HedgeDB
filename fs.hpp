@@ -17,14 +17,16 @@
 namespace hedgehog::fs
 {
 
+    // todo: switch to a thread-safe version of strerror
     inline std::string get_error_message_thread_safe()
     {
-        constexpr size_t BUF_SIZE = 1024;
-        std::array<char, BUF_SIZE> buf{};
+        // constexpr size_t BUF_SIZE = 1024;
+        // std::array<char, BUF_SIZE> buf{};
 
-        strerror_r(errno, buf.data(), buf.size());
+        // strerror_r(errno, buf.data(), buf.size());
 
-        return {buf.data()};
+        // return {buf.data()};
+        return strerror(errno);
     }
 
     class file_descriptor
@@ -328,12 +330,12 @@ namespace hedgehog::fs
     class tmp_mmap
     {
     private:
-        file_descriptor* _fd_wrapper;
+        const file_descriptor* _fd_wrapper;
         void* _mapped_ptr = nullptr;
         size_t _mapped_size = 0;
 
     public:
-        static hedgehog::expected<tmp_mmap> from_fd_wrapper(file_descriptor* fd_w)
+        static hedgehog::expected<tmp_mmap> from_fd_wrapper(const file_descriptor* fd_w)
         {
             if(fd_w == nullptr)
                 return hedgehog::error("Cannot map a null file descriptor.");

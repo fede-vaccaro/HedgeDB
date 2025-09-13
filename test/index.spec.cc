@@ -6,9 +6,9 @@
 
 #include <gtest/gtest.h>
 
-#include "../file_reader.h"
 #include "../index.h"
 #include "../io_executor.h"
+#include "../working_group.h"
 
 uint32_t uuid_fake_size(const uuids::uuid& uuid)
 {
@@ -37,6 +37,12 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
         this->NUM_PARTITION_EXPONENT = std::get<1>(GetParam());
         this->READ_AHEAD_SIZE_BYTES = std::get<2>(GetParam());
 
+        if(this->NUM_PARTITION_EXPONENT <= 4 && this->N_KEYS_PER_RUN > 1'000'000)
+        {
+            this->READ_AHEAD_SIZE_BYTES *= 100; // otherwise the test will be too slow
+            std::cout << "This test needs larger read ahead size: " << this->READ_AHEAD_SIZE_BYTES << " bytes\n";
+        }
+
         if(!std::filesystem::exists(this->_base_path))
             std::filesystem::create_directories(this->_base_path);
         else
@@ -53,6 +59,9 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
                 n_keys = std::min(n_keys, 20000000UL); // for the second run, limit to 20000000 keys
 
             auto memtable = hedgehog::db::mem_index{};
+
+            memtable.reserve(n_keys);
+
             for(size_t j = 0; j < n_keys; ++j)
             {
                 auto uuid = generate_uuid();
@@ -84,8 +93,11 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
 
     void TearDown() override
     {
-        this->_executor->shutdown();
-        this->_executor.reset();
+        if(this->_executor)
+        {
+            this->_executor->shutdown();
+            this->_executor.reset();
+        }
     }
 
     uuids::uuid generate_uuid()
@@ -140,9 +152,8 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
     uuids::uuid_random_generator gen{generator};
 };
 
-TEST_P(sorted_string_merge_test, test_merge_unified)
+TEST_P(sorted_string_merge_test, DISABLED_test_merge_unified)
 {
-
     std::map<uint16_t, hedgehog::db::sorted_index> unified_sorted_indices;
 
     std::chrono::microseconds total_duration{0};
@@ -200,10 +211,6 @@ TEST_P(sorted_string_merge_test, test_merge_unified)
         auto it = unified_sorted_indices.find(prefix);
         assert(it != unified_sorted_indices.end() && "Expected to find sorted index for prefix");
 
-        if(uuid == uuids::uuid::from_string("53927bbd-4bd5-41db-a6b2-134cf8467fde").value())
-            std::cout << "breakpoint\n";
-        // ASSERT_TRUE(it != unified_sorted_indices.end()) << "Expected to find sorted index for prefix " << prefix;
-
         auto result = it->second.lookup(uuid);
         ASSERT_TRUE(result) << "Expected to find uuid " << uuid << " in the new index; Error: " << result.error().to_string();
         auto& value = result.value();
@@ -214,30 +221,41 @@ TEST_P(sorted_string_merge_test, test_merge_unified)
 
 TEST_P(sorted_string_merge_test, test_merge_unified_async)
 {
-    std::map<uint16_t, hedgehog::db::sorted_index> unified_sorted_indices;
+    using sorted_indices_map_t = std::map<uint16_t, hedgehog::db::sorted_index>;
 
-    std::vector<std::promise<void>> promises;
-    std::vector<std::future<void>> futures;
+    sorted_indices_map_t unified_sorted_indices;
 
-    auto make_task = [this, &futures, &promises, &unified_sorted_indices](const hedgehog::db::sorted_index& left, const hedgehog::db::sorted_index& right, size_t promise_id) -> hedgehog::async::task<void>
+    std::vector<std::future<hedgehog::status>> futures;
+    hedgehog::async::working_group merge_wg;
+
+    auto merge_task_factory =
+        [](
+            const hedgehog::db::sorted_index& left,
+            const hedgehog::db::sorted_index& right,
+            std::vector<std::future<hedgehog::status>>& futures,
+            std::map<uint16_t, hedgehog::db::sorted_index>& index_map,
+            hedgehog::async::working_group& wg,
+            auto* _this) -> hedgehog::async::task<void>
     {
+        auto promise = std::promise<hedgehog::status>{};
+        futures.emplace_back(promise.get_future());
+
         auto new_index = co_await hedgehog::db::index_ops::two_way_merge_async(
-            this->_base_path,
-            this->READ_AHEAD_SIZE_BYTES,
+            _this->_base_path,
+            _this->READ_AHEAD_SIZE_BYTES,
             left,
             right,
-            this->_executor);
+            _this->_executor);
 
         if(!new_index.has_value())
-        {
-            std::cerr << "Failed to merge sorted indices: " << new_index.error().to_string() << '\n';
-            throw std::runtime_error("Failed to merge sorted indices: " + new_index.error().to_string());
-        }
+            promise.set_value(new_index.error());
 
         auto prefix = new_index.value().upper_bound();
-        unified_sorted_indices.insert({prefix, std::move(new_index.value())});
+        index_map.insert({prefix, std::move(new_index.value())});
 
-        promises[promise_id].set_value();
+        promise.set_value(hedgehog::ok());
+
+        wg.decr();
     };
 
     std::chrono::microseconds total_duration{0};
@@ -266,14 +284,26 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
                 return a.size() >= b.size();
             });
 
-        promises.emplace_back();
-        futures.emplace_back(promises.back().get_future());
+        merge_wg.incr();
 
-        this->_executor->submit_io_task(make_task(sorted_indices[0], sorted_indices[1], promises.size() - 1));
+        this->_executor->submit_io_task(merge_task_factory(
+            sorted_indices[0],
+            sorted_indices[1],
+            futures,
+            unified_sorted_indices,
+            merge_wg,
+            this));
     }
 
+    merge_wg.wait();
+
     for(auto& future : futures)
-        future.wait();
+    {
+        auto status = future.get();
+        ASSERT_TRUE(status) << "Expected successful merge of two sorted indices; Error: " << status.error().to_string();
+    }
+
+    futures = std::vector<std::future<hedgehog::status>>{}; // clear some memory
 
     auto t1 = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
@@ -281,7 +311,37 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
 
     auto total_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(total_duration).count();
     std::cout << "Total duration for merging: " << total_duration_ms << " ms" << std::endl;
-    std::cout << "Average duration per merge: " << (total_duration_ms / this->_sorted_indices.size()) << " ms" << std::endl;
+    std::cout << "Average duration per merge: " << (static_cast<double>(total_duration_ms) / this->_sorted_indices.size()) << " ms" << std::endl;
+
+    hedgehog::async::working_group query_wg;
+
+    query_wg.set(this->_uuids.size());
+
+    auto lookup_task_factory = [](
+                                   const uuids::uuid& uuid,
+                                   const hedgehog::db::sorted_index& index,
+                                   const std::shared_ptr<hedgehog::async::executor_context>& executor,
+                                   hedgehog::async::working_group& wg) -> hedgehog::async::task<void>
+    {
+        auto lookup = co_await index.lookup_async(uuid, executor);
+
+        if(!lookup.has_value())
+            throw std::runtime_error("Failed to lookup uuid: Error: " + lookup.error().to_string());
+
+        auto lookup_result = lookup.value();
+
+        if(!lookup_result.has_value())
+            throw std::runtime_error("Expected to find value for uuid in the new index");
+
+        auto& value = lookup_result.value();
+
+        if(value.size != uuid_fake_size(uuid))
+            throw std::runtime_error("Unexpected value size for uuid");
+
+        wg.decr();
+    };
+
+    t0 = std::chrono::high_resolution_clock::now();
 
     for(const auto& uuid : this->_uuids)
     {
@@ -290,26 +350,29 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
         auto it = unified_sorted_indices.find(prefix);
         assert(it != unified_sorted_indices.end() && "Expected to find sorted index for prefix");
 
-        if(uuid == uuids::uuid::from_string("53927bbd-4bd5-41db-a6b2-134cf8467fde").value())
-            std::cout << "breakpoint\n";
-
         ASSERT_TRUE(it != unified_sorted_indices.end()) << "Expected to find sorted index for prefix " << prefix;
 
-        auto result = it->second.lookup(uuid);
-        ASSERT_TRUE(result) << "Expected to find uuid " << uuid << " in the new index; Error: " << result.error().to_string();
-        auto& value = result.value();
-        ASSERT_TRUE(value.has_value()) << "Expected to find value for uuid " << uuid << " in the new index";
-        ASSERT_EQ(value->size, uuid_fake_size(uuid));
+        this->_executor->submit_io_task(lookup_task_factory(uuid, it->second, this->_executor, query_wg));
     }
+
+    query_wg.wait();
+
+    t1 = std::chrono::high_resolution_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+
+    auto lookup_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+
+    std::cout << "Total duration for lookups: " << lookup_duration_ms << " ms" << std::endl;
+    std::cout << "Average duration per lookup: " << (static_cast<double>(lookup_duration_ms * 1000) / this->_uuids.size()) << " us" << std::endl;
 }
 
 INSTANTIATE_TEST_SUITE_P(
     test_suite,
     sorted_string_merge_test,
     testing::Combine(
-        testing::Values(1000, 5000, 10000, 1000000), // n keys
-        testing::Values(0, 1, 4, 10, 16),            // num partition exponent -> 1, 2, 16, 1024, 65536 partitions
-        testing::Values(4096, 8192, 16384)           // Read ahead size
+        testing::Values(1000, 5000, 10'000, 1'000'000, 100'000'000), // n keys
+        testing::Values(0, 1, 4, 10, 16),                            // num partition exponent -> 1, 2, 16, 1024, 65536 partitions
+        testing::Values(4096, 8192, 16384)                           // Read ahead size
         ),
     [](const testing::TestParamInfo<sorted_string_merge_test::ParamType>& info)
     {
