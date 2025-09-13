@@ -23,115 +23,21 @@
 #include <variant>
 
 #include "logger.h"
+#include "task.h"
 
 using namespace std::string_literals;
 
-int counter = 0;
-
-struct request
+struct read_request
 {
     int fd;
     size_t offset;
     size_t size;
 };
 
-struct response
+struct read_response
 {
-    std::unique_ptr<uint8_t> data; // pointer to the data read
+    std::unique_ptr<uint8_t> data;
     size_t data_size;
-};
-
-class task
-{
-    struct Promise;
-    using handle_t = std::coroutine_handle<Promise>;
-    handle_t _handle;
-
-    struct Promise
-    {
-
-        int id = counter++;
-
-        task get_return_object()
-        {
-            auto h = handle_t::from_promise(*this);
-            log(id, "-Resumable::promise::get_return_object: ", h.address());
-            return task{std::move(h)};
-        }
-
-        auto initial_suspend()
-        {
-            log(id, "-Resumable::promise::initial_suspend");
-            return std::suspend_always{};
-        }
-
-        auto final_suspend() noexcept
-        {
-            log(id, "-Resumable::promise::final_suspend");
-            return std::suspend_always{};
-        }
-
-        void return_void()
-        {
-            log(id, "-Resumable::promise::return_void");
-        }
-
-        void unhandled_exception()
-        {
-            throw;
-        }
-    };
-
-    explicit task(handle_t h)
-        : _handle(h)
-    {
-    }
-
-public:
-    using promise_type = Promise;
-    task(task&& r)
-        : _handle{std::exchange(r._handle, {})}
-    {
-    }
-    ~task()
-    {
-        if(this->_handle)
-            this->_handle.destroy();
-    }
-
-    bool await_ready()
-    {
-        log(this->_handle.promise().id, "-Resumable::await_ready");
-        return false;
-    }
-
-    void await_suspend(std::coroutine_handle<Promise> caller_handle)
-    {
-        log(this->_handle.promise().id, "-Resumable::await_suspend on handle: ", caller_handle.address());
-        return;
-    }
-
-    auto id() const { return this->_handle.promise().id; }
-
-    void await_resume()
-    {
-        log(this->_handle.promise().id, "-Resumable::await_resume");
-
-        if(this->_handle.done())
-        {
-            log(this->_handle.promise().id, "-Resumable::done");
-        }
-    }
-
-    bool operator()()
-    {
-        if(!this->_handle.done())
-            this->_handle.resume();
-
-        return this->_handle.done();
-    }
-
-    bool done() const { return this->_handle && this->_handle.done(); }
 };
 
 std::pair<int, size_t> open_fd(const std::string& path, bool direct = true)
@@ -206,73 +112,37 @@ struct executor
 
 struct mailbox
 {
-    std::variant<std::monostate, request, response> _msg;
-    std::coroutine_handle<> _continuation;
+    std::variant<std::monostate, read_request, read_response> msg;
+    std::coroutine_handle<> continuation;
 
-    auto submit_request(request r)
+    read_request get_request()
     {
-        struct awaitable_mailbox
-        {
-            mailbox& mbox;
-
-            bool await_ready() noexcept { return false; }
-
-            void await_suspend(
-                std::coroutine_handle<task::promise_type> handle) noexcept
-            {
-                log("[mailbox] await_suspend called, setting continuation: ", handle.address());
-                mbox._continuation = handle;
-
-                auto casted_continuation = std::coroutine_handle<task::promise_type>::from_address(
-                    mbox._continuation.address());
-                log("[mailbox] submit_request called with ", mbox.get_request().offset, " from ", casted_continuation.promise().id);
-            }
-
-            response await_resume() noexcept
-            {
-                assert(std::holds_alternative<response>(mbox._msg) && "await_resume called before response was set");
-                return std::move(std::get<response>(mbox._msg));
-            }
-
-            awaitable_mailbox(mailbox& m)
-                : mbox(m)
-            {
-            }
-        };
-
-        _msg = std::move(r);
-        return awaitable_mailbox{*this};
+        assert(!std::holds_alternative<std::monostate>(_msg) && "get_request called before request was set");
+        return std::get<read_request>(msg);
     }
 
-    request get_request()
-    {
-        assert(std::holds_alternative<request>(_msg) && "get_request called before request was set");
-        return std::get<request>(_msg);
-    }
-
-    auto set_response(response r)
+    auto set_response(read_response r)
     {
         log("[mailbox] set_response called with ", r.data_size);
-        assert(std::holds_alternative<request>(_msg) && "set_response called before request was set");
-        _msg = std::move(r);
+        assert(std::holds_alternative<read_request>(_msg) && "set_response called before request was set");
+        this->msg = std::move(r);
     }
 
     auto resume()
     {
-        log("[mailbox] resume called on _continuation: ", this->_continuation.address());
+        log("[mailbox] resume called on _continuation: ", this->continuation.address());
 
-        if(this->_continuation.done())
+        if(this->continuation.done())
             return true;
 
         assert(_continuation && !this->_continuation.done() && "resume called without a continuation set");
 
-        this->_continuation.resume();
+        this->continuation.resume();
 
-        return this->_continuation.done();
+        return this->continuation.done();
     }
 };
 
-using task_mailbox = std::pair<task, std::unique_ptr<mailbox>>;
 size_t PAGE_SIZE = 4096;
 
 size_t time_alloc = 0;
@@ -291,7 +161,8 @@ std::unique_ptr<uint8_t> allocate_mem_aligned(size_t size)
     return std::unique_ptr<uint8_t>(ptr);
 }
 
-std::vector<task_mailbox> pop_n(std::deque<task_mailbox>& queue, size_t n)
+template <typename T>
+std::vector<T> pop_n(std::deque<T>& queue, size_t n)
 {
     auto it_start = queue.begin();
     auto it_end = it_start + std::min(n, queue.size());
@@ -302,7 +173,7 @@ std::vector<task_mailbox> pop_n(std::deque<task_mailbox>& queue, size_t n)
         return {};
     }
 
-    std::vector<task_mailbox> slice;
+    std::vector<T> slice;
     auto slice_size = std::distance(it_start, it_end);
     slice.reserve(slice_size);
     std::move(it_start, it_end, std::back_inserter(slice));
@@ -313,56 +184,54 @@ std::vector<task_mailbox> pop_n(std::deque<task_mailbox>& queue, size_t n)
     return slice;
 }
 
+constexpr auto QUEUE_DEPTH = 64;
+
 class executor_context
 {
-    size_t QUEUE_DEPTH = 64;
+    size_t _queue_depth = QUEUE_DEPTH;
 
-    size_t _current_request_id{0};
-    struct io_uring _ring;
+    io_uring _ring;
 
-    size_t _request_counter = 0;
-    using in_flight_request_t = std::pair<task_mailbox, response>;
-    std::unordered_map<size_t, in_flight_request_t> _in_flight_requests;
+    using in_flight_request_t = std::pair<std::unique_ptr<mailbox>, read_response>; // todo merge response to mailbox
 
-    std::optional<uint32_t> _sqe_space_left{};
+    std::unordered_map<std::coroutine_handle<>, in_flight_request_t> _in_flight_requests;
+
+    std::deque<std::unique_ptr<mailbox>> _waiting_for_io_queue;
+    std::deque<std::unique_ptr<mailbox>> _ready_queue;
 
 public:
-    void submit_sqe(std::deque<task_mailbox>& waiting_for_io_queue, std::deque<task_mailbox>& ready_queue)
+    void submit_sqe()
     {
-        if(!this->_in_flight_requests.empty()) // or: this->_in_flight_requests.size() > 16 // 32 
+        if(!this->_in_flight_requests.empty()) // or: this->_in_flight_requests.size() > 16 // 32. should investigate
             return;
 
-        this->ready();
+        auto sqe_space_left = io_uring_sq_space_left(&this->_ring);
 
-        auto request_nr = std::exchange(this->_sqe_space_left, std::nullopt).value();
-
-        auto requests = pop_n(waiting_for_io_queue, request_nr);
+        auto requests = pop_n(this->_waiting_for_io_queue, sqe_space_left);
 
         if(requests.empty())
             return;
 
-        for(auto& tmbox : requests)
+        for(auto& mailbox : requests)
         {
-            auto& [task, mailbox] = tmbox;
-
             io_uring_sqe* sqe = io_uring_get_sqe(&this->_ring);
 
             if(!sqe)
                 throw std::runtime_error("io_uring_get_sqe failed: "s + strerror(errno));
 
-            size_t request_idx = this->_request_counter++;
-
             const auto& req = mailbox->get_request();
 
-            response resp = {
+            read_response resp = {
                 .data = allocate_mem_aligned(req.size),
                 .data_size = req.size};
 
             io_uring_prep_read(sqe, req.fd, resp.data.get(), req.size, req.offset);
 
-            sqe->user_data = request_idx;
+            auto continuation = mailbox->continuation;
 
-            this->_in_flight_requests.emplace(request_idx, in_flight_request_t{task_mailbox{std::move(task), std::move(mailbox)}, std::move(resp)});
+            sqe->user_data = reinterpret_cast<uint64_t>(continuation.address());
+
+            this->_in_flight_requests.emplace(continuation, in_flight_request_t{std::move(mailbox), std::move(resp)});
         }
 
         auto ready = io_uring_sq_ready(&this->_ring);
@@ -378,18 +247,18 @@ public:
             if(ready != submit) // todo might remove
             {
                 std::cerr << "Warning: io_uring_submit ready != submit. in flight: "
-                          << _in_flight_requests.size() << ", ready: " << ready << "submit: " << submit << std::endl;
+                          << _in_flight_requests.size() << ", ready: " << ready << " submit: " << submit << std::endl;
             }
 
             if(ready != requests.size())
             {
                 std::cerr << "Warning: io_uring_submit ready != requests.size(). requests.size(): "
-                          << requests.size() << ", ready: " << ready << "submit: " << submit << std::endl;
+                          << requests.size() << ", ready: " << ready << " submit: " << submit << " in flight: " << _in_flight_requests.size() << std::endl;
             }
         }
     }
 
-    void wait_for_cqe(std::deque<task_mailbox>& ready_queue)
+    void wait_for_cqe()
     {
         auto wait_nr = io_uring_cq_ready(&this->_ring);
 
@@ -420,15 +289,19 @@ public:
             // if(cqe->user_data >= _in_flight_requests.size())
             // throw std::runtime_error("Invalid user_data: " + std::to_string(cqe->user_data) + ", exceeds in_flight_requests size: " + std::to_string(_in_flight_requests.size()));
 
-            auto it = this->_in_flight_requests.find(cqe->user_data);
+            auto coro_handle = std::coroutine_handle<>::from_address(reinterpret_cast<void*>(cqe->user_data));
+            auto it = this->_in_flight_requests.find(coro_handle);
+
             if(it == this->_in_flight_requests.end())
                 throw std::runtime_error("Invalid user_data: " + std::to_string(cqe->user_data) + ", not found in in_flight_requests");
 
-            auto [tmbox, response] = std::move(it->second);
+            auto [mailbox, response] = std::move(it->second);
+
             this->_in_flight_requests.erase(it);
 
-            tmbox.second->set_response(std::move(response));
-            ready_queue.push_back(std::move(tmbox));
+            mailbox->set_response(std::move(response));
+
+            this->_ready_queue.emplace_back(std::move(mailbox));
 
             cqe_count++;
         }
@@ -439,6 +312,57 @@ public:
         io_uring_cq_advance(&this->_ring, cqe_count);
     }
 
+    void do_work()
+    {
+        while(!this->_ready_queue.empty())
+        {
+            auto mailbox = std::move(this->_ready_queue.front());
+            this->_ready_queue.pop_front();
+
+            mailbox->continuation.resume();
+
+            if(io_uring_cq_ready(&this->_ring) > 0)
+                break;
+        }
+    }
+
+    auto submit_request(read_request r)
+    {
+        struct awaitable_mailbox
+        {
+            mailbox& mbox;
+
+            bool await_ready() noexcept { return false; }
+
+            void await_suspend(
+                std::coroutine_handle<> handle) noexcept
+            {
+                mbox.continuation = handle;
+            }
+
+            read_response await_resume() noexcept
+            {
+                log("[awaitable_mailbox] await_resume called on mailbox with continuation: ", mbox.continuation.address());
+                assert(std::holds_alternative<read_response>(mbox._msg) && "await_resume called before response was set");
+                return std::move(std::get<read_response>(mbox.msg));
+            }
+
+            awaitable_mailbox(mailbox& m)
+                : mbox(m)
+            {
+            }
+        };
+
+        auto new_mailbox = std::make_unique<mailbox>();
+        new_mailbox->msg = std::move(r);
+
+        auto awaitable = awaitable_mailbox{*new_mailbox};
+
+        this->_waiting_for_io_queue.emplace_back(std::move(new_mailbox));
+
+        return awaitable;
+    }
+
     size_t in_flight_requests_size() const
     {
         return this->_in_flight_requests.size();
@@ -446,12 +370,12 @@ public:
 
     executor_context()
     {
-        int ret = io_uring_queue_init(QUEUE_DEPTH, &this->_ring, IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER);
+        int ret = io_uring_queue_init(this->_queue_depth, &this->_ring, IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER);
 
         if(ret < 0)
             throw std::runtime_error("error with io_uring_queue_init: "s + strerror(-ret));
 
-        log("[executor_context] io_uring initialized with QUEUE_DEPTH: ", QUEUE_DEPTH);
+        log("[executor_context] io_uring initialized with QUEUE_DEPTH: ", this->_queue_depth);
     }
 
     ~executor_context()
@@ -459,22 +383,13 @@ public:
         io_uring_queue_exit(&this->_ring);
         log("[executor_context] io_uring exited");
     }
-
-    bool ready()
-    {
-        this->_sqe_space_left = io_uring_sq_space_left(&this->_ring);
-
-        log("[executor_context] ready called, sqe_space_left: ", *this->_sqe_space_left);
-
-        return this->_sqe_space_left > 0;
-    }
 };
 
 std::atomic_uint64_t completed = 0;
 
-task get_obj(request r, mailbox& mbox)
+task<int> get_obj(read_request r, executor_context& executor)
 {
-    auto response = co_await mbox.submit_request(r);
+    auto response = co_await executor.submit_request(r);
 
     std::vector<uint8_t> data{};
     data.assign(static_cast<uint8_t*>(response.data.get()),
@@ -497,13 +412,14 @@ task get_obj(request r, mailbox& mbox)
     // log_always("[get_obj] task complete with size ", data.size());
 
     completed++;
+
+    co_return 0;
 }
 
 int main()
 {
-    std::deque<task_mailbox> requests_queue;       // tasks requested, but not yet submitted
-    std::deque<task_mailbox> waiting_for_io_queue; // tasks waiting for IO
-    std::deque<task_mailbox> ready_queue;          // tasks which received IO responses, but not finished yet
+    std::deque<task<int>> requests_queue;
+    std::vector<std::pair<task<int>, bool>> in_progress_tasks;
 
     executor_context context{};
 
@@ -512,13 +428,14 @@ int main()
     auto rng = std::mt19937(std::random_device{}());
     auto dist = std::uniform_int_distribution<size_t>(0, file_size / PAGE_SIZE - 10);
 
-    auto N_REQUESTS = 1000000;
+    auto N_REQUESTS = 100000;
     for(size_t i = 0; i < N_REQUESTS; i++)
     {
-        auto mbox = std::make_unique<mailbox>();
-        auto task = get_obj(request{.fd = fd, .offset = dist(rng) * PAGE_SIZE, .size = PAGE_SIZE}, *mbox);
-        requests_queue.emplace_back(std::move(task), std::move(mbox));
+        auto task = get_obj(read_request{.fd = fd, .offset = dist(rng) * PAGE_SIZE, .size = PAGE_SIZE}, context);
+        requests_queue.emplace_back(std::move(task));
     }
+
+    constexpr auto MAX_PARALLEL_REQUESTS = QUEUE_DEPTH * 2;
 
     size_t time_prepare = 0;
     size_t time_execute = 0;
@@ -527,62 +444,37 @@ int main()
     auto t0 = std::chrono::steady_clock::now();
     while(true)
     {
-        auto t00 = std::chrono::steady_clock::now();
-        while(!requests_queue.empty()) // start processing requests
+        while(!requests_queue.empty() && in_progress_tasks.size() < MAX_PARALLEL_REQUESTS)
         {
-            log("[main] processing request_queue tasks");
-            auto [task, mbox] = std::move(requests_queue.front());
+            auto task = std::move(requests_queue.front());
             requests_queue.pop_front();
 
-            if(!task())
-                waiting_for_io_queue.push_back({std::move(task), std::move(mbox)});
+            in_progress_tasks.emplace_back(std::move(task), false);
         }
-        auto t01 = std::chrono::steady_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t01 - t00);
-        time_prepare += duration.count();
-        // {
-        // log("[main] no requests queued");
-        // }
 
-        // assert(executor.ready()); // executor should be ready to submit sqe
-        auto t11 = std::chrono::steady_clock::now();
-        if(context.ready())
-            context.submit_sqe(waiting_for_io_queue, ready_queue);
-        auto t12 = std::chrono::steady_clock::now();
-        auto duration2 = std::chrono::duration_cast<std::chrono::microseconds>(t12 - t11);
+        context.submit_sqe();
 
-        auto t31 = std::chrono::steady_clock::now();
-        while(!ready_queue.empty()) // do work on tasks which received IO responses
+        for(auto& [task, started] : in_progress_tasks)
         {
-            log("[main] processing ready tasks: ", ready_queue.size());
-            auto [task, mbox] = std::move(ready_queue.front());
-            ready_queue.pop_front();
-            log("[main] resuming task/mailbox: ", task.id());
-            mbox->resume();
-            if(!task.done())
-                waiting_for_io_queue.emplace_front(std::move(task), std::move(mbox)); // it is not correct: it should emplace front BUT respecting the ready_queue order
+            if(started)
+                continue;
 
-            if(context.ready() && !waiting_for_io_queue.empty())
-                break;
+            task();
+            started = true; // mark task as started
         }
-        auto t32 = std::chrono::steady_clock::now();
-        auto duration4 = std::chrono::duration_cast<std::chrono::microseconds>(t32 - t31);
-        time_section_ready += duration4.count();
 
-        // else
-        // {
-        // log("[main] no ready tasks");
-        // }
+        in_progress_tasks.erase(
+            std::remove_if(in_progress_tasks.begin(), in_progress_tasks.end(),
+                           [](const auto& pair)
+                           { return pair.first.done(); }),
+            in_progress_tasks.end());
+
+        context.do_work();
 
         log("[main] waiting for cqes");
-        auto t22 = std::chrono::steady_clock::now();
-        context.wait_for_cqe(ready_queue); // wait for cqe and process them
-        auto t23 = std::chrono::steady_clock::now();
-        auto duration3 = std::chrono::duration_cast<std::chrono::microseconds>(t23 - t22);
+        context.wait_for_cqe(); // wait for cqe and process them
 
-        time_execute += duration2.count() + duration3.count();
-
-        if(ready_queue.empty() && requests_queue.empty() && waiting_for_io_queue.empty())
+        if(in_progress_tasks.empty())
         {
             if(context.in_flight_requests_size() > 0)
             {
@@ -595,14 +487,11 @@ int main()
             }
         }
     }
+
     auto t1 = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
     std::cout << "Processed " << N_REQUESTS << " requests in " << duration.count() / 1000.0 << " ms." << std::endl;
     std::cout << "Average time per request: " << static_cast<double>(duration.count()) / N_REQUESTS << " us." << std::endl;
     std::cout << "Average throughput: " << static_cast<size_t>(static_cast<double>(N_REQUESTS) / (duration.count() / 1000000.0)) << " requests/sec." << std::endl;
     std::cout << "Total completed: " << completed << std::endl;
-    std::cout << "Time section 0: " << time_prepare / 1000.0 << " ms." << std::endl;
-    std::cout << "Time section 1: " << time_execute / 1000.0 << " ms." << std::endl;
-    std::cout << "Time section 2: " << time_section_ready / 1000.0 << " ms." << std::endl;
-    std::cout << "Time spent on allocation: " << time_alloc / 1000.0 << " ms." << std::endl;
 }

@@ -1,7 +1,12 @@
+#pragma once 
+
 #include <coroutine>
 #include <cstddef>
 #include <iostream>
+#include <sstream> // Required for std::ostringstream
 #include <utility>
+
+#include "logger.h"
 
 static int counter = 0;
 
@@ -11,7 +16,7 @@ struct awaitable_final_suspend
     bool await_ready() const noexcept { return false; }
     std::coroutine_handle<> await_suspend(std::coroutine_handle<PROMISE> h) noexcept
     {
-        std::cout << h.promise().id << "-task::promise::final_suspend::await_suspend on handle: " << h.address() << std::endl;
+        log(h.promise().id, "-task::promise::final_suspend::await_suspend on handle: ", h.address());
 
         if(auto c = h.promise()._continuation)
             return c;
@@ -33,25 +38,25 @@ struct promise
     TASK get_return_object()
     {
         auto h = handle_t::from_promise(*this);
-        std::cout << id << "-task::promise::get_return_object: " << h.address() << "\n";
+        log(id, "-task::promise::get_return_object: ", h.address(), "");
         return TASK{std::move(h)};
     }
 
     auto initial_suspend()
     {
-        std::cout << id << "-task::promise::initial_suspend\n";
+        log(id, "-task::promise::initial_suspend");
         return std::suspend_always{};
     }
 
     auto final_suspend() noexcept
     {
-        std::cout << id << "-task::promise::final_suspend\n";
+        log(id, "-task::promise::final_suspend");
         return awaitable_final_suspend<promise>{};
     }
 
     void return_value(RETURN_VALE&& value)
     {
-        std::cout << id << "-task::promise::return_value " << value << "\n";
+        log(id, "-task::promise::return_value ", value, "");
         this->value = std::move(value);
     }
 
@@ -80,6 +85,21 @@ public:
             this->_handle.destroy();
     }
 
+    task(const task&) = delete;
+    task& operator=(const task&) = delete;
+
+    task& operator=(task&& r)
+    {
+        if(this != &r)
+        {
+            if(this->_handle)
+                this->_handle.destroy();
+
+            this->_handle = std::exchange(r._handle, {});
+        }
+        return *this;
+    }
+
     bool resume()
     {
         return (*this)();
@@ -87,24 +107,24 @@ public:
 
     bool await_ready()
     {
-        std::cout << this->_handle.promise().id << "-task::await_ready\n";
+        log(this->_handle.promise().id, "-task::await_ready");
         return false;
     }
 
     auto await_suspend(std::coroutine_handle<> caller_handle)
     {
-        std::cout << this->_handle.promise().id << "-task::await_suspend on handle: " << caller_handle.address() << std::endl;
+        log(this->_handle.promise().id, "-task::await_suspend on handle: ", caller_handle.address(), "");
         this->_handle.promise()._continuation = caller_handle;
         return this->_handle;
     }
 
     RETURN_VALUE await_resume()
     {
-        std::cout << this->_handle.promise().id << "-task::await_resume\n";
+        log(this->_handle.promise().id, "-task::await_resume");
 
         if(this->_handle.done())
         {
-            std::cout << this->_handle.promise().id << "-task::done\n";
+            log(this->_handle.promise().id, "-task::done");
             return std::move(this->_handle.promise().value);
         }
 
@@ -118,4 +138,10 @@ public:
 
         return this->_handle.done();
     }
+
+    [[nodiscard]] bool done() const
+    {
+        return this->_handle.done();
+    }
+    
 };
