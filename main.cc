@@ -138,8 +138,10 @@ int main(int argc, char* argv[])
         }
 
         if(maybe_data_readback.value() != data)
+        {
+            std::cerr << "Failed to read data for key: " << key << '\n';
             continue;
-            // std::cerr << "Failed to read data for key: " << key << '\n';
+        }   
 
         if(count++ == 1000)
             break;
