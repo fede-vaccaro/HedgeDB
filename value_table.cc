@@ -1,7 +1,6 @@
 #include <cstring>
 #include <error.hpp>
 #include <filesystem>
-#include <limits>
 
 #include "common.h"
 #include "io_executor.h"
@@ -12,9 +11,6 @@ namespace hedgehog::db
 {
     expected<value_table::write_reservation> value_table::get_write_reservation(size_t file_size)
     {
-        if(this->_closed)
-            return hedgehog::error(std::format("This table (path: {}) is closed.", this->_fd.path().string()));
-
         if(file_size > value_table::MAX_FILE_SIZE)
             return hedgehog::error(std::format("Requested file size ({}) is larger than max allowed ({})", file_size, value_table::MAX_FILE_SIZE));
 
@@ -35,7 +31,7 @@ namespace hedgehog::db
         return value_table::write_reservation{ret_offset};
     }
 
-    async::task<expected<hedgehog::value_ptr_t>> value_table::write_async(key_t key, const std::vector<uint8_t>& value, const value_table::write_reservation& reservation, const std::shared_ptr<async::executor_context> executor)
+    async::task<expected<hedgehog::value_ptr_t>> value_table::write_async(key_t key, const std::vector<uint8_t>& value, const value_table::write_reservation& reservation, const std::shared_ptr<async::executor_context>& executor)
     {
         auto header = file_footer{
             .key = key,
@@ -58,8 +54,11 @@ namespace hedgehog::db
             .offset = reservation.offset + value.size(),
         });
 
+        if(write_footer_response.error_code != 0)
+            co_return hedgehog::error(std::format("Failed to write file footer to value table (path: {}): {}", this->_fd.path().string(), strerror(-write_footer_response.error_code)));
+
         if(write_footer_response.bytes_written != sizeof(file_footer))
-            co_return hedgehog::error("Failed to write file footer to value table: " + this->_fd.path().string());
+            co_return hedgehog::error(std::format("Failed to write file footer to value table (path: {}): Footer bytes written does not match expected size", this->_fd.path().string()));
 
         co_return hedgehog::value_ptr_t{
             .offset = reservation.offset,
@@ -108,12 +107,11 @@ namespace hedgehog::db
     {
         auto file_path = base_path / std::to_string(id);
         file_path = with_extension(file_path, TABLE_FILE_EXTENSION);
-        file_path = with_extension(file_path, OPEN_FILE_EXTENSION);
 
         if(std::filesystem::exists(file_path))
             return hedgehog::error("File already exists: " + file_path.string());
 
-        auto file_desc = fs::file_descriptor::from_path(file_path, fs::file_descriptor::open_mode::read_write_new, false);
+        auto file_desc = fs::file_descriptor::from_path(file_path, fs::file_descriptor::open_mode::read_write_new, false, value_table::TABLE_MAX_SIZE_BYTES);
 
         if(!file_desc)
             return hedgehog::error("Failed to create file descriptor: " + file_desc.error().to_string());
@@ -122,73 +120,32 @@ namespace hedgehog::db
             id,
             0,
             std::move(file_desc.value()),
-            false};
+            };
     }
 
-    hedgehog::status value_table::close_writes()
-    {
-        if(this->_closed)
-            return hedgehog::ok();
-
-        this->_closed = true;
-
-        auto current_path = this->_fd.path();
-
-        auto new_path = current_path.string().substr(0, current_path.string().size() - OPEN_FILE_EXTENSION.size()); // remove ".open"
-        std::filesystem::rename(current_path, new_path);
-
-        auto read_only_fd = fs::file_descriptor::from_path(new_path, fs::file_descriptor::open_mode::read_only, false);
-
-        if(!read_only_fd)
-            return hedgehog::error("Failed to open file descriptor for closed value table: " + read_only_fd.error().to_string());
-
-        this->_fd = std::move(read_only_fd.value());
-        this->_closed = true;
-
-        return hedgehog::ok();
-    }
-
-    hedgehog::expected<value_table> value_table::load(const std::filesystem::path& path)
+    hedgehog::expected<value_table> value_table::load(const std::filesystem::path& path, fs::file_descriptor::open_mode open_mode)
     {
         if(!std::filesystem::exists(path))
             return hedgehog::error("File does not exist: " + path.string());
-
-        auto open_mode = fs::file_descriptor::open_mode::read_only;
-        bool closed = true;
-        auto path_ = path;
-
-        if(path.extension() == OPEN_FILE_EXTENSION)
-        {
-            open_mode = fs::file_descriptor::open_mode::read_write;
-            path_ = path.stem(); // remove ".open"
-            closed = false;
-        }
 
         auto file_descriptor = fs::file_descriptor::from_path(path, open_mode, false);
 
         if(!file_descriptor)
             return hedgehog::error("Failed to open file descriptor: " + file_descriptor.error().to_string());
 
-        auto table_id = std::stoul(path_.stem().string());
+        auto table_id = std::stoul(path.stem().string());
 
         return value_table{
             static_cast<uint32_t>(table_id),
             file_descriptor.value().file_size(),
-            std::move(file_descriptor.value()),
-            closed};
+            std::move(file_descriptor.value())};
     }
 
-    hedgehog::expected<value_table> value_table::load(const std::filesystem::path& base_path, uint32_t table_id)
+    hedgehog::expected<value_table> value_table::load(const std::filesystem::path& base_path, uint32_t table_id, fs::file_descriptor::open_mode open_mode)
     {
         auto file_path = base_path / std::to_string(table_id);
         file_path = with_extension(file_path, TABLE_FILE_EXTENSION);
-
-        auto file_path_open = with_extension(file_path, OPEN_FILE_EXTENSION);
-
-        if(std::filesystem::exists(file_path_open))
-            return value_table::load(file_path_open);   
-
-        return value_table::load(file_path);
+        return value_table::load(file_path, open_mode);
     }
 
 } // namespace hedgehog::db

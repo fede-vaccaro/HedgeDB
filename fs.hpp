@@ -1,6 +1,5 @@
 #pragma once
 
-#include <array>
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
@@ -32,7 +31,7 @@ namespace hedgehog::fs
     class file_descriptor
     {
     public:
-        enum class open_mode : int32_t
+        enum class open_mode : int32_t // NOLINT(performance-enum-size) this will translate to int32_t anyway in the syscall
         {
             undefined = -1,
             read_only = O_RDONLY,
@@ -202,7 +201,7 @@ namespace hedgehog::fs
                         break;
                 };
             }
-            
+
             file_descriptor fd_wrapped{};
 
             fd_wrapped._fd = fd;
@@ -216,15 +215,15 @@ namespace hedgehog::fs
 
         file_descriptor() = default;
 
-        file_descriptor(file_descriptor&& other) : _fd(std::exchange(other._fd, -1)),
-                                                   _file_size(std::exchange(other._file_size, 0)),
-                                                   _path(std::move(other._path)),
-                                                   _mode(std::exchange(other._mode, open_mode::undefined)),
-                                                   _use_direct(std::exchange(other._use_direct, false))
+        file_descriptor(file_descriptor&& other) noexcept : _fd(std::exchange(other._fd, -1)),
+                                                            _file_size(std::exchange(other._file_size, 0)),
+                                                            _path(std::move(other._path)),
+                                                            _mode(std::exchange(other._mode, open_mode::undefined)),
+                                                            _use_direct(std::exchange(other._use_direct, false))
         {
         }
 
-        file_descriptor& operator=(file_descriptor&& other)
+        file_descriptor& operator=(file_descriptor&& other) noexcept
         {
             if(this == &other)
                 return *this;
@@ -399,7 +398,7 @@ namespace hedgehog::fs
         {
             if(this != &other)
             {
-                _fd_wrapper = std::move(other._fd_wrapper);
+                _fd_wrapper = other._fd_wrapper;
                 _mapped_ptr = other._mapped_ptr;
                 _mapped_size = other._mapped_size;
 

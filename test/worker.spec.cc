@@ -8,7 +8,7 @@
 
 TEST(worker_test, basic_test)
 {
-    hedgehog::db::worker worker{};
+    hedgehog::async::worker worker{};
 
     std::cout << "main thread sleeping for 2 secs\n";
     std::this_thread::sleep_for(std::chrono::seconds(2));

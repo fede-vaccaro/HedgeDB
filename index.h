@@ -26,8 +26,8 @@ namespace hedgehog::db
         static hedgehog::expected<sorted_index> load_sorted_index(const std::filesystem::path& path, bool load_index = false);
         static hedgehog::expected<sorted_index> save_as_sorted_index(const std::filesystem::path& path, std::vector<index_key_t>&& sorted_keys, size_t upper_bound, bool merge_with_existent = false);
         static hedgehog::expected<std::vector<sorted_index>> merge_and_flush(const std::filesystem::path& base_path, std::vector<mem_index>&& indices, size_t num_partition_exponent);
-        static async::task<hedgehog::expected<sorted_index>> two_way_merge_async(const std::filesystem::path& base_path, size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor);
-        static hedgehog::expected<sorted_index> two_way_merge(const std::filesystem::path& base_path, size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor);
+        static async::task<hedgehog::expected<sorted_index>> two_way_merge_async(size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor);
+        static hedgehog::expected<sorted_index> two_way_merge(size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor);
     };
 
     class mem_index
@@ -133,8 +133,8 @@ namespace hedgehog::db
         sorted_index(fs::file_descriptor fd, std::vector<index_key_t> index, std::vector<meta_index_entry> meta_index, sorted_index_footer footer);
         sorted_index() = default;
 
-        sorted_index(sorted_index&& other)  noexcept = default;
-        sorted_index& operator=(sorted_index&& other)  noexcept = default;
+        sorted_index(sorted_index&& other) noexcept = default;
+        sorted_index& operator=(sorted_index&& other) noexcept = default;
 
         sorted_index(const sorted_index&) = delete;
         sorted_index& operator=(const sorted_index&) = delete;
@@ -166,9 +166,16 @@ namespace hedgehog::db
             std::cout << "  - Index capacity: " << this->_index.capacity() << "\n";
         }
 
-        std::filesystem::path get_path() const
+        [[nodiscard]] std::filesystem::path get_path() const
         {
             return this->_fd.path();
+        }
+
+        [[nodiscard]] size_t get_index_id() const
+        {
+            auto path = this->_fd.path();
+            auto filename = path.filename().extension().string();
+            return std::stoull(filename.substr(1)); // remove leading dot
         }
 
         void clear_index();

@@ -181,7 +181,6 @@ TEST_P(sorted_string_merge_test, DISABLED_test_merge_unified)
 
         auto t0 = std::chrono::high_resolution_clock::now();
         auto maybe_new_index = hedgehog::db::index_ops::two_way_merge(
-            this->_base_path,
             this->READ_AHEAD_SIZE_BYTES,
             sorted_indices[0],
             sorted_indices[1],
@@ -240,7 +239,6 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
         futures.emplace_back(promise.get_future());
 
         auto new_index = co_await hedgehog::db::index_ops::two_way_merge_async(
-            _this->_base_path,
             _this->READ_AHEAD_SIZE_BYTES,
             left,
             right,

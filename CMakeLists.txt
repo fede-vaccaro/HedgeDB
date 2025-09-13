@@ -86,3 +86,7 @@ target_link_libraries(value_table_test uring gtest gtest_main)
 # worker tests
 add_executable(worker_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/worker.spec.cc)
 target_link_libraries(worker_test uring gtest gtest_main)
+
+# database tests
+add_executable(database_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/database.spec.cc)
+target_link_libraries(database_test uring gtest gtest_main)

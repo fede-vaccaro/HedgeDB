@@ -17,8 +17,6 @@ namespace hedgehog::async
         bool await_ready() const noexcept { return false; }
         std::coroutine_handle<> await_suspend(std::coroutine_handle<PROMISE> h) noexcept
         {
-            log(h.promise().id, "-task::promise::final_suspend::await_suspend on handle: ", h.address());
-
             if(auto c = h.promise()._continuation)
                 return c;
 
@@ -138,7 +136,6 @@ namespace hedgehog::async
 
         bool await_ready()
         {
-            log(this->_handle.promise().id, "-task::await_ready");
             return false;
         }
 
