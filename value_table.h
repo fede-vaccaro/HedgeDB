@@ -46,7 +46,7 @@ namespace hedgehog::db
         static constexpr size_t TABLE_MAX_ID = std::numeric_limits<uint32_t>::max();
         static constexpr size_t MAX_FILE_SIZE = (((1UL << 17) - 1) * PAGE_SIZE_IN_BYTES) - sizeof(file_footer);
 
-        [[nodiscard]] uint32_t unique_id() const
+        [[nodiscard]] uint32_t id() const
         {
             return this->_unique_id;
         }
@@ -59,11 +59,6 @@ namespace hedgehog::db
         [[nodiscard]] const fs::file_descriptor& fd() const
         {
             return this->_fd;
-        }
-
-        [[nodiscard]] uint32_t id() const
-        {
-            return this->_unique_id;
         }
 
         [[nodiscard]] size_t free_space() const

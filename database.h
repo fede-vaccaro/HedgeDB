@@ -1,56 +1,76 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
-#include <filesystem>
-#include <optional>
-#include <string>
-#include <utility>
-#include <vector>
+#include <map>
+#include <memory>
 
 #include <error.hpp>
-#include <uuid.h>
+#include <sys/types.h>
 
-#include "bloom_filter.h"
-#include "tables.h"
+#include "common.h"
+#include "index.h"
+#include "task.h"
+#include "value_table.h"
+#include "worker.h"
 
 namespace hedgehog::db
 {
 
-    class DB
+    struct db_config
     {
-    private:
+        static constexpr size_t MAX_PARTITION_EXPONENT = 16;
+        static constexpr size_t MIN_KEYS_IN_MEM_BEFORE_FLUSH = 1000;
+
+        size_t keys_in_mem_before_flush = 2'000'000;           // default number of keys to push
+        size_t num_partition_exponent = 10;                    // default partition exponent
+        double compactation_size_ratio = 0.2;                  // if table rhs/lhs > 0.2, trigger compactation
+        size_t compactation_read_ahead_size_bytes = 16384;     // it will read from each table 16 KB at a time
+        std::chrono::milliseconds compacation_timeout{120000}; // stop waiting if past this compactation
+    };
+
+    class database : public std::enable_shared_from_this<database>
+    {
+        // constants after initialization
         std::filesystem::path _base_path;
-        uint64_t _next_db_id = 0;
+        std::filesystem::path _indices_path;
+        std::filesystem::path _values_path;
 
-        std::optional<memtable_db> _memtable_db;
-        std::vector<std::pair<sortedstring_db, BloomFilter>> _sorted_dbs;
+        // configuration
+        db_config _config;
 
-        static constexpr size_t MEMTABLE_FLUSH_ENTRY_LIMIT = 2097152;
-        static constexpr uint64_t BLOOM_FILTER_BITS = 41943040;
-        static constexpr uint8_t BLOOM_FILTER_HASH_FUNCTIONS = 11;
+        // persisted state
+        using sorted_index_ptr_t = std::shared_ptr<hedgehog::db::sorted_index>;
+        using sorted_indices_map_t = std::map<uint16_t, std::vector<sorted_index_ptr_t>>;
 
-        DB(const std::filesystem::path& base_path); // Private constructor
+        std::mutex _sorted_index_mutex;
+        sorted_indices_map_t _sorted_indices;
 
-        std::string get_next_db_name();
-        hedgehog::status load_existing_dbs();
-        hedgehog::status flush_current_memtable();
+        std::mutex _value_tables_mutex;
+        std::unordered_map<uint32_t, std::shared_ptr<value_table>> _value_tables;
+
+        // current state
+        std::shared_ptr<value_table> _current_value_table;
+        mem_index _mem_index;
+
+        // worker handling compactation and gc
+        worker worker;
 
     public:
-        // Static factory methods
-        static hedgehog::expected<DB> make_new(const std::filesystem::path& base_path);
-        static hedgehog::expected<DB> from_path(const std::filesystem::path& base_path);
+        using byte_buffer_t = std::vector<uint8_t>;
 
-        ~DB();
+        async::task<expected<byte_buffer_t>> get_async(key_t key, const std::shared_ptr<async::executor_context>& executor);
+        async::task<hedgehog::status> put_async(key_t key, const byte_buffer_t& value, const std::shared_ptr<async::executor_context>& executor);
+        async::task<hedgehog::status> remove_async(key_t key, const std::shared_ptr<async::executor_context>& executor);
 
-        hedgehog::status insert(key_t key, const std::vector<uint8_t>& data);
-        hedgehog::expected<std::optional<std::vector<uint8_t>>> get(key_t key);
-        hedgehog::status del(key_t key);
+        static expected<std::shared_ptr<database>> make_new(const std::filesystem::path& base_path, const db_config& config);
+        static expected<std::shared_ptr<database>> load(const std::filesystem::path& base_path);
 
-        DB(const DB&) = delete;
-        DB& operator=(const DB&) = delete;
-
-        DB(DB&&) = default;
-        DB& operator=(DB&&) = default;
+    private:
+        [[nodiscard]] size_t _find_matching_partition_for_key(const key_t& key) const;
+        hedgehog::status _rotate_value_table();
+        hedgehog::status _flush_mem_index();
+        void _compactation_job(const std::shared_ptr<async::executor_context>& executor);
     };
 
 } // namespace hedgehog::db

@@ -40,6 +40,13 @@ namespace hedgehog::async
             this->_cv.wait(lk, [this]()
                            { return this->_done.load(); });
         }
+
+        bool wait_for(std::chrono::milliseconds timeout)
+        {
+            std::unique_lock lk(this->_mutex);
+            return this->_cv.wait_for(lk, timeout, [this]()
+                                      { return this->_done.load(); });
+        }
     };
 
 } // namespace hedgehog::async
