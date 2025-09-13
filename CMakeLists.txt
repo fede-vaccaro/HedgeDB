@@ -51,7 +51,7 @@ add_executable(test_odirect test_odirect.cc)
 add_executable(asio_test asio_test_2.cc)
 target_compile_definitions(asio_test PRIVATE ASIO_HAS_FILE ASIO_HAS_IO_URING ASIO_HAS_IO_URING_AS_DEFAULT ASIO_DISABLE_EPOLL)
 
-add_executable(uring_test uring_test_.cc)
+add_executable(uring_test uring_reader.cc)
 target_link_libraries(uring_test uring)
 
 target_link_libraries(
