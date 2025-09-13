@@ -29,27 +29,6 @@
 
 #include <cstdint>
 
-// todo list
-// test: index recovery from crash before flush
-// test: "broken" index file (e.g. not multiple of sizeof(index_key_t))
-
-// test compactation with inconsistent index
-// implement thread safety
-// use faster unordered_map implementation (e.g. abseil::flat_hash_map)
-
-// design idea: the actual database is a manager over several db objects
-// design idea: a db object is a handle over a index, a tombston and a value file
-// todo: shutdown operations on critical fs errors
-// todo: tombstone object
-// todo HIGH PRIORITY: sanitization: truncate db.index.tmp and db.tombstone if length is invalid (size(index) % sizeof(index_key_t) != 0)
-// todo idea: recover index from values file - i could use this format : [4/8 bytes magic number, key, size, actual file] - adds overhead especially for small files but might be worth it
-// todo : try_emplace when inserting into the index
-// todo: implement bloom filter and use murmur hash
-// todo: check if offset and offset + size is valid within the file size - at least test it. maybe is okay to check whether ifstream is good?
-// implement cumulative size
-// todo: index & tombstone checksum
-// todo: improve compact by using prefetch/paged mmap
-
 namespace hedgehog::db
 {
     using key_t = uuids::uuid;
@@ -188,6 +167,7 @@ namespace hedgehog::db
         friend hedgehog::expected<sortedstring_db> flush_memtable_db(memtable_db&& db_);
 
         void _init();
+        void _close_files();
 
     public:
         explicit memtable_db() = delete;
