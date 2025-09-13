@@ -34,25 +34,28 @@
 int main(int argc, char* argv[])
 {
     std::cout << "version 0.0.1a" << std::endl;
-    std::cout << "Number of arguments: " << std::to_string(argc) << '\n';
-
-    std::cout << argv[1] << '\n';
-    std::cout << argv[2] << '\n';
 
     auto base_path = std::filesystem::path(argv[2]);
 
     hedgehog::db::memtable_db database = hedgehog::db::memtable_db::make_new(base_path, "test_db");
 
     auto N_FILES = std::stoul(argv[1]);
+    auto VALUE_SIZE = std::stoul(argv[3]);
 
     std::cout << "N_FILES: " << N_FILES << '\n';
+    std::cout << "VALUE_SIZE: " << VALUE_SIZE << '\n';
 
-    constexpr auto FILE_SIZE = 40 * 1024;
+    auto FILE_SIZE = VALUE_SIZE;
+
+    std::random_device rd{};
+    std::mt19937 generator(rd());
+
     std::vector<uint8_t> data(FILE_SIZE, 0);
-    std::iota(data.begin(), data.end(), 0);
-
-    // std::string data_str = "ilmattinohaloroinbocca";
-    // std::vector<uint8_t> data(data_str.begin(), data_str.end());
+    std::uniform_int_distribution<int> dist(0, 255);
+    std::for_each(data.begin(), data.end(), [&generator, &dist](uint8_t& byte)
+    {
+        byte = static_cast<uint8_t>(dist(generator));
+    });
 
     auto constexpr N_THREADS = 10;
     std::array<std::vector<hedgehog::db::key_t>, N_THREADS> key_sets;
@@ -62,14 +65,11 @@ int main(int argc, char* argv[])
     for(size_t i = 0; i < key_sets.size(); ++i)
     {
         threads.emplace_back(
-            [&key_sets, i, N_FILES]()
+            [&key_sets, i, N_FILES, &generator]()
             {
                 key_sets[i].reserve(N_FILES / N_THREADS + 1);
 
-                std::random_device rd;
-                std::mt19937 generator(rd());
                 std::uniform_int_distribution<int> dist(0, 15);
-
                 uuids::uuid_random_generator gen{generator};
 
                 for(size_t j = 0; j < N_FILES / N_THREADS; ++j)
@@ -113,10 +113,7 @@ int main(int argc, char* argv[])
     elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
     std::cout << "Elapsed time for flush: " << elapsed << " ms" << '\n';
 
-    std::random_device rd;
-    std::mt19937 g(rd());
-
-    std::shuffle(keys.begin(), keys.end(), g);
+    std::shuffle(keys.begin(), keys.end(), generator);
     int count = 0;
 
     // Read the keys back
