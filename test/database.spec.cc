@@ -80,7 +80,7 @@ namespace hedgehog::db
         uuids::basic_uuid_random_generator<std::mt19937> gen{_generator};
     };
 
-    TEST_P(database_test, basic_test_no_compactation)
+    TEST_P(database_test, basic_test_no_compaction)
     {
         this->_uuids.reserve(this->N_KEYS);
 
@@ -88,7 +88,7 @@ namespace hedgehog::db
         write_wg.set(this->N_KEYS);
 
         db_config config;
-        config.auto_compactation = true;
+        config.auto_compaction = true;
         config.keys_in_mem_before_flush = this->MEMTABLE_CAPACITY;
 
         auto maybe_db = database::make_new(this->_base_path, config);
@@ -121,15 +121,15 @@ namespace hedgehog::db
         std::cout << "Average duration per insertion: " << (double)duration.count() / this->N_KEYS << " us" << std::endl;
         std::cout << "Insertion bandwidth: " << (double)this->N_KEYS * (this->PAYLOAD_SIZE / 1024.0) / (duration.count() / 1000.0) << " MB/s" << std::endl;
 
-        // compactation
+        // compaction
         t0 = std::chrono::high_resolution_clock::now();
-        auto compactation_status_future = db->compact_sorted_indices(true, this->_executor);
-        ASSERT_TRUE(compactation_status_future.get()) << "An error occurred during compactation: " << compactation_status_future.get().error().to_string();
+        auto compaction_status_future = db->compact_sorted_indices(true, this->_executor);
+        ASSERT_TRUE(compaction_status_future.get()) << "An error occurred during compaction: " << compaction_status_future.get().error().to_string();
         t1 = std::chrono::high_resolution_clock::now();
         duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-        std::cout << "Total duration for compactation: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
+        std::cout << "Total duration for compaction: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
 
-        EXPECT_DOUBLE_EQ(db->load_factor(), 1.0) << "Read amplification should be 1.0 after compactation";
+        EXPECT_DOUBLE_EQ(db->load_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
 
         async::working_group read_wg;
         read_wg.set(this->N_KEYS);
