@@ -4,7 +4,7 @@
 <img src="resources/logo.png" width="100%">
 </p>
 
-HedgeDB is a prototype of a larger-than-memory key-value embeddable storage, inspired by [BadgerDB](https://github.com/hypermodeinc/badger) and [RocksDB](https://github.com/facebook/rocksdb), optimized for modern high throughput SSDs. It aims to be performance oriented with low memory footprint.
+HedgeDB is a prototype of a larger-than-memory, persisted and embeddable key-value storage, inspired by [BadgerDB](https://github.com/hypermodeinc/badger) and [RocksDB](https://github.com/facebook/rocksdb), optimized for modern high throughput SSDs. It aims to be performance oriented with low memory footprint.
 
 **Disclaimer**: as you might expect from a prototype it was not extensively tested, nor the code can be considered production ready. _Also, the code itself might have gotten a bit messy. Hopefully, I'll take care of this in a second time._
 
