@@ -1,4 +1,5 @@
 #include <fstream>
+#include <iostream>
 #include <random>
 #include <filesystem>
 #include <map>
@@ -75,6 +76,7 @@ int main(int argc, char* argv[])
             for (auto& index : partitioned_indices.value())
             {
                 auto prefix = index.get_upper_bound();
+                index.clear_index();
                 sorted_indices[prefix].emplace_back(std::move(index));
             }
 
@@ -118,7 +120,6 @@ int main(int argc, char* argv[])
     std::shuffle(uuids.begin(), uuids.end(), generator);
     uuids.resize(1000);
     uuids.shrink_to_fit();
-    current_index.hedgehog::db::mem_index::~mem_index();
     malloc_trim(0);
 
     std::ofstream ofs(BASE_PATH / "uuids", std::ios::binary); // current dir
@@ -136,10 +137,7 @@ int main(int argc, char* argv[])
 
         std::cout << "Prefix: " << prefix << ", indices size: " << indices.size() << '\n';
         for (auto& index : indices)
-        {
-            index.clear_index();
             index.stats();
-        }
     }
 
     std::cout << "Testing " << uuids.size() << " UUIDs...\n";
