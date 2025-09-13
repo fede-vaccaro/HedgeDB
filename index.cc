@@ -147,7 +147,7 @@ namespace hedgehog::db
         return meta_index;
     }
 
-    std::filesystem::path get_index_file_path(const std::filesystem::path& path)
+    std::filesystem::path get_next_index_file_path(const std::filesystem::path& path)
     {
         auto directory = path.parent_path();
 
@@ -212,15 +212,20 @@ namespace hedgehog::db
         for(auto it = index_sorted.begin(); it != index_sorted.end(); ++it)
         {
             const auto& key = *it;
+
+            if(key.key == uuids::uuid::from_string("53927bbd-4bd5-41db-a6b2-134cf8467fde").value())
+                std::cout << "breakpoint\n";
+
             current_index.push_back(key);
 
+            size_t next_partition{};
             bool last_entry_for_partition =
-                (it + 1 == index_sorted.end()) || (hedgehog::find_partition_prefix_for_key((it + 1)->key, partition_size) != current_partition);
+                (it + 1 == index_sorted.end()) || (next_partition = hedgehog::find_partition_prefix_for_key((it + 1)->key, partition_size)) != current_partition;
 
             if(last_entry_for_partition)
             {
                 auto [dir_prefix, file_prefix] = format_prefix(current_partition);
-                auto path = get_index_file_path(base_path / dir_prefix / file_prefix);
+                auto path = get_next_index_file_path(base_path / dir_prefix / file_prefix);
 
                 // std::cout << "Saving partition with prefix: " << file_prefix << " to path: " << path.string() << std::endl;
 
@@ -234,7 +239,7 @@ namespace hedgehog::db
 
                 sorted_indices.push_back(std::move(sorted_index));
 
-                current_partition += partition_size;
+                current_partition = next_partition;
             }
         }
 
@@ -517,17 +522,17 @@ namespace hedgehog::db
         return {index_end_pos - padding, index_end_pos};
     }
 
-    hedgehog::expected<sorted_index> index_ops::two_way_merge(const std::filesystem::path& base_path, size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor)
+    async::task<hedgehog::expected<sorted_index>> index_ops::two_way_merge_async(const std::filesystem::path& base_path, size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor)
     {
         if(read_ahead_size < FS_PAGE_SIZE_BYTES)
-            return hedgehog::error("Read ahead size must be at least one page size");
+            co_return hedgehog::error("Read ahead size must be at least one page size");
 
         if(left._footer.version != sorted_index_footer::CURRENT_FOOTER_VERSION ||
            right._footer.version != sorted_index_footer::CURRENT_FOOTER_VERSION)
-            return hedgehog::error("Cannot merge sorted indices with different versions");
+            co_return hedgehog::error("Cannot merge sorted indices with different versions");
 
         if(left._footer.upper_bound != right._footer.upper_bound)
-            return hedgehog::error("Cannot merge sorted indices with different upper bounds");
+            co_return hedgehog::error("Cannot merge sorted indices with different upper bounds");
 
         auto new_table_num_keys = left.size() + right.size();
         auto [index_end_pos, meta_index_start_pos] = infer_index_end_pos(new_table_num_keys);
@@ -570,334 +575,352 @@ namespace hedgehog::db
             executor);
 
         auto [dir_prefix, file_prefix] = format_prefix(left._footer.upper_bound);
-        auto new_path = get_index_file_path(base_path / dir_prefix / file_prefix);
+        auto new_path = get_next_index_file_path(base_path / dir_prefix / file_prefix);
 
-        std::cout << "Creating new index file at: " << new_path.string() << std::endl;
+        //         std::cout << "Creating new index file at: " << new_path.string() << std::endl;
 
         auto fd_maybe = fs::file_descriptor::from_path(new_path, fs::file_descriptor::open_mode::write_new, false, index_end_pos + meta_index_start_pos);
 
         if(!fd_maybe.has_value())
-            return hedgehog::error("Failed to create file descriptor for merged index: " + fd_maybe.error().to_string());
+            co_return hedgehog::error("Failed to create file descriptor for merged index: " + fd_maybe.error().to_string());
 
         auto fd = std::move(fd_maybe.value());
 
-        auto task = [&]() -> async::task<expected<hedgehog::db::sorted_index>>
+        using data_view = std::pair<std::vector<uint8_t>, std::span<index_key_t>>;
+        using ret_type = hedgehog::expected<data_view>;
+
+        auto lhs_it = std::span<index_key_t>::iterator{};
+        auto rhs_it = std::span<index_key_t>::iterator{};
+
+        data_view lhs_data_view{};
+        data_view rhs_data_view{};
+
+        static size_t lhs_loaded_keys{};
+        static size_t rhs_loaded_keys{};
+
+        auto next_from_view = [](async::paginated_view& view, size_t read_ahead_size) -> async::task<ret_type>
         {
-            using data_view = std::pair<std::vector<uint8_t>, std::span<index_key_t>>;
-            using ret_type = hedgehog::expected<data_view>;
+            auto maybe_keys = co_await view.next(read_ahead_size);
+            if(!maybe_keys.has_value())
+                co_return hedgehog::error("Failed to read from index view: " + maybe_keys.error().to_string());
 
-            auto lhs_it = std::span<index_key_t>::iterator{};
-            auto rhs_it = std::span<index_key_t>::iterator{};
+            auto& keys = maybe_keys.value();
 
-            data_view lhs_data_view{};
-            data_view rhs_data_view{};
-
-            static size_t lhs_loaded_keys{};
-            static size_t rhs_loaded_keys{};
-
-            auto next_from_view = [](async::paginated_view& view, size_t read_ahead_size) -> async::task<ret_type>
-            {
-                auto maybe_keys = co_await view.next(read_ahead_size);
-                if(!maybe_keys.has_value())
-                    co_return hedgehog::error("Failed to read from index view: " + maybe_keys.error().to_string());
-
-                auto& keys = maybe_keys.value();
-
-                auto keys_span = view_as<index_key_t>(keys);
-                co_return std::make_pair(std::move(keys), keys_span);
-            };
-
-            auto init_views = [&]() -> async::task<hedgehog::status>
-            {
-                auto maybe_lhs_data_view = co_await next_from_view(lhs_view, read_ahead_size);
-
-                if(!maybe_lhs_data_view.has_value())
-                    co_return hedgehog::error("Failed to read from left index view");
-
-                auto maybe_rhs_data_view = co_await next_from_view(rhs_view, read_ahead_size);
-                if(!maybe_rhs_data_view.has_value())
-                    co_return hedgehog::error("Failed to read from right index view");
-
-                std::tie(lhs_data_view, rhs_data_view) = std::make_pair(std::move(maybe_lhs_data_view.value()),
-                                                                        std::move(maybe_rhs_data_view.value()));
-
-                lhs_loaded_keys = lhs_data_view.second.size();
-                rhs_loaded_keys = rhs_data_view.second.size();
-
-                if(lhs_view.is_eof())
-                {
-                    lhs_data_view.first.resize(sizeof(index_key_t) * last_page_size(left._footer));
-                    lhs_data_view.second = view_as<index_key_t>(lhs_data_view.first);
-                    lhs_loaded_keys = lhs_data_view.second.size();
-                }
-
-                if(rhs_view.is_eof())
-                {
-                    rhs_data_view.first.resize(sizeof(index_key_t) * last_page_size(right._footer));
-                    rhs_data_view.second = view_as<index_key_t>(rhs_data_view.first);
-                    rhs_loaded_keys = rhs_data_view.second.size();
-                }
-
-                lhs_it = lhs_data_view.second.begin();
-                rhs_it = rhs_data_view.second.begin();
-
-                co_return hedgehog::ok();
-            };
-
-            auto transform_it = [](const std::span<index_key_t>::iterator& iterator) -> std::vector<uint8_t>::iterator
-            {
-                return std::vector<uint8_t>::iterator(reinterpret_cast<uint8_t*>(iterator.base()));
-            };
-
-            auto erase_read_append_new = [&transform_it](std::vector<uint8_t>& data, std::vector<uint8_t>& new_read, std::span<index_key_t>& span, std::span<index_key_t>::iterator& it)
-            {
-                data.erase(data.begin(), transform_it(it));
-                data.insert(data.end(), new_read.begin(), new_read.end());
-                span = view_as<index_key_t>(data);
-                it = span.begin();
-            };
-
-            auto refresh_view = [&erase_read_append_new, &next_from_view, read_ahead_size](auto& view, data_view& data_view, std::span<index_key_t>::iterator& it, size_t last_page_size) -> async::task<hedgehog::status>
-            {
-                auto maybe_data_view = co_await next_from_view(view, read_ahead_size);
-                if(!maybe_data_view.has_value())
-                    co_return hedgehog::error("Failed to read from left index view");
-
-                auto& [data, _] = maybe_data_view.value();
-                if(!data.empty() && view.is_eof())
-                    data.resize(sizeof(index_key_t) * last_page_size);
-
-                erase_read_append_new(data_view.first, data, data_view.second, it);
-
-                co_return hedgehog::ok();
-            };
-
-            auto refresh_views = [&]() -> async::task<hedgehog::status>
-            {
-                if(lhs_it == lhs_data_view.second.end())
-                {
-                    auto status = co_await refresh_view(lhs_view, lhs_data_view, lhs_it, last_page_size(left._footer));
-
-                    lhs_loaded_keys += lhs_data_view.second.size();
-
-                    if(!status)
-                        co_return status;
-                }
-
-                if(rhs_it == rhs_data_view.second.end())
-                {
-                    auto status = co_await refresh_view(rhs_view, rhs_data_view, rhs_it, last_page_size(right._footer));
-
-                    rhs_loaded_keys += rhs_data_view.second.size();
-
-                    if(!status)
-                        co_return status;
-                }
-
-                co_return hedgehog::ok();
-            };
-
-            auto status = co_await init_views();
-            if(!status)
-                co_return hedgehog::error("Failed to initialize views: " + status.error().to_string());
-
-            size_t index_key_count = 0;
-            size_t bytes_written = 0;
-
-            std::vector<meta_index_entry> merged_meta_index;
-
-            while(true)
-            {
-                std::vector<uint8_t> merged_keys(read_ahead_size * 2);
-                auto merged_keys_span = view_as<index_key_t>(merged_keys);
-                auto merged_it = merged_keys_span.begin();
-
-                auto& [lhs_data, lhs_span] = lhs_data_view;
-                auto& [rhs_data, rhs_span] = rhs_data_view;
-
-                while(lhs_it != lhs_span.end() && rhs_it != rhs_span.end())
-                {
-                    if(*lhs_it < *rhs_it)
-                    {
-                        *merged_it = *lhs_it;
-                        ++lhs_it;
-                    }
-                    else if(*rhs_it < *lhs_it)
-                    {
-                        *merged_it = *rhs_it;
-                        ++rhs_it;
-                    }
-
-                    index_key_count++;
-                    if(index_key_count % INDEX_PAGE_NUM_ENTRIES == 0)
-                        merged_meta_index.emplace_back(merged_it->key);
-
-                    if(++merged_it == merged_keys_span.end())
-                        break;
-                }
-
-                auto this_run_keys = std::distance(merged_keys_span.begin(), merged_it);
-                merged_keys.resize(this_run_keys * sizeof(index_key_t));
-
-                auto res = co_await executor->submit_request(async::write_request{
-                    .fd = fd.get(),
-                    .data = std::move(merged_keys),
-                    .offset = bytes_written});
-
-                bytes_written += res.bytes_written;
-
-                if(res.error_code != 0)
-                    co_return hedgehog::error("Failed to write merged keys to file: " + std::string(strerror(res.error_code)));
-
-                auto status = co_await refresh_views();
-                if(!status)
-                    co_return hedgehog::error("Failed to refresh views: " + status.error().to_string());
-
-                if(lhs_data_view.first.empty() || rhs_data_view.first.empty())
-                    break;
-            }
-
-            std::cout << "Merged " << index_key_count << " keys" << std::endl;
-
-            assert(lhs_data_view.first.empty() ^ rhs_data_view.first.empty() && "Either one of the views should be empty at this point");
-
-            // todo: potrebbe accadere che uno dei due buffer non sia EOF. bisogna continuare a caricare finche' non finisce
-
-            auto& non_empty_data_view = !lhs_data_view.first.empty() ? lhs_data_view : rhs_data_view;
-            auto& non_empty_iterator = !lhs_data_view.first.empty() ? lhs_it : rhs_it;
-            auto transformed_it = transform_it(non_empty_iterator);
-
-            if(new_path.string() == "/tmp/hh/test/3b/3b3f.2")
-                std::cout << "breakpoint\n";
-
-            non_empty_data_view.first.erase(non_empty_data_view.first.begin(), transformed_it);
-            non_empty_data_view.second = view_as<index_key_t>(non_empty_data_view.first);
-
-            while(true)
-            {
-                non_empty_iterator = non_empty_data_view.second.begin();
-
-                for(auto it = non_empty_iterator; it != non_empty_data_view.second.end(); it++)
-                {
-                    ++index_key_count;
-
-                    if(index_key_count % INDEX_PAGE_NUM_ENTRIES == 0)
-                        merged_meta_index.emplace_back(it->key);
-                }
-
-                // handle last page entry
-                if(index_key_count % INDEX_PAGE_NUM_ENTRIES != 0 && (lhs_view.is_eof() && rhs_view.is_eof()))
-                    merged_meta_index.emplace_back(non_empty_data_view.second.back().key);
-
-                if(!non_empty_data_view.first.empty())
-                {
-                    auto res = co_await executor->submit_request(async::write_request{
-                        .fd = fd.get(),
-                        .data = non_empty_data_view.first,
-                        .offset = bytes_written});
-
-                    if(res.error_code != 0)
-                        co_return hedgehog::error("Failed to write remaining keys to file: " + std::string(strerror(res.error_code)));
-
-                    bytes_written += res.bytes_written;
-                }
-
-                non_empty_iterator = non_empty_data_view.second.end();
-                auto refresh_status = co_await refresh_views();
-
-                if(!refresh_status)
-                    co_return hedgehog::error("Failed to refresh views: " + refresh_status.error().to_string());
-
-                if(lhs_view.is_eof() && lhs_data_view.first.empty() && rhs_view.is_eof() && rhs_data_view.first.empty())
-                    break;
-            }
-
-            auto refresh_status = co_await refresh_views();
-            if(!refresh_status)
-                co_return hedgehog::error("Failed to refresh views after writing remaining keys: " + refresh_status.error().to_string());
-
-            std::cout << "Merged " << index_key_count << " keys in total" << std::endl;
-            std::cout << "lhs loaded keys: " << lhs_loaded_keys << std::endl;
-            std::cout << "rhs loaded keys: " << rhs_loaded_keys << std::endl;
-            std::cout << "lhs + rhs loaded keys: " << lhs_loaded_keys + rhs_loaded_keys << std::endl;
-
-            assert(index_key_count == footer.indexed_keys && "Item count does not match footer indexed keys");
-            assert(index_key_count * sizeof(index_key_t) == footer.index_end_offset && "Item count does not match footer index end offset");
-
-            // write index padding if any
-            size_t padding_size = compute_alignment_padding<index_key_t>(index_key_count);
-            if(padding_size > 0)
-            {
-                auto res = co_await executor->submit_request(async::write_request{
-                    .fd = fd.get(),
-                    .data = std::vector<uint8_t>(padding_size, 0),
-                    .offset = bytes_written});
-
-                if(res.error_code != 0)
-                    co_return hedgehog::error("Failed to write padding to file: " + std::string(strerror(res.error_code)));
-
-                bytes_written += res.bytes_written;
-            }
-
-            // write meta index
-            {
-                auto res = co_await executor->submit_request(async::write_request{
-                    .fd = fd.get(),
-                    .data = std::vector<uint8_t>(reinterpret_cast<uint8_t*>(merged_meta_index.data()), reinterpret_cast<uint8_t*>(merged_meta_index.data()) + merged_meta_index.size() * sizeof(meta_index_entry)),
-                    .offset = bytes_written});
-
-                if(res.error_code != 0)
-                    co_return hedgehog::error("Failed to write meta index to file: " + std::string(strerror(res.error_code)));
-
-                bytes_written += res.bytes_written;
-            }
-
-            // write meta index padding if any
-            size_t meta_index_padding_size = compute_alignment_padding<meta_index_entry>(merged_meta_index.size());
-            if(meta_index_padding_size > 0)
-            {
-                auto res = co_await executor->submit_request(async::write_request{
-                    .fd = fd.get(),
-                    .data = std::vector<uint8_t>(meta_index_padding_size, 0),
-                    .offset = bytes_written});
-
-                if(res.error_code != 0)
-                    co_return hedgehog::error("Failed to write meta index padding to file: " + std::string(strerror(res.error_code)));
-
-                bytes_written += res.bytes_written;
-            }
-
-            // write footer
-            {
-                auto res = co_await executor->submit_request(async::write_request{
-                    .fd = fd.get(),
-                    .data = std::vector<uint8_t>(reinterpret_cast<uint8_t*>(&footer), reinterpret_cast<uint8_t*>(&footer) + sizeof(footer)),
-                    .offset = bytes_written});
-
-                if(res.error_code != 0)
-                    co_return hedgehog::error("Failed to write footer to file: " + std::string(strerror(res.error_code)));
-
-                bytes_written += res.bytes_written;
-            }
-
-            fsync(fd.get());
-
-            auto read_fd = fs::file_descriptor::from_path(fd.path(), fs::file_descriptor::open_mode::read_only, false, bytes_written);
-            if(!read_fd.has_value())
-                co_return hedgehog::error("Failed to open merged index file for reading: " + read_fd.error().to_string());
-
-            sorted_index result{
-                std::move(read_fd.value()),
-                {},
-                std::move(merged_meta_index),
-                std::move(footer)};
-
-            co_return result;
+            auto keys_span = view_as<index_key_t>(keys);
+            co_return std::make_pair(std::move(keys), keys_span);
         };
 
-        auto maybe_sorted_index = executor->sync_submit(task());
+        auto init_views = [&]() -> async::task<hedgehog::status>
+        {
+            auto maybe_lhs_data_view = co_await next_from_view(lhs_view, read_ahead_size);
 
-        return maybe_sorted_index;
+            if(!maybe_lhs_data_view.has_value())
+                co_return hedgehog::error("Failed to read from left index view");
+
+            auto maybe_rhs_data_view = co_await next_from_view(rhs_view, read_ahead_size);
+            if(!maybe_rhs_data_view.has_value())
+                co_return hedgehog::error("Failed to read from right index view");
+
+            std::tie(lhs_data_view, rhs_data_view) = std::make_pair(std::move(maybe_lhs_data_view.value()),
+                                                                    std::move(maybe_rhs_data_view.value()));
+
+            lhs_loaded_keys = lhs_data_view.second.size();
+            rhs_loaded_keys = rhs_data_view.second.size();
+
+            if(lhs_view.is_eof())
+            {
+                auto dest_size = lhs_data_view.second.size() - INDEX_PAGE_NUM_ENTRIES + last_page_size(left._footer);
+                lhs_data_view.first.resize(sizeof(index_key_t) * dest_size);
+                lhs_data_view.second = view_as<index_key_t>(lhs_data_view.first);
+                lhs_loaded_keys = lhs_data_view.second.size();
+            }
+
+            if(rhs_view.is_eof())
+            {
+                auto dest_size = rhs_data_view.second.size() - INDEX_PAGE_NUM_ENTRIES + last_page_size(right._footer);
+                rhs_data_view.first.resize(sizeof(index_key_t) * dest_size);
+                rhs_data_view.second = view_as<index_key_t>(rhs_data_view.first);
+                rhs_loaded_keys = rhs_data_view.second.size();
+            }
+
+            lhs_it = lhs_data_view.second.begin();
+            rhs_it = rhs_data_view.second.begin();
+
+            co_return hedgehog::ok();
+        };
+
+        auto transform_it = [](const std::span<index_key_t>::iterator& iterator) -> std::vector<uint8_t>::iterator
+        {
+            return std::vector<uint8_t>::iterator(reinterpret_cast<uint8_t*>(iterator.base()));
+        };
+
+        auto erase_read_append_new = [&transform_it](std::vector<uint8_t>& data, std::vector<uint8_t>& new_read, std::span<index_key_t>& span, std::span<index_key_t>::iterator& it)
+        {
+            data.erase(data.begin(), transform_it(it));
+            data.insert(data.end(), new_read.begin(), new_read.end());
+            span = view_as<index_key_t>(data);
+            it = span.begin();
+        };
+
+        auto refresh_view = [&erase_read_append_new, &next_from_view, read_ahead_size](auto& view, data_view& data_view, std::span<index_key_t>::iterator& it, size_t last_page_size) -> async::task<hedgehog::status>
+        {
+            auto maybe_data_view = co_await next_from_view(view, read_ahead_size);
+            if(!maybe_data_view.has_value())
+                co_return hedgehog::error("Failed to read from left index view");
+
+            auto& [data, _] = maybe_data_view.value();
+            if(!data.empty() && view.is_eof())
+            {
+                auto dest_size = _.size() - INDEX_PAGE_NUM_ENTRIES + last_page_size;
+                data.resize(sizeof(index_key_t) * dest_size);
+            }
+
+            erase_read_append_new(data_view.first, data, data_view.second, it);
+
+            co_return hedgehog::ok();
+        };
+
+        auto refresh_views = [&]() -> async::task<hedgehog::status>
+        {
+            if(lhs_it == lhs_data_view.second.end())
+            {
+                auto status = co_await refresh_view(lhs_view, lhs_data_view, lhs_it, last_page_size(left._footer));
+
+                lhs_loaded_keys += lhs_data_view.second.size();
+
+                if(!status)
+                    co_return status;
+            }
+
+            if(rhs_it == rhs_data_view.second.end())
+            {
+                auto status = co_await refresh_view(rhs_view, rhs_data_view, rhs_it, last_page_size(right._footer));
+
+                rhs_loaded_keys += rhs_data_view.second.size();
+
+                if(!status)
+                    co_return status;
+            }
+
+            co_return hedgehog::ok();
+        };
+
+        auto status = co_await init_views();
+        if(!status)
+            co_return hedgehog::error("Failed to initialize views: " + status.error().to_string());
+
+        size_t index_key_count = 0;
+        size_t bytes_written = 0;
+
+        std::vector<meta_index_entry> merged_meta_index;
+
+        while(true)
+        {
+            std::vector<uint8_t> merged_keys(read_ahead_size * 2);
+            auto merged_keys_span = view_as<index_key_t>(merged_keys);
+            auto merged_it = merged_keys_span.begin();
+
+            auto& [lhs_data, lhs_span] = lhs_data_view;
+            auto& [rhs_data, rhs_span] = rhs_data_view;
+
+            while(lhs_it != lhs_span.end() && rhs_it != rhs_span.end())
+            {
+                if(*lhs_it < *rhs_it)
+                {
+                    *merged_it = *lhs_it;
+                    ++lhs_it;
+                }
+                else if(*rhs_it < *lhs_it)
+                {
+                    *merged_it = *rhs_it;
+                    ++rhs_it;
+                }
+
+                index_key_count++;
+                if(index_key_count % INDEX_PAGE_NUM_ENTRIES == 0)
+                    merged_meta_index.emplace_back(merged_it->key);
+
+                if(++merged_it == merged_keys_span.end())
+                    break;
+            }
+
+            auto this_run_keys = std::distance(merged_keys_span.begin(), merged_it);
+            merged_keys.resize(this_run_keys * sizeof(index_key_t));
+
+            auto res = co_await executor->submit_request(async::write_request{
+                .fd = fd.get(),
+                .data = merged_keys.data(),
+                .size = merged_keys.size(),
+                .offset = bytes_written});
+
+            bytes_written += res.bytes_written;
+
+            if(res.error_code != 0)
+                co_return hedgehog::error("Failed to write merged keys to file: " + std::string(strerror(res.error_code)));
+
+            auto status = co_await refresh_views();
+            if(!status)
+                co_return hedgehog::error("Failed to refresh views: " + status.error().to_string());
+
+            if(lhs_data_view.first.empty() || rhs_data_view.first.empty())
+                break;
+        }
+
+        // std::cout << "Merged " << index_key_count << " keys" << std::endl;
+
+        assert(lhs_data_view.first.empty() ^ rhs_data_view.first.empty() && "Either one of the views should be empty at this point");
+
+        // todo: potrebbe accadere che uno dei due buffer non sia EOF. bisogna continuare a caricare finche' non finisce
+
+        auto& non_empty_data_view = !lhs_data_view.first.empty() ? lhs_data_view : rhs_data_view;
+        auto& non_empty_iterator = !lhs_data_view.first.empty() ? lhs_it : rhs_it;
+        auto transformed_it = transform_it(non_empty_iterator);
+
+        non_empty_data_view.first.erase(non_empty_data_view.first.begin(), transformed_it);
+        non_empty_data_view.second = view_as<index_key_t>(non_empty_data_view.first);
+
+        while(true)
+        {
+            non_empty_iterator = non_empty_data_view.second.begin();
+
+            for(auto it = non_empty_iterator; it != non_empty_data_view.second.end(); it++)
+            {
+                ++index_key_count;
+
+                if(index_key_count % INDEX_PAGE_NUM_ENTRIES == 0)
+                    merged_meta_index.emplace_back(it->key);
+            }
+
+            // handle last page entry
+            if(index_key_count % INDEX_PAGE_NUM_ENTRIES != 0 && (lhs_view.is_eof() && rhs_view.is_eof()))
+                merged_meta_index.emplace_back(non_empty_data_view.second.back().key);
+
+            if(!non_empty_data_view.first.empty())
+            {
+                auto res = co_await executor->submit_request(async::write_request{
+                    .fd = fd.get(),
+                    .data = non_empty_data_view.first.data(),
+                    .size = non_empty_data_view.first.size(),
+                    .offset = bytes_written});
+
+                if(res.error_code != 0)
+                    co_return hedgehog::error("Failed to write remaining keys to file: " + std::string(strerror(res.error_code)));
+
+                bytes_written += res.bytes_written;
+            }
+
+            non_empty_iterator = non_empty_data_view.second.end();
+            auto refresh_status = co_await refresh_views();
+
+            if(!refresh_status)
+                co_return hedgehog::error("Failed to refresh views: " + refresh_status.error().to_string());
+
+            if(lhs_view.is_eof() && lhs_data_view.first.empty() && rhs_view.is_eof() && rhs_data_view.first.empty())
+                break;
+        }
+
+        auto refresh_status = co_await refresh_views();
+        if(!refresh_status)
+            co_return hedgehog::error("Failed to refresh views after writing remaining keys: " + refresh_status.error().to_string());
+
+        // std::cout << "Merged " << index_key_count << " keys in total" << std::endl;
+        // std::cout << "lhs loaded keys: " << lhs_loaded_keys << std::endl;
+        // std::cout << "rhs loaded keys: " << rhs_loaded_keys << std::endl;
+        // std::cout << "lhs + rhs loaded keys: " << lhs_loaded_keys + rhs_loaded_keys << std::endl;
+
+        assert(index_key_count == footer.indexed_keys && "Item count does not match footer indexed keys");
+        assert(index_key_count * sizeof(index_key_t) == footer.index_end_offset && "Item count does not match footer index end offset");
+
+        // write index padding if any
+        size_t padding_size = compute_alignment_padding<index_key_t>(index_key_count);
+        if(padding_size > 0)
+        {
+            auto padding = std::vector<uint8_t>(padding_size, 0);
+            auto res = co_await executor->submit_request(async::write_request{
+                .fd = fd.get(),
+                .data = padding.data(),
+                .size = padding.size(),
+                .offset = bytes_written});
+
+            if(res.error_code != 0)
+                co_return hedgehog::error("Failed to write padding to file: " + std::string(strerror(res.error_code)));
+
+            bytes_written += res.bytes_written;
+        }
+
+        // write meta index
+        {
+            //    .data = std::vector<uint8_t>(reinterpret_cast<uint8_t*>(merged_meta_index.data()), reinterpret_cast<uint8_t*>(merged_meta_index.data()) + merged_meta_index.size() * sizeof(meta_index_entry)),
+
+            auto res = co_await executor->submit_request(async::write_request{
+                .fd = fd.get(),
+                .data = reinterpret_cast<uint8_t*>(merged_meta_index.data()),
+                .size = merged_meta_index.size() * sizeof(meta_index_entry),
+                .offset = bytes_written});
+
+            if(res.error_code != 0)
+                co_return hedgehog::error("Failed to write meta index to file: " + std::string(strerror(res.error_code)));
+
+            bytes_written += res.bytes_written;
+        }
+
+        // write meta index padding if any
+        size_t meta_index_padding_size = compute_alignment_padding<meta_index_entry>(merged_meta_index.size());
+        if(meta_index_padding_size > 0)
+        {
+            auto padding = std::vector<uint8_t>(meta_index_padding_size, 0);
+            auto res = co_await executor->submit_request(async::write_request{
+                .fd = fd.get(),
+                .data = padding.data(),
+                .size = meta_index_padding_size,
+                .offset = bytes_written});
+
+            if(res.error_code != 0)
+                co_return hedgehog::error("Failed to write meta index padding to file: " + std::string(strerror(res.error_code)));
+
+            bytes_written += res.bytes_written;
+        }
+
+        // write footer
+        {
+            auto res = co_await executor->submit_request(async::write_request{
+                .fd = fd.get(),
+                .data = reinterpret_cast<uint8_t*>(&footer),
+                .size = sizeof(footer),
+                .offset = bytes_written});
+
+            if(res.error_code != 0)
+                co_return hedgehog::error("Failed to write footer to file: " + std::string(strerror(res.error_code)));
+
+            bytes_written += res.bytes_written;
+        }
+
+        // fsync(fd.get());
+
+        auto read_fd = fs::file_descriptor::from_path(fd.path(), fs::file_descriptor::open_mode::read_only, false, bytes_written);
+        if(!read_fd.has_value())
+            co_return hedgehog::error("Failed to open merged index file for reading: " + read_fd.error().to_string());
+
+        sorted_index result{
+            std::move(read_fd.value()),
+            {},
+            std::move(merged_meta_index),
+            std::move(footer)};
+
+        co_return result;
+    }
+
+    hedgehog::expected<sorted_index> index_ops::two_way_merge(const std::filesystem::path& base_path, size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor)
+    {
+        if(!executor)
+            return hedgehog::error("Executor context is null");
+
+        auto result = executor->sync_submit(two_way_merge_async(base_path, read_ahead_size, left, right, executor));
+
+        if(!result.has_value())
+            return hedgehog::error("Failed to merge sorted indices: " + result.error().to_string());
+
+        return std::move(result.value());
     }
 
 } // namespace hedgehog::db
