@@ -65,7 +65,7 @@ namespace hedgehog::db
 
             // trigger compactation
             if(this->_config.auto_compactation)
-                this->compact_sorted_indices(false, false, executor);
+                this->compact_sorted_indices(false, executor);
         }
 
         // first it tries writing the data to the value table
@@ -355,7 +355,7 @@ namespace hedgehog::db
         return hedgehog::ok();
     }
 
-    hedgehog::status database::compact_sorted_indices(bool wait_sync, bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor)
+    std::future<hedgehog::status> database::compact_sorted_indices(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor)
     {
         auto compactation_promise_ptr = std::make_shared<std::promise<hedgehog::status>>();
         std::future<hedgehog::status> compactation_future = compactation_promise_ptr->get_future();
@@ -377,10 +377,7 @@ namespace hedgehog::db
                 promise->set_value(std::move(status));
             });
 
-        if(!wait_sync)
-            return hedgehog::ok();
-
-        return compactation_future.get();
+        return compactation_future;
     }
 
     [[nodiscard]] double database::load_factor()

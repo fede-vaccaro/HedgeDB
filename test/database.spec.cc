@@ -123,8 +123,8 @@ namespace hedgehog::db
 
         // compactation
         t0 = std::chrono::high_resolution_clock::now();
-        auto compactation_status = db->compact_sorted_indices(true, true, this->_executor);
-        ASSERT_TRUE(compactation_status) << "An error occurred during compactation: " << compactation_status.error().to_string();
+        auto compactation_status_future = db->compact_sorted_indices(true, this->_executor);
+        ASSERT_TRUE(compactation_status_future.get()) << "An error occurred during compactation: " << compactation_status_future.get().error().to_string();
         t1 = std::chrono::high_resolution_clock::now();
         duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         std::cout << "Total duration for compactation: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
@@ -183,9 +183,9 @@ namespace hedgehog::db
         test_suite,
         database_test,
         testing::Combine(
-            testing::Values(5'000'000), // n keys
-            testing::Values(1024),      // payload size
-            testing::Values(1'000'000)  // memtable capacity
+            testing::Values(75'000'000), // n keys
+            testing::Values(1024),       // payload size
+            testing::Values(1'000'000)   // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)
         {
