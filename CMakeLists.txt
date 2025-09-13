@@ -59,5 +59,14 @@ target_link_libraries(
     uring
 )
 
-add_executable(executor_test io_executor.cc mailbox_impl.cc executor_test.cc)
-target_link_libraries(executor_test uring)
+## io_executor files
+set(IO_EXECUTOR_SRCS io_executor.cc mailbox_impl.cc)
+
+# executor_test.cc
+add_executable(executor_read_test ${IO_EXECUTOR_SRCS} executor_read_test.cc)
+target_link_libraries(executor_read_test uring)
+
+# executor tests
+
+add_executable(executor_test ${IO_EXECUTOR_SRCS} test/io_executor.spec.cc)
+target_link_libraries(executor_test uring gtest gtest_main)

@@ -7,3 +7,6 @@ hedgehog_db
 
 # cmake
 build/*
+
+# random experiment dir
+coros/*
