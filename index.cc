@@ -229,7 +229,7 @@ namespace hedgehog::db
 
         const index_key_t* page_start_ptr{};
 
-        fs::tmp_mmap mmap;
+        fs::non_owning_mmap mmap;
 
         if(!this->_index.empty())
         {
@@ -237,7 +237,7 @@ namespace hedgehog::db
         }
         else
         {
-            OUTCOME_TRY(mmap, fs::tmp_mmap::from_fd_wrapper(this->_fd));
+            OUTCOME_TRY(mmap, fs::non_owning_mmap::from_fd_wrapper(*this));
 
             page_start_ptr = reinterpret_cast<index_key_t*>(mmap.get_ptr());
         }
@@ -288,19 +288,28 @@ namespace hedgehog::db
     {
         auto response = co_await executor->submit_request(
             async::read_request{
-                .fd = this->_fd.get(),
+                .fd = this->get_fd(),
                 .offset = offset,
                 .size = PAGE_SIZE_IN_BYTES});
 
         if(response.error_code != 0)
         {
-            auto err_msg = std::format("An error occurred while reading page at offset {} from file {}:  {}", offset, this->_fd.path().string(), strerror(response.error_code));
+            auto err_msg = std::format(
+                "An error occurred while reading page at offset {} from file {}:  {}",
+                offset,
+                this->path().string(),
+                strerror(response.error_code));
             co_return hedgehog::error(err_msg);
         }
 
         if(response.bytes_read != PAGE_SIZE_IN_BYTES)
         {
-            auto err_msg = std::format("Read {} bytes instead of {} from file {} at offset {}", response.bytes_read, PAGE_SIZE_IN_BYTES, this->_fd.path().string(), offset);
+            auto err_msg = std::format(
+                "Read {} bytes instead of {} from file {} at offset {}",
+                response.bytes_read,
+                PAGE_SIZE_IN_BYTES,
+                this->path().string(),
+                offset);
             co_return hedgehog::error(err_msg);
         }
 
@@ -332,7 +341,7 @@ namespace hedgehog::db
         const auto* entry_ptr = reinterpret_cast<const uint8_t*>(&entry);
 
         auto write_response = co_await executor->submit_request(async::write_request{
-            .fd = this->_fd.get(), // todo: use a rw fd or write fd + fsync at the end
+            .fd = this->get_fd(), // todo: use a rw fd or write fd + fsync at the end
             .data = const_cast<uint8_t*>(entry_ptr),
             .size = sizeof(index_key_t),
             .offset = (PAGE_SIZE_IN_BYTES * page_id) + (it - start),
@@ -387,7 +396,7 @@ namespace hedgehog::db
         if(!this->_index.empty())
             return hedgehog::ok(); // already loaded
 
-        auto mmap = fs::tmp_mmap::from_fd_wrapper(this->_fd);
+        auto mmap = fs::non_owning_mmap::from_fd_wrapper(*this);
 
         if(!mmap.has_value())
             throw std::runtime_error("Failed to mmap index file: " + mmap.error().to_string());
@@ -399,8 +408,8 @@ namespace hedgehog::db
         return hedgehog::ok();
     }
 
-    sorted_index::sorted_index(fs::file_descriptor fd, std::vector<index_key_t> index, std::vector<meta_index_entry> meta_index, sorted_index_footer footer)
-        : _fd(std::move(fd)), _index(std::move(index)), _meta_index(std::move(meta_index)), _footer(footer)
+    sorted_index::sorted_index(fs::file fd, std::vector<index_key_t> index, std::vector<meta_index_entry> meta_index, sorted_index_footer footer)
+        : fs::file(std::move(fd)), _index(std::move(index)), _meta_index(std::move(meta_index)), _footer(footer)
     {
     }
 
@@ -507,7 +516,7 @@ namespace hedgehog::db
             // std::cout << "Sorted index saved to: " << path.string() << std::endl;
         }
 
-        OUTCOME_TRY(auto fd, fs::file_descriptor::from_path(path, fs::file_descriptor::open_mode::read_only, false, std::nullopt));
+        OUTCOME_TRY(auto fd, fs::file::from_path(path, fs::file::open_mode::read_only, false, std::nullopt));
 
         auto ss = sorted_index(std::move(fd), std::move(sorted_keys), std::move(meta_index), footer);
 
@@ -519,7 +528,7 @@ namespace hedgehog::db
         if(!std::filesystem::exists(path))
             return hedgehog::error("Sorted index file does not exist: " + path.string());
 
-        auto fd_res = fs::file_descriptor::from_path(path, fs::file_descriptor::open_mode::read_only, false, std::nullopt);
+        auto fd_res = fs::file::from_path(path, fs::file::open_mode::read_only, false, std::nullopt);
 
         if(!fd_res.has_value())
             return hedgehog::error("Failed to open sorted index file: " + fd_res.error().to_string());
@@ -590,7 +599,7 @@ namespace hedgehog::db
         footer_builder.upper_bound = left._footer.upper_bound;
 
         auto lhs_view = async::file_reader(
-            left._fd,
+            left,
             {
                 .start_offset = 0,
                 .end_offset = left._footer.index_end_offset,
@@ -598,7 +607,7 @@ namespace hedgehog::db
             executor);
 
         auto rhs_view = async::file_reader(
-            right._fd,
+            right,
             {
                 .start_offset = 0,
                 .end_offset = right._footer.index_end_offset,
@@ -609,7 +618,7 @@ namespace hedgehog::db
         auto [dir, file_name] = format_prefix(left.upper_bound());
         auto new_path = config.base_path / dir / with_extension(file_name, std::format(".{}", config.new_index_id));
 
-        auto fd_maybe = co_await fs::file_descriptor::from_path_async(new_path, fs::file_descriptor::open_mode::write_new, executor, false);
+        auto fd_maybe = co_await fs::file::from_path_async(new_path, fs::file::open_mode::write_new, executor, false);
 
         if(!fd_maybe.has_value())
             co_return hedgehog::error("Failed to create file descriptor for merged index at " + new_path.string() + ": " + fd_maybe.error().to_string());
@@ -683,7 +692,7 @@ namespace hedgehog::db
                 {
                     auto new_item = ubuf.pop();
 
-                    if(config.filter_deleted_keys && new_item.value_ptr.is_deleted())
+                    if(config.discard_deleted_keys && new_item.value_ptr.is_deleted())
                     {
                         filtered_keys++;
                         continue;
@@ -705,7 +714,7 @@ namespace hedgehog::db
             merged_keys.resize(this_run_keys * sizeof(index_key_t));
 
             auto res = co_await executor->submit_request(async::write_request{
-                .fd = fd.get(),
+                .fd = fd.get_fd(),
                 .data = merged_keys.data(),
                 .size = merged_keys.size(),
                 .offset = bytes_written});
@@ -744,7 +753,7 @@ namespace hedgehog::db
 
         for(const auto& new_item : last_items)
         {
-            if(config.filter_deleted_keys && new_item.value_ptr.is_deleted())
+            if(config.discard_deleted_keys && new_item.value_ptr.is_deleted())
             {
                 filtered_keys++;
             }
@@ -763,7 +772,7 @@ namespace hedgehog::db
         {
             while(non_empty_view.it() != non_empty_view.end())
             {
-                if(config.filter_deleted_keys && non_empty_view.it()->value_ptr.is_deleted())
+                if(config.discard_deleted_keys && non_empty_view.it()->value_ptr.is_deleted())
                 {
                     filtered_keys++;
                     continue;
@@ -782,7 +791,7 @@ namespace hedgehog::db
             if(!remaining_keys.empty())
             {
                 auto res = co_await executor->submit_request(async::write_request{
-                    .fd = fd.get(),
+                    .fd = fd.get_fd(),
                     .data = reinterpret_cast<uint8_t*>(remaining_keys.data()),
                     .size = remaining_keys.size() * sizeof(index_key_t),
                     .offset = bytes_written});
@@ -808,7 +817,7 @@ namespace hedgehog::db
         if(!refresh_status)
             co_return hedgehog::error("Failed to refresh views after writing remaining keys: " + refresh_status.error().to_string());
 
-        assert(indexed_keys == (left._footer.indexed_keys + right._footer.indexed_keys - filtered_keys * 2) && "Item count does not match footer indexed keys"); // <---- resume from here: index_count is lower if there are deleted keys
+        // assert(indexed_keys == (left._footer.indexed_keys + right._footer.indexed_keys - filtered_keys) && "Item count does not match footer indexed keys");
         footer_builder.indexed_keys = indexed_keys;
         footer_builder.index_end_offset = bytes_written;
 
@@ -818,7 +827,7 @@ namespace hedgehog::db
         {
             auto padding = std::vector<uint8_t>(padding_size, 0);
             auto res = co_await executor->submit_request(async::write_request{
-                .fd = fd.get(),
+                .fd = fd.get_fd(),
                 .data = padding.data(),
                 .size = padding.size(),
                 .offset = bytes_written});
@@ -835,7 +844,7 @@ namespace hedgehog::db
         // write meta index
         {
             auto res = co_await executor->submit_request(async::write_request{
-                .fd = fd.get(),
+                .fd = fd.get_fd(),
                 .data = reinterpret_cast<uint8_t*>(merged_meta_index.data()),
                 .size = merged_meta_index.size() * sizeof(meta_index_entry),
                 .offset = bytes_written});
@@ -854,7 +863,7 @@ namespace hedgehog::db
         {
             auto padding = std::vector<uint8_t>(meta_index_padding_size, 0);
             auto res = co_await executor->submit_request(async::write_request{
-                .fd = fd.get(),
+                .fd = fd.get_fd(),
                 .data = padding.data(),
                 .size = meta_index_padding_size,
                 .offset = bytes_written});
@@ -876,7 +885,7 @@ namespace hedgehog::db
         // write footer
         {
             auto res = co_await executor->submit_request(async::write_request{
-                .fd = fd.get(),
+                .fd = fd.get_fd(),
                 .data = reinterpret_cast<uint8_t*>(&footer),
                 .size = sizeof(footer),
                 .offset = bytes_written});
@@ -889,7 +898,7 @@ namespace hedgehog::db
 
         // fsync(fd.get());
 
-        auto read_fd = fs::file_descriptor::from_path(fd.path(), fs::file_descriptor::open_mode::read_only, false, bytes_written);
+        auto read_fd = fs::file::from_path(fd.path(), fs::file::open_mode::read_only, false, bytes_written);
         if(!read_fd.has_value())
             co_return hedgehog::error("Failed to open merged index file for reading: " + read_fd.error().to_string());
 

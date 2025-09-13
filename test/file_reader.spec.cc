@@ -41,7 +41,7 @@ namespace hedgehog::async
         file.write(reinterpret_cast<const char*>(data.data()), data.size());
         file.close();
 
-        auto fd = fs::file_descriptor::from_path("/tmp/test_file", fs::file_descriptor::open_mode::read_only, false, 64);
+        auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
         ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
 
         auto view = file_reader{
@@ -69,7 +69,7 @@ namespace hedgehog::async
         file.write(reinterpret_cast<const char*>(data.data()), data.size());
         file.close();
 
-        auto fd = fs::file_descriptor::from_path("/tmp/test_file", fs::file_descriptor::open_mode::read_only, false, 64);
+        auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
         ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
 
         auto view = file_reader{
@@ -105,7 +105,7 @@ namespace hedgehog::async
         file.write(reinterpret_cast<const char*>(data.data()), data.size());
         file.close();
 
-        auto fd = fs::file_descriptor::from_path("/tmp/test_file", fs::file_descriptor::open_mode::read_only, false, 64);
+        auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
         ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
 
         auto view = file_reader{
@@ -133,7 +133,7 @@ namespace hedgehog::async
         file.write(reinterpret_cast<const char*>(data.data()), data.size());
         file.close();
 
-        auto fd = fs::file_descriptor::from_path("/tmp/test_file", fs::file_descriptor::open_mode::read_only, false, 64);
+        auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
         ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
 
         auto view = file_reader{
@@ -180,7 +180,7 @@ namespace hedgehog::async
         file.write(reinterpret_cast<const char*>(data.data()), data.size());
         file.close();
 
-        auto fd = fs::file_descriptor::from_path("/tmp/test_file", fs::file_descriptor::open_mode::read_only, false, 64);
+        auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
         ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
 
         auto view = file_reader{
@@ -230,7 +230,7 @@ namespace hedgehog::async
         file.write(reinterpret_cast<const char*>(data.data()), data.size());
         file.close();
 
-        auto fd = fs::file_descriptor::from_path("/tmp/test_file", fs::file_descriptor::open_mode::read_only, false, 64);
+        auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
         ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
 
         auto view = file_reader{
@@ -261,7 +261,7 @@ namespace hedgehog::async
         file.write(reinterpret_cast<const char*>(data.data()), data.size());
         file.close();
 
-        auto fd = fs::file_descriptor::from_path("/tmp/test_file", fs::file_descriptor::open_mode::read_only, false, 64);
+        auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
         ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
 
         auto view = file_reader{

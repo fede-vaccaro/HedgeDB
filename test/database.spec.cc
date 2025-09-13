@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <random>
 
 #include "../database.h"
 #include "../io_executor.h"
@@ -64,23 +65,26 @@ namespace hedgehog::db
         }
 
         // test parameters
-        size_t N_KEYS{};            // number of keys per run
-        size_t PAYLOAD_SIZE{};      // payload size in bytes
-        size_t MEMTABLE_CAPACITY{}; // memtable capacity
+        size_t N_KEYS{};                 // number of keys per run
+        size_t PAYLOAD_SIZE{};           // payload size in bytes
+        size_t MEMTABLE_CAPACITY{};      // memtable capacity
+        bool TEST_DELETION{true};        // whether to test deletion or not
+        double DELETE_PROBABILITY{0.02}; // if deletion test is enabled, how many keys of total should be removed
 
         // runtime
         std::shared_ptr<hedgehog::async::executor_context> _executor;
         std::filesystem::path _base_path = "/tmp/db";
 
-        // rng stuff
+        // rng and seed stuff
         std::vector<uuids::uuid> _uuids;
+        std::unordered_set<uuids::uuid> _deleted_keys;
         size_t seed{107279581};
         std::mt19937 _generator{seed};
         std::uniform_int_distribution<int> dist{0, 15};
         uuids::basic_uuid_random_generator<std::mt19937> gen{_generator};
     };
 
-    TEST_P(database_test, basic_test_no_compaction)
+    TEST_P(database_test, database_comprehensive_test)
     {
         this->_uuids.reserve(this->N_KEYS);
 
@@ -96,7 +100,9 @@ namespace hedgehog::db
 
         auto db = std::move(maybe_db.value());
 
-        auto make_put_task = [this, &db, &write_wg](size_t i) -> async::task<void>
+        std::uniform_real_distribution<double> dist(0.0, 1.0);
+
+        auto make_put_task = [this, &db, &write_wg, &dist](size_t i) -> async::task<void>
         {
             auto key = this->generate_uuid();
             auto value = database_test::make_random_vec_seeded(this->PAYLOAD_SIZE, i);
@@ -105,6 +111,16 @@ namespace hedgehog::db
 
             if(!status)
                 std::cerr << "An error occurred during insertion: " << status.error().to_string() << std::endl;
+
+            if(this->TEST_DELETION && dist(this->_generator) < this->DELETE_PROBABILITY)
+            {
+                auto status = co_await db->remove_async(key, this->_executor);
+
+                if(!status)
+                    std::cerr << "An error occurred during deletion: " << status.error().to_string() << std::endl;
+
+                this->_deleted_keys.insert(key);
+            }
 
             write_wg.decr();
         };
@@ -120,6 +136,7 @@ namespace hedgehog::db
         std::cout << "Total duration for insertion: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
         std::cout << "Average duration per insertion: " << (double)duration.count() / this->N_KEYS << " us" << std::endl;
         std::cout << "Insertion bandwidth: " << (double)this->N_KEYS * (this->PAYLOAD_SIZE / 1024.0) / (duration.count() / 1000.0) << " MB/s" << std::endl;
+        std::cout << "Deleted keys: " << this->_deleted_keys.size() << std::endl;
 
         // compaction
         t0 = std::chrono::high_resolution_clock::now();
@@ -141,6 +158,18 @@ namespace hedgehog::db
             auto key = this->_uuids[i];
             auto maybe_value = co_await db->get_async(key, this->_executor);
 
+            if(!maybe_value.has_value() && maybe_value.error().code() == errc::DELETED)
+            {
+                if(!this->_deleted_keys.contains(key))
+                {
+                    number_of_errors++;
+                    std::cerr << "Key should be between the deleteds: " << key << std::endl;
+                }
+
+                read_wg.decr();
+                co_return;
+            }
+
             if(!maybe_value)
             {
                 number_of_errors++;
@@ -148,6 +177,7 @@ namespace hedgehog::db
                 read_wg.decr();
                 co_return;
             }
+
             auto& value = maybe_value.value();
 
             auto expected_value = database_test::make_random_vec_seeded(this->PAYLOAD_SIZE, i);
@@ -183,9 +213,9 @@ namespace hedgehog::db
         test_suite,
         database_test,
         testing::Combine(
-            testing::Values(75'000'000), // n keys
-            testing::Values(1024),       // payload size
-            testing::Values(1'000'000)   // memtable capacity
+            testing::Values(4'000'000), // n keys
+            testing::Values(1024),      // payload size
+            testing::Values(1'000'000)  // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)
         {

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <map>
@@ -65,10 +64,6 @@ namespace hedgehog::db
         async::worker compaction_worker;
         async::worker gc_worker;
 
-        // they contain the new key->value_ptr mappings
-        std::mutex _gc_mem_indices_mutex;
-        std::vector<mem_index> _gc_mem_indices;
-
         // logger
         logger _logger{"database"};
 
@@ -85,6 +80,9 @@ namespace hedgehog::db
 
         static expected<std::shared_ptr<database>> make_new(const std::filesystem::path& base_path, const db_config& config);
         static expected<std::shared_ptr<database>> load(const std::filesystem::path& base_path);
+
+        hedgehog::status flush();
+        std::future<hedgehog::status> garbage_collect_tables(const std::shared_ptr<async::executor_context>& executor);
 
         [[nodiscard]] double load_factor();
 

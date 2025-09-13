@@ -6,7 +6,7 @@
 
 namespace hedgehog::async
 {
-    file_reader::file_reader(const fs::file_descriptor& fd, const file_reader_config& config, std::shared_ptr<async::executor_context> executor)
+    file_reader::file_reader(const fs::file& fd, const file_reader_config& config, std::shared_ptr<async::executor_context> executor)
         : _fd(fd), _config(config), _executor(std::move(executor)), _current_offset(config.start_offset)
     {
     }
@@ -35,12 +35,12 @@ namespace hedgehog::async
             num_bytes_to_read += PAGE_SIZE_IN_BYTES - (num_bytes_to_read % PAGE_SIZE_IN_BYTES);
 
         
-        auto response = co_await this->_executor->submit_request(async::read_request{.fd = this->_fd.get(), .offset = this->_current_offset, .size = num_bytes_to_read});
+        auto response = co_await this->_executor->submit_request(async::read_request{.fd = this->_fd.get_fd(), .offset = this->_current_offset, .size = num_bytes_to_read});
 
         this->_current_offset += num_bytes_to_read;
 
         if(response.error_code != 0)
-            co_return hedgehog::error(std::format("An error occurred with request fd: {}, current_offset: {}, size: {}. Error: {}", this->_fd.get(), this->_current_offset, num_bytes_to_read, strerror(-response.error_code)));
+            co_return hedgehog::error(std::format("An error occurred with request fd: {}, current_offset: {}, size: {}. Error: {}", this->_fd.get_fd(), this->_current_offset, num_bytes_to_read, strerror(-response.error_code)));
 
         if(response.bytes_read != num_bytes_to_read)
             co_return hedgehog::error(std::format("Unexpected bytes read: {}. Expected: {}", response.bytes_read, num_bytes_to_read));
