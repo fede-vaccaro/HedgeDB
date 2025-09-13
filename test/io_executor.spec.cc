@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <fcntl.h>
+#include <filesystem>
 #include <fstream>
 #include <future>
 #include <gtest/gtest.h>
@@ -90,7 +91,7 @@ TEST_F(test_executor, test_write_simple)
 
     auto task = [&]() -> ::task<void>
     {
-        auto request = write_request{fd, std::move(buffer), 0};
+        auto request = write_request{fd, buffer.data(), buffer.size()};
 
         auto response = co_await this->_executor->submit_request(std::move(request));
 
@@ -150,4 +151,107 @@ TEST_F(test_executor, test_multi_read)
 
     ASSERT_EQ(response.responses[1].bytes_read, 8) << "Second read response size mismatch";
     ASSERT_EQ(std::string(response.responses[1].data.get(), response.responses[1].data.get() + response.responses[1].bytes_read), ", World!") << "Second read content mismatch";
+}
+
+
+TEST_F(test_executor, test_open_fallocate_write)
+{
+    auto promise = std::promise<int32_t>{};
+    auto future = promise.get_future();
+
+    auto task = [&]() -> ::task<void>
+    {
+        auto request = open_request{"/tmp/test_file", O_WRONLY | O_CREAT | O_TRUNC, 0644};
+
+        auto response = co_await this->_executor->submit_request(std::move(request));
+
+        if(response.error_code < 0)
+        {
+            promise.set_value(-1);
+            co_return;
+        }
+
+        std::string input_data = "Hello, World!";
+
+        auto fallocate_response = co_await this->_executor->submit_request(fallocate_request{response.file_descriptor, 0, 0, input_data.size()}); 
+
+        if(fallocate_response.error_code < 0)
+        {
+            promise.set_value(-1);
+            co_return;
+        }
+
+        uint8_t* input_data_ptr = reinterpret_cast<uint8_t*>(input_data.data());
+
+        auto write_response = co_await this->_executor->submit_request(write_request{response.file_descriptor, input_data_ptr, input_data.size()});
+
+        if(write_response.error_code < 0)
+        {
+            promise.set_value(-1);
+            co_return;
+        }
+
+        promise.set_value(0);
+
+    };
+
+    this->_executor->submit_io_task(task());
+
+    auto response = future.get();
+
+    std::ifstream file("/tmp/test_file", std::ios::binary);
+    ASSERT_TRUE(file.is_open()) << "Failed to open file for reading: " << strerror(errno);
+    std::string file_content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    ASSERT_EQ(file_content, "Hello, World!") << "File content does not match expected data";
+}
+
+TEST_F(test_executor, text_file_info_file_does_not_exist)
+{
+    std::filesystem::remove("/tmp/test_file"); // to be sure
+
+    auto promise = std::promise<file_info_response>{};
+    auto future = promise.get_future();
+
+    auto task = [&]() -> ::task<void>
+    {
+        auto request = file_info_request{"/tmp/test_file"};
+
+        auto response = co_await this->_executor->submit_request(std::move(request));
+
+        promise.set_value(std::move(response));
+    };
+
+    this->_executor->submit_io_task(task());
+
+    auto response = future.get();
+
+    ASSERT_FALSE(response.exists) << "File does not exist";
+}
+TEST_F(test_executor, test_file_info_file_exists)
+{
+    // prepare file with some data
+    std::string test_data = "Hello, World!";
+    std::ofstream file("/tmp/test_file", std::ios::binary);
+    ASSERT_TRUE(file.is_open()) << "Failed to open file for writing: " << strerror(errno);
+    file << test_data;
+    file.close();
+
+    auto promise = std::promise<file_info_response>{};
+    auto future = promise.get_future();
+
+    auto task = [&]() -> ::task<void>
+    {
+        auto request = file_info_request{"/tmp/test_file"};
+
+        auto response = co_await this->_executor->submit_request(std::move(request));
+
+        promise.set_value(std::move(response));
+    };
+
+    this->_executor->submit_io_task(task());
+
+    auto response = future.get();
+
+    ASSERT_TRUE(response.exists) << "File should exist";
+    ASSERT_EQ(response.file_size, test_data.size()) << "File size should be greater than 0";
 }

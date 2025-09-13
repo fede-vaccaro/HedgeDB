@@ -27,6 +27,7 @@ namespace hedgehog::db
         static hedgehog::expected<sorted_index> load_sorted_index(const std::filesystem::path& path, bool load_index = false);
         static hedgehog::expected<sorted_index> save_as_sorted_index(const std::filesystem::path& path, std::vector<index_key_t>&& sorted_keys, size_t upper_bound, bool merge_with_existent = false);
         static hedgehog::expected<std::vector<sorted_index>> merge_and_flush(const std::filesystem::path& base_path, std::vector<mem_index>&& indices, size_t num_partition_exponent);
+        static async::task<hedgehog::expected<sorted_index>> two_way_merge_async(const std::filesystem::path& base_path, size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor);
         static hedgehog::expected<sorted_index> two_way_merge(const std::filesystem::path& base_path, size_t read_ahead_size, const sorted_index& left, const sorted_index& right, std::shared_ptr<async::executor_context> executor);
     };
 
@@ -80,8 +81,10 @@ namespace hedgehog::db
     {
         inline static constexpr uint32_t CURRENT_FOOTER_VERSION = 1;
 
+        // textual header, useful for inspecting the binary
         char header[16] = "HEDGEHOG_FOOTER";
 
+        // versioning for future use
         uint8_t version{CURRENT_FOOTER_VERSION};
 
         // partition identifier, every key belonging to this sorted index is <= upper_bound

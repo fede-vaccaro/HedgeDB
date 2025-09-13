@@ -4,8 +4,10 @@
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
+#include <linux/stat.h>
 #include <memory>
 #include <span>
+#include <variant>
 #include <vector>
 
 #include <liburing.h>
@@ -47,19 +49,19 @@ namespace hedgehog::async
         auto resume()
         {
             /*
-                todo:
-                    use an std::atomic_bool for signaling that the response has been set
-                    this is needed for allowing:
+            todo:
+            use an std::atomic_bool for signaling that the response has been set
+            this is needed for allowing:
 
-                        awaitable_mailbox<read_response> future = co_await executor.submit_request(read_request{...});
+                awaitable_mailbox<read_response> future = co_await executor.submit_request(read_request{...});
 
-                        // do non blocking stuff the meanwhile
+                // do non blocking stuff the meanwhile
 
-                        auto read_response = co_await future;
+                auto read_response = co_await future;
 
-                    right now, this won't work and will make the program to crash because the io_executor will try to resume it later
-                    but the continuation is set only within awaitable_mailbox::await_suspend, which is called only on 'co_await future'
-                    i'm not sure an atomic_bool is needed, since this is a single-threaded executor
+            right now, this won't work and will make the program to crash because the io_executor will try to resume it later
+            but the continuation is set only within awaitable_mailbox::await_suspend, which is called only on 'co_await future'
+            i'm not sure an atomic_bool is needed, since this is a single-threaded executor
             */
 
             if(this->continuation.done())
@@ -113,22 +115,55 @@ namespace hedgehog::async
         }
     };
 
+    /*
+        To declare a mailbox (that generally speaking it is a
+        wrapper around some liburing prep operation), the following scheme is used
+        struct {op}_request;
+        struct {op}_response;
+        struct {op}_mailbox;
+
+        struct {op}_request
+        {
+            using response_t = {op}_response;
+            using mailbox_t = {op}_malbox;
+
+            // request members
+        };
+
+        struct {op}_response
+        {
+            // response members
+        };
+
+        struct {op}_mailbox
+        {
+            // mailbox implementation
+        };
+
+        basically it is needed for a certain request to exhibit the {op}_response_t and {op}_mailbox_t types
+        this is needed because the request type is determined from the client (i.e. the coroutine calling
+        executor_context::submit_request) and in sequence, the associated mailbox and response types are
+        derived depending on the types binded to the request.
+
+    */
+    struct write_request;
     struct write_response;
     struct write_mailbox;
 
-    struct write_request // todo: template for more containers? std::string, std::vector<std::byte>, etc.
+    struct write_request
     {
         using response_t = write_response;
         using mailbox_t = write_mailbox;
 
         int fd;
-        std::vector<uint8_t> data;
+        uint8_t* data;
+        size_t size;
         size_t offset;
     };
 
     struct write_response
     {
-        size_t  bytes_written{0};
+        size_t bytes_written{0};
         int32_t error_code{0};
     };
 
@@ -154,6 +189,7 @@ namespace hedgehog::async
         }
     };
 
+    struct multi_read_request;
     struct multi_read_response;
     struct multi_read_mailbox;
 
@@ -194,5 +230,183 @@ namespace hedgehog::async
     private:
         uint64_t _landed_response{0};
     };
+
+    struct open_request;
+    struct open_response;
+    struct open_mailbox;
+
+    struct open_request
+    {
+        using response_t = open_response;
+        using mailbox_t = open_mailbox;
+
+        std::string path;
+        int32_t flags;
+        mode_t mode{777};
+    };
+
+    struct open_response
+    {
+        int32_t file_descriptor{};
+        int32_t error_code{};
+    };
+
+    struct open_mailbox : mailbox_base<open_mailbox>
+    {
+        open_mailbox(open_request req) {}
+
+        open_request request;
+        open_response response;
+
+        void prepare_sqes(std::span<io_uring_sqe*> sqes);
+        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
+
+        uint32_t needed_sqes()
+        {
+            return 1;
+        }
+
+        void* get_response()
+        {
+            return &response;
+        }
+    };
+
+    struct fallocate_request;
+    struct fallocate_response;
+    struct fallocate_mailbox;
+
+    struct fallocate_request
+    {
+        using response_t = fallocate_response;
+        using mailbox_t = fallocate_mailbox;
+
+        int32_t fd;
+        mode_t mode;
+        size_t offset;
+        size_t length;
+    };
+
+    struct fallocate_response
+    {
+        int32_t error_code{};
+    };
+
+    struct fallocate_mailbox : mailbox_base<fallocate_mailbox>
+    {
+        fallocate_mailbox(fallocate_request req)
+            : request(std::move(req)) {}
+
+        fallocate_request request;
+        fallocate_response response;
+
+        void prepare_sqes(std::span<io_uring_sqe*> sqes);
+        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
+
+        uint32_t needed_sqes()
+        {
+            return 1;
+        }
+
+        void* get_response()
+        {
+            return &response;
+        }
+    };
+
+    struct close_request;
+    struct close_response;
+    struct close_mailbox;
+
+    struct close_request
+    {
+        using response_t = close_response;
+        using mailbox_t = close_mailbox;
+
+        int32_t fd;
+    };
+
+    struct close_response
+    {
+        int32_t error_code{};
+    };
+
+    struct close_mailbox : mailbox_base<close_mailbox>
+    {
+        close_mailbox(close_request req)
+            : request(std::move(req)) {}
+
+        close_request request;
+        close_response response;
+
+        void prepare_sqes(std::span<io_uring_sqe*> sqes);
+        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
+
+        uint32_t needed_sqes()
+        {
+            return 1;
+        }
+
+        void* get_response()
+        {
+            return &response;
+        }
+    };
+
+    struct file_info_request;
+    struct file_info_response;
+    struct file_info_mailbox;
+
+    struct file_info_request
+    {
+        using response_t = file_info_response;
+        using mailbox_t = file_info_mailbox;
+
+        std::string path;
+    };
+
+    struct file_info_response
+    {
+        bool exists{false};
+        size_t file_size{0};
+        int32_t error_code{0};
+    };
+
+    struct file_info_mailbox : mailbox_base<file_info_mailbox>
+    {
+        file_info_mailbox(file_info_request req)
+            : request(std::move(req)) {}
+
+        file_info_request request;
+        file_info_response response;
+
+        void prepare_sqes(std::span<io_uring_sqe*> sqes);
+        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
+
+        uint32_t needed_sqes()
+        {
+            return 1;
+        }
+
+        void* get_response()
+        {
+            return &response;
+        }
+
+    private:
+        struct statx _statx_buf
+        {
+        };
+    };
+
+    using mailbox_impls =
+        std::variant<
+            read_mailbox,
+            write_mailbox,
+            multi_read_mailbox,
+            open_mailbox,
+            fallocate_mailbox,
+            close_mailbox,
+            file_info_mailbox>;
 
 } // namespace hedgehog::async
