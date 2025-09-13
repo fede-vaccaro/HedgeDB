@@ -32,7 +32,7 @@ namespace hedgehog::db
             size_t read_ahead_size{};
             size_t new_index_id{};
             std::filesystem::path base_path{};
-            bool filter_deleted_keys{false};
+            bool discard_deleted_keys{false};
         };
 
         static async::task<hedgehog::expected<sorted_index>> two_way_merge_async(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
@@ -120,11 +120,10 @@ namespace hedgehog::db
         uuids::uuid page_max_id{};
     };
 
-    class sorted_index
+    class sorted_index : public fs::file
     {
         friend struct index_ops;
 
-        fs::file_descriptor _fd;
         std::vector<index_key_t> _index;
         std::vector<meta_index_entry> _meta_index;
         sorted_index_footer _footer;
@@ -132,7 +131,7 @@ namespace hedgehog::db
         std::unique_ptr<std::mutex> _compaction_mutex = std::make_unique<std::mutex>(); // let sorted_index to be mutable
 
     public:
-        sorted_index(fs::file_descriptor fd, std::vector<index_key_t> index, std::vector<meta_index_entry> meta_index, sorted_index_footer footer);
+        sorted_index(fs::file fd, std::vector<index_key_t> index, std::vector<meta_index_entry> meta_index, sorted_index_footer footer);
         sorted_index() = default;
 
         sorted_index(sorted_index&& other) noexcept = default;
@@ -160,7 +159,7 @@ namespace hedgehog::db
         void stats() const
         {
             std::cout << "Sorted index stats:\n";
-            std::cout << "  - File path: " << this->_fd.path() << "\n";
+            std::cout << "  - File path: " << this->path() << "\n";
             std::cout << "  - Indexed keys: " << this->_footer.indexed_keys << "\n";
             std::cout << "  - Meta index pages: " << this->_footer.meta_index_entries << "\n";
             std::cout << "  - Meta index size: " << this->_meta_index.size() << "\n";
@@ -169,14 +168,9 @@ namespace hedgehog::db
             std::cout << "  - Index capacity: " << this->_index.capacity() << "\n";
         }
 
-        [[nodiscard]] std::filesystem::path get_path() const
-        {
-            return this->_fd.path();
-        }
-
         [[nodiscard]] size_t get_index_id() const
         {
-            auto path = this->_fd.path();
+            auto path = this->path();
             auto filename = path.filename().extension().string();
             return std::stoull(filename.substr(1)); // remove leading dot
         }
