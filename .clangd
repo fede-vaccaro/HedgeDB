@@ -12,7 +12,16 @@ Index:
 Diagnostics:
   ClangTidy:
     Add: [modernize-*, performance-*, readability-*]
-    Remove: [clang-analyzer-*, "modernize-use-trailing-return-type", "readability-braces-around-statements", "readability-magic-numbers"]
+    Remove:
+      [
+        clang-analyzer-*,
+        "modernize-use-trailing-return-type",
+        "readability-braces-around-statements",
+        "readability-magic-numbers",
+        "readability-identifier-length",
+        "readability-redundant-member-init"
+        "performance-avoid-endl",
+      ]
 
 # Enable header insertion when using code completion
 Completion:
