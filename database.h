@@ -26,13 +26,13 @@ namespace hedgehog::db
         static constexpr size_t MAX_PARTITION_EXPONENT = 16;
         static constexpr size_t MIN_KEYS_IN_MEM_BEFORE_FLUSH = 1000;
 
-        size_t keys_in_mem_before_flush = 2'000'000;           // default number of keys to push
-        size_t num_partition_exponent = 10;                    // default partition exponent
-        double compactation_size_ratio = 0.2;                  // if during two way merge, rhs/lhs > compactation_size_ratio, a compactation job is triggered
-        size_t compactation_read_ahead_size_bytes = 16384;     // it will read from each table 16 KB at a time
-        std::chrono::milliseconds compacation_timeout{120000}; // stop waiting if this timeout is due
-        bool auto_compactation = true;                         // compactation is automatically triggered when the memtable reaches its limit
-        size_t max_pending_compactations = 16;                 // maximum number of pending compactations before the database stops accepting new writes: TODO: implement this
+        size_t keys_in_mem_before_flush = 2'000'000;          // default number of keys to push
+        size_t num_partition_exponent = 10;                   // default partition exponent
+        double compaction_size_ratio = 0.2;                   // if during two way merge, rhs/lhs > compaction_size_ratio, a compaction job is triggered
+        size_t compaction_read_ahead_size_bytes = 16384;      // it will read from each table 16 KB at a time
+        std::chrono::milliseconds compaction_timeout{120000}; // stop waiting if this timeout is due
+        bool auto_compaction = true;                          // compaction is automatically triggered when the memtable reaches its limit
+        size_t max_pending_compactions = 16;                  // maximum number of pending compactions before the database stops accepting new writes: TODO: implement this
     };
 
     class database : public std::enable_shared_from_this<database>
@@ -95,7 +95,7 @@ namespace hedgehog::db
 
         hedgehog::status _rotate_value_table();
         hedgehog::status _flush_mem_index();
-        hedgehog::status _compactation_job(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor);
+        hedgehog::status _compaction_job(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor);
         async::task<hedgehog::status> _garbage_collect_table(std::shared_ptr<value_table> table, size_t id, const std::shared_ptr<async::executor_context>& executor);
         async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> _find_value_ptr_and_value_table(key_t key, const std::shared_ptr<async::executor_context>& executor);
     };
