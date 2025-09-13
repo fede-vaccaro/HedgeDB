@@ -1,33 +1,30 @@
-## HedgeDB
+# HedgeDB
 
 <p align="center">
 <img src="resources/logo.png" width="100%">
 </p>
 
-HedgeDB is a prototype of a larger-than-memory key-value store, inspired by [BadgerDB](https://github.com/hypermodeinc/badger) and [RocksDB](https://github.com/facebook/rocksdb), specifically optimized for modern high troughput SSDs. It aims to be performance oriented with low memory footprint.
+HedgeDB is a prototype of a larger-than-memory key-value embeddable storage, inspired by [BadgerDB](https://github.com/hypermodeinc/badger) and [RocksDB](https://github.com/facebook/rocksdb), optimized for modern high throughput SSDs. It aims to be performance oriented with low memory footprint.
 
-
-**Disclaimer**: as you might expect from a prototype it was not extensively tested, nor the code can be considered production ready.
+**Disclaimer**: as you might expect from a prototype it was not extensively tested, nor the code can be considered production ready. _Also, the code itself might have gotten a bit messy. Hopefully, I'll take care of this_
 
 So far it is only Linux compatible as it heavily leverage [liburing](https://github.com/axboe/liburing), amongst other Linux syscalls.
 
 ## Features
 
-#### Implemented
+### Implemented
 
 - **Exclusive UUIDv4 support**: So far, this storage is strictly optimized just to accept UUIDv4 (16 bytes) keys. The Index design follows the assumption that the keys are randomly distrubuted over the key space. In future might support smaller or up to 48 bytes sized keys.
 
-- **Separate Index and Value files**: Following the state of the art design of [WiscKey](https://www.usenix.org/system/files/conference/fast16/fast16-papers-lu.pdf), the HedgeDB's LSM tree is implemented through the separation between Index and Value files, allowing for an efficient look-up and compaction.
+- **Separated Index and Value files**: Following the state of the art design of [WiscKey](https://www.usenix.org/system/files/conference/fast16/fast16-papers-lu.pdf), the HedgeDB's LSM tree is implemented through the separation between Index and Value files, allowing for an efficient look-up and compaction.
 
-- **Online and latch-free compaction**: Index compaction is automatically triggered when certain criteria are met. Also, when the compaction is running the database will keep being available.
+- **Online and latch-free compaction**: Index compaction is automatically triggered when certain criteria are met. Also, when the compaction is running, the database will keep being available.
 
-- **Fiber-style job scheduling**: A brand new and custom `executor` has been implemented for maximizing the SSD usage, leveraging concurrency and C++20 coroutines to fully utilize a modern NVMe SSD.
+- **Fiber-style job scheduling**: A brand new and custom `executor` has been implemented for maximizing the SSD usage, leveraging concurrency and C++20 coroutines to fully utilize a modern NVMe SSD while exposing an API that is familiar to many developers.
 
 #### TODO
 
-- [ ] **Key/Value deletion**: so far, KV deletion is only been designed and implemented for the sorted index merge function (not for the entire `database` yet).
-
-- [ ] **Values garbage collection**: space from deleted values is not freed yet.
+- [ ] **Values garbage collection**: (in progress) space from deleted values is not freed yet.
 
 - [ ] **Key/Value update**: Key update feature should follow the deletion right away, but a value update was not implemented yet.
 
@@ -61,14 +58,14 @@ Of course you can change build type to `Debug`, or change the number of jobs.
 
 ## Benchmarks
 
-You can run the `database_test` for a write/read test with 75M 1KB records.
+You can run the `database_test` for a write/read test with 75M 1KB records. This test is going to be time-measured, though.
 
 ```
 $ ./build/database_test
 [==========] Running 1 test from 1 test suite.
 [----------] Global test environment set-up.
 [----------] 1 test from test_suite/database_test
-[ RUN      ] test_suite/database_test.basic_test_no_compaction/N_75000000_P_1024_C_1000000
+[ RUN      ] test_suite/database_test.database_comprehensive_test/N_75000000_P_1024_C_1000000
 [LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
 [database] Flushing mem index to "/tmp/db/indices" with number of items: 1000232
 [database] Starting compaction job
@@ -84,7 +81,7 @@ Total duration for retrieval: 202777 ms
 Average duration per retrieval: 2.70369 us
 Retrieval bandwidth: 369.865 MB/s
 Closing uring_reader.
-[       OK ] test_suite/database_test.basic_test_no_compaction/N_75000000_P_1024_C_1000000 (530521 ms)
+[       OK ] test_suite/database_test.database_comprehensive_test/N_75000000_P_1024_C_1000000 (530521 ms)
 [----------] 1 test from test_suite/database_test (530521 ms total)
 
 [----------] Global test environment tear-down
