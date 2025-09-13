@@ -381,18 +381,24 @@ namespace hedgehog::db
     {
         tombstone _tombstone;
         std::ifstream _value_log_ifs;
+        
         mmap_wrapper _mmap;
+        std::optional<std::unordered_map<key_t, value_ptr_t>> _cached_index;
 
     public:
         sortedstring_db() = delete;
 
         hedgehog::expected<std::vector<uint8_t>> get(key_t key);
 
-        hedgehog::expected<std::optional<value_ptr_t>> get_offset_from_key(key_t key);
+        hedgehog::expected<std::optional<value_ptr_t>> get_value_ptr(key_t key);
 
         hedgehog::status compact();
 
         hedgehog::status del(key_t key);
+
+        void drop_cache_index();
+
+        hedgehog::status cache_index();
 
         static hedgehog::expected<sortedstring_db> existing_from_path(const std::filesystem::path& base_path, const std::string& db_name);
 
@@ -401,9 +407,9 @@ namespace hedgehog::db
 
         hedgehog::status _init();
 
-        explicit sortedstring_db(const std::filesystem::path& base_path, const std::string& db_name, tombstone tombstone);
+        explicit sortedstring_db(const std::filesystem::path& base_path, const std::string& db_name, tombstone tombstone, std::optional<std::unordered_map<key_t, value_ptr_t>> index = std::nullopt);
 
-        explicit sortedstring_db(db_attrs attrs, tombstone tombstone);
+        explicit sortedstring_db(db_attrs attrs, tombstone tombstone, std::optional<std::unordered_map<key_t, value_ptr_t>> index = std::nullopt);
     };
 
     hedgehog::expected<sortedstring_db> flush_memtable_db(memtable_db&& db_);
