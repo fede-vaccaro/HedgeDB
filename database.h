@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <map>
@@ -45,6 +46,7 @@ namespace hedgehog::db
         db_config _config;
 
         // persisted state
+        size_t _flush_iteration{0};
         using sorted_index_ptr_t = std::shared_ptr<hedgehog::db::sorted_index>;
         using sorted_indices_map_t = std::map<uint16_t, std::vector<sorted_index_ptr_t>>;
 
@@ -78,7 +80,7 @@ namespace hedgehog::db
         static expected<std::shared_ptr<database>> make_new(const std::filesystem::path& base_path, const db_config& config);
         static expected<std::shared_ptr<database>> load(const std::filesystem::path& base_path);
 
-        [[nodiscard]] double get_read_amplification();
+        [[nodiscard]] double load_factor();
 
     private:
         database() = default;

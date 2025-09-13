@@ -73,20 +73,20 @@ namespace hedgehog
     }
 
     /*
-    a partition is identified by its (included) upper bound
-    e.g. 00fa is the upper bound of the partition [0000, 00ff]
-    and might include elements up to 00fa ffff ffff ffff
-    element starting with 01fb will be in the subsequent partition
+        a partition is identified by its (included) upper bound
+        e.g. 00fa is the upper bound of the partition [0000, 00ff]
+        and might include elements up to 00fa ffff ffff ffff
+        element starting with 01fb will be in the subsequent partition
      */
     inline size_t find_partition_prefix_for_key(key_t key, size_t partition_size)
     {
         const auto& K = extract_prefix(key);
         const auto& P = partition_size;
 
-        return (K + P) / P * P - 1;
+        return ((K + P) / P * P) - 1;
     };
 
-    std::pair<std::string, std::string> format_prefix(uint16_t prefix);
+    [[nodiscard]] std::pair<std::string, std::string> format_prefix(uint16_t prefix);
 
     std::vector<std::pair<size_t, std::filesystem::path>> get_prefixes(const std::filesystem::path& base_path, size_t num_space_partitions);
 

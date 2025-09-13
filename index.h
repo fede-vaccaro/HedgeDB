@@ -25,9 +25,17 @@ namespace hedgehog::db
         static std::vector<index_key_t> merge_memtables_in_mem(std::vector<mem_index>&& indices);
         static hedgehog::expected<sorted_index> load_sorted_index(const std::filesystem::path& path, bool load_index = false);
         static hedgehog::expected<sorted_index> save_as_sorted_index(const std::filesystem::path& path, std::vector<index_key_t>&& sorted_keys, size_t upper_bound, bool merge_with_existent = false);
-        static hedgehog::expected<std::vector<sorted_index>> merge_and_flush(const std::filesystem::path& base_path, std::vector<mem_index>&& indices, size_t num_partition_exponent);
-        static async::task<hedgehog::expected<sorted_index>> two_way_merge_async(size_t read_ahead_size, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
-        static hedgehog::expected<sorted_index> two_way_merge(size_t read_ahead_size, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
+        static hedgehog::expected<std::vector<sorted_index>> merge_and_flush(const std::filesystem::path& base_path, std::vector<mem_index>&& indices, size_t num_partition_exponent, size_t flush_iteration);
+
+        struct merge_config
+        {
+            size_t read_ahead_size{};
+            size_t new_table_id{};
+            std::filesystem::path base_path{};
+        };
+
+        static async::task<hedgehog::expected<sorted_index>> two_way_merge_async(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
+        static hedgehog::expected<sorted_index> two_way_merge(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
     };
 
     class mem_index
