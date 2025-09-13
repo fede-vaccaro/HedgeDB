@@ -1,7 +1,6 @@
 #include <array>
 #include <fcntl.h>
 #include <format>
-#include <ios>
 #include <map>
 #include <numeric>
 #include <random>
@@ -22,7 +21,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -31,8 +29,7 @@
 #include <uuid.h>
 
 #include "bloom_filter.h"
-#include "tables.h"
-#include "fs.hpp"
+#include "db.h"
 
 namespace hedgehog::db
 {
@@ -106,43 +103,6 @@ namespace hedgehog::db
         this->_tombstone_log = std::ofstream(this->_tombstone_path, std::ios::binary | std::ios::app);
     }
 
-    hedgehog::expected<std::unordered_map<uint32_t, tombstone>> tombstone::split_based_on_prefix(tombstone&& tombstone_)
-    {
-        std::unordered_map<uint32_t, tombstone> result;
-
-        for(const auto& key : tombstone_._keys_cache)
-        {
-            auto prefix = static_cast<uint32_t>(reinterpret_cast<const uint32_t*>(&key)[0]); // Assuming the first byte is the prefix
-
-            if(result.find(prefix) == result.end())
-            {
-                auto new_base_path = tombstone_._tombstone_path.parent_path() / std::format("{:02x}", prefix);
-                auto new_db_name = tombstone_._tombstone_path.stem().string();
-
-                result[prefix] = tombstone{new_base_path, new_db_name};
-            }
-
-            result[prefix].add(key);
-        }
-
-        return result;
-    }
-
-    std::unordered_map<key_t, value_ptr_t> index_to_memtable(const std::vector<index_key_t>::iterator begin,
-        const std::vector<index_key_t>::iterator end)
-    {
-        std::unordered_map<key_t, value_ptr_t> memtable;
-
-        for(auto it = begin; it != end; ++it)
-        {
-            auto& index_key = *it;
-            memtable.insert({index_key.key, index_key.value_ptr});
-        }
-
-        return memtable;
-    }
-
-
     db_attrs db_attrs::make(const std::filesystem::path& base_path, const std::string& db_name)
     {
         return db_attrs{
@@ -164,9 +124,9 @@ namespace hedgehog::db
         this->_tmp_index = std::ofstream(with_extension(this->_index_path, ".tmp"), std::ios::binary | std::ios::app);
     }
 
-    memtable_db memtable_db::make_new(const std::filesystem::path& base_path, const std::string& db_name, uint32_t table_id)
+    memtable_db memtable_db::make_new(const std::filesystem::path& base_path, const std::string& db_name)
     {
-        return memtable_db(db_attrs::make(base_path, db_name), tombstone{base_path, db_name}, table_id);
+        return memtable_db(db_attrs::make(base_path, db_name), tombstone{base_path, db_name});
     }
 
     hedgehog::expected<memtable_db> memtable_db::existing_from_path(const std::filesystem::path& base_path, const std::string& db_name)
@@ -176,23 +136,24 @@ namespace hedgehog::db
         if(!maybe_tombstone)
             return hedgehog::error("Failed to recover tombstone: " + maybe_tombstone.error().to_string());
 
-        memtable_db mem_db(base_path, db_name, std::move(maybe_tombstone.value()), 0); // todo table_id
+        memtable_db mem_db(base_path, db_name, std::move(maybe_tombstone.value()));
 
-        auto maybe_memtable = load_memtable_from<decltype(mem_db._memtable)>(with_extension(mem_db._index_path, ".tmp"));
+        return hedgehog::error("NOT IMPLEMENTED");
 
-        if(!maybe_memtable)
-            return hedgehog::error("Failed to load memtable: " + maybe_memtable.error().to_string());
+        // auto maybe_memtable = load_memtable_from<decltype(mem_db._memtable)>(with_extension(mem_db._index_path, ".tmp"));
 
-        mem_db._memtable = std::move(maybe_memtable.value());
+        // if(!maybe_memtable)
+        //     return hedgehog::error("Failed to load memtable: " + maybe_memtable.error().to_string());
 
-        return mem_db;
+        // mem_db._memtable = std::move(maybe_memtable.value());
+
+        // return mem_db;
     }
 
     hedgehog::status memtable_db::insert(key_t key, const std::vector<uint8_t>& data)
     {
         // check if key already exists
-        auto it = this->_memtable.find(key);
-        if(it != this->_memtable.end())
+        if(this->_memtable.get_item(key))
             return hedgehog::error("Update non supported");
 
         auto size = data.size();
@@ -201,13 +162,9 @@ namespace hedgehog::db
         if(!this->_value_log_out)
             return hedgehog::error("an error occurred with value_log file");
 
-        auto index_key = index_key_t{key, 
-            {.offset = static_cast<uint64_t>(offset), 
-                .size = static_cast<uint32_t>(size), 
-                .table_id = this->_table_id.value()
-            }};
+        auto index_key = index_key_t{key, {.offset = static_cast<uint64_t>(offset), .size = static_cast<uint64_t>(size)}};
 
-        this->_memtable.insert({key, index_key.value_ptr});
+        this->_memtable.push_item({key, index_key.value_ptr});
 
         this->_tmp_index.write(reinterpret_cast<const char*>(&index_key), sizeof(index_key_t)); // len(index) % sizeof(index_key_t) != 0
 
@@ -222,14 +179,12 @@ namespace hedgehog::db
         if(this->_tombstone.contains(key))
             return std::vector<uint8_t>{};
 
-        auto it = this->_memtable.find(key);
+        auto maybe_item = this->_memtable.get_item(key);
 
         value_ptr_t offset{};
 
-        if(it == this->_memtable.end())
-            return std::vector<uint8_t>{}; // Key not found
-
-        offset = it->second;
+        if(maybe_item)
+            offset = maybe_item.value();
 
         auto values = std::ifstream(this->_value_log_path, std::ios::binary);
 
@@ -254,34 +209,24 @@ namespace hedgehog::db
 
     hedgehog::status memtable_db::del(key_t key)
     {
-        if(auto it = this->_memtable.find(key); it != this->_memtable.end())
-            this->_memtable.erase(it);
+        // if(auto it = this->_memtable.find(key); it != this->_memtable.end())
+        //     this->_memtable.erase(it);
+
+        this->_memtable.erase(key);
 
         return this->_tombstone.add(key);
     }
 
-    memtable_db::memtable_db(db_attrs attrs, tombstone tombstone, uint32_t table_id) : db_attrs(std::move(attrs)), _tombstone(std::move(tombstone)), _table_id(table_id)
+    memtable_db::memtable_db(db_attrs attrs, tombstone tombstone) : db_attrs(std::move(attrs)), _tombstone(std::move(tombstone))
     {
         this->_init();
     }
 
-    memtable_db::memtable_db(const std::filesystem::path& base_path, const std::string& db_name, tombstone tombstone, uint32_t table_id) : db_attrs(db_attrs::make(base_path, db_name)), _tombstone(std::move(tombstone)), _table_id(table_id)
+    memtable_db::memtable_db(const std::filesystem::path& base_path, const std::string& db_name, tombstone tombstone) : db_attrs(db_attrs::make(base_path, db_name)), _tombstone(std::move(tombstone))
     {
         this->_init();
     }
 
-    const std::unordered_map<key_t, value_ptr_t>& memtable_db::get_memtable() const{
-        return this->_memtable;
-    }
-
-    void memtable_db::_close_files()
-    {
-        if(this->_value_log_out.is_open())
-            this->_value_log_out.close();
-
-        if(this->_tmp_index.is_open())
-            this->_tmp_index.close();
-    }
 
     hedgehog::expected<sortedstring_db> sortedstring_db::existing_from_path(const std::filesystem::path& base_path, const std::string& db_name)
     {
@@ -314,17 +259,12 @@ namespace hedgehog::db
         if(!this->_value_log_ifs.good())
             return hedgehog::error("Failed to open value log file");
 
-        auto fd = file_descriptor::from_path(this->_index_path);
+        auto fd = fd_wrapper::from_path(this->_index_path);
 
         if(!fd)
-            return hedgehog::error("Failed to open file descriptor: " + fd.error().to_string());
+            return hedgehog::error("Failed to open file descriptor at " + this->_index_path.string());
 
-        auto mmap = mmap_wrapper::from_fd_wrapper(std::move(fd.value()));
-
-        if(!mmap.has_value())
-            return hedgehog::error("Failet do open mmap: " + mmap.error().to_string());
-
-        this->_mmap = std::move(mmap.value());
+        this->_fd = std::move(fd.value());
 
         return hedgehog::ok();
     }
@@ -334,7 +274,7 @@ namespace hedgehog::db
         if(this->_tombstone.contains(key))
             return std::vector<uint8_t>{};
 
-        auto offset_opt = this->get_value_ptr(key);
+        auto offset_opt = this->get_offset_from_key(key);
 
         if(!offset_opt)
             return offset_opt.error();
@@ -344,30 +284,18 @@ namespace hedgehog::db
 
         value_ptr_t offset = *offset_opt.value();
 
-        auto value_log_ifs = std::ifstream(this->_value_log_path, std::ios::binary);
-        if(!value_log_ifs.good())
+        this->_value_log_ifs.seekg(static_cast<std::streamoff>(offset.offset), std::ios::beg);
+
+        std::vector<uint8_t> data(offset.size);
+
+        this->_value_log_ifs.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(offset.size));
+
+        if(this->_value_log_ifs.bad())
         {
-            return hedgehog::error("Failed to open value log file: " + this->_value_log_path.string());
-        }
-
-        value_log_ifs.seekg(static_cast<std::streamoff>(offset.offset), std::ios::beg);
-
-        if(value_log_ifs.fail())
-        {
-            value_log_ifs.clear();
-            return hedgehog::error("Failed to seek in value log file: " + this->_value_log_path.string());
-        }
-        
-        auto data = std::vector<uint8_t>(offset.size);
-
-        value_log_ifs.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(offset.size));
-
-        if(value_log_ifs.bad())
-        {
-            value_log_ifs.clear();
+            this->_value_log_ifs.clear();
 
             auto file_size = std::filesystem::file_size(this->_value_log_path);
-            auto current_pos = value_log_ifs.tellg();
+            auto current_pos = this->_value_log_ifs.tellg();
             auto requested_pos = static_cast<std::streamoff>(offset.offset);
             auto value_size = static_cast<std::streamsize>(offset.size);
 
@@ -379,36 +307,25 @@ namespace hedgehog::db
         return data;
     }
 
-    hedgehog::expected<std::optional<value_ptr_t>> sortedstring_db::get_value_ptr(key_t key) // NOLINT
+    hedgehog::expected<std::optional<value_ptr_t>> sortedstring_db::get_offset_from_key(key_t key) // NOLINT
     {
         if(this->_tombstone.contains(key))
             return std::nullopt;
 
-        if(this->_cached_index.has_value())
+        // Memory-map the file
+        void* mapped = mmap(nullptr, this->_fd.file_size(), PROT_READ, MAP_PRIVATE, this->_fd.get(), 0);
+        if(mapped == MAP_FAILED)
         {
-            auto it = this->_cached_index->find(key);
-
-            if(it != this->_cached_index->end())
-                return it->second;
-            
+            perror("mmap");
             return std::nullopt;
         }
 
-        // Memory-map the file
-        void* mapped = this->_mmap.get_ptr();
+        auto maybe_item = hashed_index::get_item(reinterpret_cast<hashed_index::bucket*>(mapped), key);
 
-        auto* ptr_start = static_cast<index_key_t*>(mapped);
-        auto* ptr_end = static_cast<index_key_t*>(mapped) + this->_mmap.size() / sizeof(index_key_t);
+        // Cleanup
+        munmap(mapped, this->_fd.file_size());
 
-        // Binary search
-        auto* ptr = std::lower_bound(ptr_start, ptr_end, index_key_t{key, {}});
-
-        auto item = *ptr;
-
-        if(item.key != key)
-            return std::nullopt;
-
-        return item.value_ptr;
+        return maybe_item;
     }
 
     hedgehog::status sortedstring_db::compact()
@@ -462,7 +379,7 @@ namespace hedgehog::db
 
             auto new_offset = value_ptr_t{
                 .offset = data_offset,
-                .size = static_cast<uint32_t>(size)};
+                .size = size};
 
             offset = new_offset;
         }
@@ -499,149 +416,43 @@ namespace hedgehog::db
         return this->_tombstone.add(key);
     }
 
-    void sortedstring_db::drop_cache_index()
-    {
-        this->_cached_index.reset();
-    }
+    sortedstring_db::sortedstring_db(const std::filesystem::path& base_path, const std::string& db_name, tombstone tombstone) : db_attrs(db_attrs::make(base_path, db_name)), _tombstone(std::move(tombstone)) {}
 
-    hedgehog::status sortedstring_db::cache_index()
-    {
-        if(!std::filesystem::exists(this->_index_path))
-            return hedgehog::error("Index file does not exist: " + this->_index_path.string());
+    sortedstring_db::sortedstring_db(db_attrs attrs, tombstone tombstone) : db_attrs(std::move(attrs)), _tombstone(std::move(tombstone)){};
 
-        auto maybe_index = load_memtable_from<std::unordered_map<key_t, value_ptr_t>>(this->_index_path);
-
-        if(!maybe_index)
-            return hedgehog::error("Failed to load index file: " + maybe_index.error().to_string());
-
-        this->_cached_index = std::move(maybe_index.value());
-
-        return hedgehog::ok();
-    }
-
-    sortedstring_db::sortedstring_db(const std::filesystem::path& base_path, const std::string& db_name, tombstone tombstone, std::optional<std::unordered_map<key_t, value_ptr_t>> index) : db_attrs(db_attrs::make(base_path, db_name)), _tombstone(std::move(tombstone)), _cached_index(std::move(index)) {}
-
-    sortedstring_db::sortedstring_db(db_attrs attrs, tombstone tombstone, std::optional<std::unordered_map<key_t, value_ptr_t>> index) : db_attrs(std::move(attrs)), _tombstone(std::move(tombstone)), _cached_index(std::move(index)) {};
-
-    hedgehog::expected<std::unordered_map<uint32_t, sortedstring_db>> flusher::flush_memtable_db(memtable_db&& db_, bool cache_memtable)
+    hedgehog::expected<sortedstring_db> flush_memtable_db(memtable_db&& db_)
     {
         auto mem_db = std::move(db_);
-        
-        mem_db._close_files();
 
-        std::vector<index_key_t> index_sorted;
+        // std::vector<index_key_t> index_sorted;
 
-        index_sorted.reserve(mem_db._memtable.size());
+        // index_sorted.reserve(mem_db._memtable.size());
 
-        for(const auto& [key, offset] : mem_db._memtable)
-            index_sorted.push_back({key, offset});
+        // for(const auto& [key, offset] : mem_db._memtable)
+        //     index_sorted.push_back({key, offset});
 
-        // clear memory
-        mem_db._memtable = std::unordered_map<key_t, value_ptr_t>{};
+        // std::sort(index_sorted.begin(), index_sorted.end());
 
-        std::sort(index_sorted.begin(), index_sorted.end());
+        // auto index = std::ofstream(mem_db._index_path, std::ios::binary);
 
-        std::vector<std::ofstream> idx_ofstreams(256);
+        // index.write(reinterpret_cast<const char*>(index_sorted.data()), static_cast<std::streamsize>(index_sorted.size() * sizeof(index_key_t)));
 
-        // Make directories
-        for(uint32_t prefix = 0; prefix < 256; prefix++)
-        {
-            auto prefix_str = std::format("{:02x}", prefix);
-            auto dir_path = mem_db._base_path / mem_db._db_name / prefix_str;
-            std::filesystem::create_directories(dir_path);
+        // if(!index.good())
+        // return hedgehog::error("An error occurred with index file");
 
-            idx_ofstreams[prefix] = std::ofstream(dir_path / with_extension(mem_db._db_name, INDEX_EXT), std::ios::binary | std::ios::app);
-
-            if(!idx_ofstreams[prefix].good())
-                return hedgehog::error("Failed to open index file for prefix " + prefix_str);
-        }
-
-        // Find partitions
-        using it_t = std::vector<index_key_t>::iterator;
-        std::vector<std::tuple<uint32_t, it_t, it_t>> partitions;
-        partitions.reserve(256);
-
-        auto key_from_prefix = [](uint32_t prefix) -> index_key_t {
-            auto key = uuids::uuid{};
-
-            auto& as_std_array = reinterpret_cast<std::array<uint8_t, 16>&>(key);
-
-            std::fill(as_std_array.begin(), as_std_array.end(), 0);
-            as_std_array[0] = static_cast<uint8_t>(prefix);
-            
-            return index_key_t{key, {}};
-        };
-
-        auto range_start = index_sorted.begin();
-
-        for(uint32_t prefix = 0; prefix < 256; prefix++)
-        {
-            auto key = key_from_prefix(prefix);
-            range_start = std::lower_bound(range_start, index_sorted.end(), key);
-            auto range_end = std::upper_bound(range_start, index_sorted.end(), key);
-
-            if(range_start == index_sorted.end())
-            {
-                range_start = partitions.empty() ? index_sorted.begin() : std::get<2>(partitions.back());
-                continue;
-            }
-                
-            partitions.emplace_back(prefix, range_start, range_end);
-            range_start = range_end;
-        }
-
-        for(const auto& [prefix, start, end] : partitions)
-        {
-            if(start == end)
-                continue;
-
-            auto& ofs = idx_ofstreams[prefix];
-
-            auto size = std::distance(start, end);
-            ofs.write(reinterpret_cast<const char*>(start.base()), size);
-
-            if(!ofs.good())
-                return hedgehog::error("Failed to write index key to file for prefix " + std::to_string(prefix));
-        }
-
-        // Close all index files
-        for(auto& ofs : idx_ofstreams)
-        {
-            ofs.close();
-            if(!ofs.good())
-                return hedgehog::error("Failed to close index file");
-        }
+        if(auto status = mem_db._memtable.serialize_to(mem_db._index_path); !status)
+            return hedgehog::error("An error occurred while serializing index file: " + status.error().to_string());
 
         std::filesystem::remove(with_extension(mem_db._index_path, ".tmp"));
 
-        auto tombstones = tombstone::split_based_on_prefix(std::move(mem_db._tombstone)).value();
+        auto& attrs = static_cast<db_attrs&>(mem_db);
 
-        std::unordered_map<uint32_t, sortedstring_db> ss_dbs;
+        sortedstring_db ss_db(std::move(attrs), std::move(mem_db._tombstone));
 
-        for(auto& [prefix, start, end]: partitions)
-        {
-            auto prefix_str = std::format("{:02x}", prefix);
-            auto dir_path = mem_db._base_path / mem_db._db_name / prefix_str;
-            auto db_attrs = db_attrs::make(dir_path, mem_db._db_name);
+        if(auto status = ss_db._init(); !status)
+            return hedgehog::error("Failed to initialize sortedstring_db: " + status.error().to_string());
 
-            auto maybe_tombstone = tombstones.find(prefix);
-
-            std::optional<std::unordered_map<key_t, value_ptr_t>> memtable = std::nullopt;
-
-            if(cache_memtable)
-                auto memtable = index_to_memtable(start, end);
-
-            auto ss_db = sortedstring_db(db_attrs, 
-                maybe_tombstone != tombstones.end() ? std::move(maybe_tombstone->second) : tombstone{dir_path, 
-                    mem_db._db_name}, std::move(memtable));
-
-            if(auto status = ss_db._init(); !status)
-                return hedgehog::error(std::format("Failed to initialize sortedstring_db with prefix {}: {}", prefix, status.error().to_string()));
-            
-            ss_dbs.insert({prefix, std::move(ss_db)});
-        }
-
-        return ss_dbs;
+        return ss_db;
     }
 
 } // namespace hedgehog::db
