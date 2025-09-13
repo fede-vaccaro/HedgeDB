@@ -57,12 +57,6 @@ set(IO_EXECUTOR_SRCS
     generator.h
 )
 
-add_executable(index_test_w test_index_w.cc ${DB_SOURCES} ${IO_EXECUTOR_SRCS})
-add_executable(index_test_r from_disk_test.cc ${DB_SOURCES} ${IO_EXECUTOR_SRCS})
-
-target_link_libraries(index_test_w uring)
-target_link_libraries(index_test_r uring)
-
 # executor_test.cc
 add_executable(executor_read_test ${IO_EXECUTOR_SRCS} executor_read_test.cc)
 target_link_libraries(executor_read_test uring)
