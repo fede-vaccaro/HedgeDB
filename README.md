@@ -61,6 +61,27 @@ Deleted key: f7e81d08-b514-415c-b10e-0aab0aeb1f5c
 Elapsed time for deletes: 0 ms
 ```
 
+on HDD (50KB payloads):
+
+```
+version 0.0.1a                                                                                
+BASE_PATH: "/data/ring"                                                                       
+N_FILES: 2000000                                                                              
+VALUE_SIZE: 51400                                                                             
+Key generated. n keys: 2000000                                                                
+Elapsed time for writes: 507853 ms                                                            
+Bandwidth: 193.043 MB/s                                                                       
+Elapsed time for flush: 804 ms                                                                
+Elapsed time for reads: 22223 ms                                                              
+Reads/sec 45.0434                                                                             
+Deleted key: f356cd59-8bbd-434d-be58-0d756b908ed1                                             
+Deleted key: 183c74b2-aee6-4f74-872e-d193d671c364                                             
+Deleted key: a5eaa255-60ef-492e-9fe5-55ff2f030e04                                             
+Deleted key: 96813bba-27b6-4ca8-995e-afcdaa2d3b37                                             
+Deleted key: c8a3e0d7-fddf-48d1-9d14-0bd7359feaae                                             
+Elapsed time for deletes: 0 ms                                                                
+```
+
 For trying the database wrapper:
 
 ```
