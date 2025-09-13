@@ -21,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -290,7 +291,7 @@ namespace hedgehog::db
         if(this->_tombstone.contains(key))
             return std::vector<uint8_t>{};
 
-        auto offset_opt = this->get_offset_from_key(key);
+        auto offset_opt = this->get_value_ptr(key);
 
         if(!offset_opt)
             return offset_opt.error();
@@ -323,10 +324,20 @@ namespace hedgehog::db
         return data;
     }
 
-    hedgehog::expected<std::optional<value_ptr_t>> sortedstring_db::get_offset_from_key(key_t key) // NOLINT
+    hedgehog::expected<std::optional<value_ptr_t>> sortedstring_db::get_value_ptr(key_t key) // NOLINT
     {
         if(this->_tombstone.contains(key))
             return std::nullopt;
+
+        if(this->_cached_index.has_value())
+        {
+            auto it = this->_cached_index->find(key);
+
+            if(it != this->_cached_index->end())
+                return it->second;
+            
+            return std::nullopt;
+        }
 
         // Memory-map the file
         void* mapped = this->_mmap.get_ptr();
@@ -433,9 +444,29 @@ namespace hedgehog::db
         return this->_tombstone.add(key);
     }
 
-    sortedstring_db::sortedstring_db(const std::filesystem::path& base_path, const std::string& db_name, tombstone tombstone) : db_attrs(db_attrs::make(base_path, db_name)), _tombstone(std::move(tombstone)) {}
+    void sortedstring_db::drop_cache_index()
+    {
+        this->_cached_index.reset();
+    }
 
-    sortedstring_db::sortedstring_db(db_attrs attrs, tombstone tombstone) : db_attrs(std::move(attrs)), _tombstone(std::move(tombstone)){};
+    hedgehog::status sortedstring_db::cache_index()
+    {
+        if(!std::filesystem::exists(this->_index_path))
+            return hedgehog::error("Index file does not exist: " + this->_index_path.string());
+
+        auto maybe_index = load_memtable_from<std::unordered_map<key_t, value_ptr_t>>(this->_index_path);
+
+        if(!maybe_index)
+            return hedgehog::error("Failed to load index file: " + maybe_index.error().to_string());
+
+        this->_cached_index = std::move(maybe_index.value());
+
+        return hedgehog::ok();
+    }
+
+    sortedstring_db::sortedstring_db(const std::filesystem::path& base_path, const std::string& db_name, tombstone tombstone, std::optional<std::unordered_map<key_t, value_ptr_t>> index) : db_attrs(db_attrs::make(base_path, db_name)), _tombstone(std::move(tombstone)), _cached_index(std::move(index)) {}
+
+    sortedstring_db::sortedstring_db(db_attrs attrs, tombstone tombstone, std::optional<std::unordered_map<key_t, value_ptr_t>> index) : db_attrs(std::move(attrs)), _tombstone(std::move(tombstone)), _cached_index(std::move(index)) {};
 
     hedgehog::expected<sortedstring_db> flush_memtable_db(memtable_db&& db_)
     {
@@ -465,7 +496,7 @@ namespace hedgehog::db
 
         index.close();
 
-        sortedstring_db ss_db(std::move(attrs), std::move(mem_db._tombstone));
+        sortedstring_db ss_db(std::move(attrs), std::move(mem_db._tombstone), std::move(mem_db._memtable));
 
         if(auto status = ss_db._init(); !status)
             return hedgehog::error("Failed to initialize sortedstring_db: " + status.error().to_string());

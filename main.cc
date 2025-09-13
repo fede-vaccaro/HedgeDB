@@ -170,7 +170,7 @@ int main(int argc, char* argv[])
         std::cout << "Deleted key: " << key << '\n';
 
         // assert that the key is not available
-        auto maybe_data_readback = ss_db.get_offset_from_key(key);
+        auto maybe_data_readback = ss_db.get_value_ptr(key);
 
         if(maybe_data_readback && maybe_data_readback.value().has_value())
             std::cerr << "Key should not be available: " << key << '\n';
