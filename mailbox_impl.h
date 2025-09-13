@@ -2,177 +2,197 @@
 
 #include <cassert>
 #include <coroutine>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
-#include <unordered_map>
 #include <vector>
 
 #include <liburing.h>
 
-template <typename Derived>
-struct mailbox_base
+namespace hedgehog::async
 {
-    std::coroutine_handle<> continuation;
 
-    uint32_t needed_sqes()
+    template <typename Derived>
+    struct mailbox_base
     {
-        return static_cast<Derived*>(this)->needed_sqes();
-    }
+        std::coroutine_handle<> continuation;
 
-    void prepare_sqes(std::span<io_uring_sqe*> sqes)
-    {
-        assert(sqes.size() == static_cast<size_t>(this->needed_sqes()) && "sqes span size does not match needed sqes");
-        return static_cast<Derived*>(this)->prepare_sqes(sqes);
+        uint32_t needed_sqes()
+        {
+            return static_cast<Derived*>(this)->needed_sqes();
+        }
+
+        void prepare_sqes(std::span<io_uring_sqe*> sqes)
+        {
+            assert(sqes.size() == static_cast<size_t>(this->needed_sqes()) && "sqes span size does not match needed sqes");
+            return static_cast<Derived*>(this)->prepare_sqes(sqes);
+        };
+
+        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx)
+        {
+            return static_cast<Derived*>(this)->handle_cqe(cqe, sub_request_idx);
+        }
+
+        void* get_response() // todo: use &response as default otherwise call get_response() on the derived class (implement through SFINAE)
+        {
+            return static_cast<Derived*>(this)->get_response();
+        }
+
+        void set_continuation(std::coroutine_handle<> handle)
+        {
+            this->continuation = handle;
+        }
+
+        auto resume()
+        {
+            /*
+                todo:
+                    use an std::atomic_bool for signaling that the response has been set
+                    this is needed for allowing:
+
+                        awaitable_mailbox<read_response> future = co_await executor.submit_request(read_request{...});
+
+                        // do non blocking stuff the meanwhile
+
+                        auto read_response = co_await future;
+
+                    right now, this won't work and will make the program to crash because the io_executor will try to resume it later
+                    but the continuation is set only within awaitable_mailbox::await_suspend, which is called only on 'co_await future'
+                    i'm not sure an atomic_bool is needed, since this is a single-threaded executor
+            */
+
+            if(this->continuation.done())
+                return true;
+
+            this->continuation.resume();
+
+            return this->continuation.done();
+        }
     };
 
-    bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx)
+    struct read_response;
+    struct read_mailbox;
+
+    struct read_request
     {
-        return static_cast<Derived*>(this)->handle_cqe(cqe, sub_request_idx);
-    }
+        using response_t = read_response;
+        using mailbox_t = read_mailbox;
 
-    void* get_response() // todo: use &response as default otherwise call get_response() on the derived class
+        int32_t fd{-1};
+        size_t offset{0};
+        size_t size{0};
+    };
+
+    struct read_response
     {
-        return static_cast<Derived*>(this)->get_response();
-    }
+        std::unique_ptr<uint8_t> data{};
+        size_t bytes_read{0};
+        int32_t error_code{0};
+    };
 
-    void set_continuation(std::coroutine_handle<> handle)
+    struct read_mailbox : mailbox_base<read_mailbox>
     {
-        this->continuation = handle;
-    }
+        read_mailbox(read_request req)
+            : request(std::move(req)) {}
 
-    auto resume()
+        read_request request;
+        read_response response;
+
+        void prepare_sqes(std::span<io_uring_sqe*> sqes);
+        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
+
+        uint32_t needed_sqes()
+        {
+            return 1;
+        }
+
+        void* get_response()
+        {
+            return &response;
+        }
+    };
+
+    struct write_response;
+    struct write_mailbox;
+
+    struct write_request // todo: template for more containers? std::string, std::vector<std::byte>, etc.
     {
-        if(this->continuation.done())
-            return true;
+        using response_t = write_response;
+        using mailbox_t = write_mailbox;
 
-        assert(continuation && !this->continuation.done() && "resume called without a continuation set");
+        int fd;
+        std::vector<uint8_t> data;
+        size_t offset;
+    };
 
-        this->continuation.resume();
-
-        return this->continuation.done();
-    }
-};
-
-struct read_response;
-struct read_mailbox;
-
-struct read_request
-{
-    using response_t = read_response;
-    using mailbox_t = read_mailbox;
-
-    int fd{-1};
-    size_t offset{0};
-    size_t size{0};
-};
-
-struct read_response
-{
-    std::unique_ptr<uint8_t> data{};
-    size_t bytes_read{0};
-    int32_t error_code{0};
-};
-
-struct read_mailbox : mailbox_base<read_mailbox>
-{
-    read_mailbox(read_request req)
-        : request(std::move(req)) {}
-
-    read_request request;
-    read_response response;
-
-    void prepare_sqes(std::span<io_uring_sqe*> sqes);
-    bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
-
-    uint32_t needed_sqes()
+    struct write_response
     {
-        return 1;
-    }
+        size_t  bytes_written{0};
+        int32_t error_code{0};
+    };
 
-    void* get_response()
+    struct write_mailbox : mailbox_base<write_mailbox>
     {
-        return &response;
-    }
-};
+        write_mailbox(write_request req)
+            : request(std::move(req)) {}
 
-struct write_response;
-struct write_mailbox;
+        write_request request;
+        write_response response;
 
-struct write_request // todo: template for more containers? std::string, std::vector<std::byte>, etc.
-{
-    using response_t = write_response;
-    using mailbox_t = write_mailbox;
+        void prepare_sqes(std::span<io_uring_sqe*> sqes);
+        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
 
-    int fd;
-    std::vector<uint8_t> data;
-    size_t offset;
-};
+        uint32_t needed_sqes()
+        {
+            return 1;
+        }
 
-struct write_response
-{
-    int32_t error_code{0};
-};
+        void* get_response()
+        {
+            return &response;
+        }
+    };
 
-struct write_mailbox : mailbox_base<write_mailbox>
-{
-    write_mailbox(write_request req)
-        : request(std::move(req)) {}
+    struct multi_read_response;
+    struct multi_read_mailbox;
 
-    write_request request;
-    write_response response;
-
-    void prepare_sqes(std::span<io_uring_sqe*> sqes);
-    bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx );
-
-    uint32_t needed_sqes()
+    struct multi_read_request
     {
-        return 1;
-    }
+        using response_t = multi_read_response;
+        using mailbox_t = multi_read_mailbox;
 
-    void* get_response()
+        std::vector<read_request> requests;
+    };
+
+    struct multi_read_response
     {
-        return &response;
-    }
-};
+        std::vector<read_response> responses;
+    };
 
-struct multi_read_response;
-struct multi_read_mailbox;
-
-struct multi_read_request
-{
-    using response_t = multi_read_response;
-    using mailbox_t = multi_read_mailbox;
-
-    std::vector<read_request> requests;
-};
-
-struct multi_read_response
-{
-    std::vector<read_response> responses;
-};
-
-struct multi_read_mailbox : mailbox_base<multi_read_mailbox>
-{
-    multi_read_mailbox(multi_read_request req)
-        : request(std::move(req)) {}
-
-    multi_read_request request;
-    multi_read_response response;
-
-    void prepare_sqes(std::span<io_uring_sqe*> sqes);
-    bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
-
-    uint32_t needed_sqes()
+    struct multi_read_mailbox : mailbox_base<multi_read_mailbox>
     {
-        return static_cast<uint32_t>(request.requests.size());
-    }
+        multi_read_mailbox(multi_read_request req)
+            : request(std::move(req)) {}
 
-    void* get_response()
-    {
-        return &response;
-    }
+        multi_read_request request;
+        multi_read_response response;
 
-private:
-    uint64_t _landed_response{0};
-};
+        void prepare_sqes(std::span<io_uring_sqe*> sqes);
+        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
+
+        uint32_t needed_sqes()
+        {
+            return static_cast<uint32_t>(request.requests.size());
+        }
+
+        void* get_response()
+        {
+            return &response;
+        }
+
+    private:
+        uint64_t _landed_response{0};
+    };
+
+} // namespace hedgehog::async

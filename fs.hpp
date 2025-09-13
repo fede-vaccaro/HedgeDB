@@ -1,7 +1,7 @@
-#pragma once 
+#pragma once
 
-#include <cstddef>
 #include <array>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <optional>
@@ -31,6 +31,12 @@ namespace hedgehog::fs
         std::filesystem::path _path;
 
     public:
+        enum class open_mode
+        {
+            read_only = O_RDONLY,
+            write_new = O_WRONLY | O_CREAT | O_TRUNC,
+        };
+
         [[nodiscard]] int get() const
         {
             return this->_fd;
@@ -46,29 +52,50 @@ namespace hedgehog::fs
             return this->_path;
         }
 
-        static hedgehog::expected<file_descriptor> from_path(const std::filesystem::path& path, std::optional<size_t> expected_size = std::nullopt)
+        static hedgehog::expected<file_descriptor> from_path(const std::filesystem::path& path, open_mode mode, bool use_direct = false, std::optional<size_t> expected_size = std::nullopt)
         {
-            if(!std::filesystem::exists(path))
+
+            auto exists = std::filesystem::exists(path);
+
+            if(!exists && mode == open_mode::read_only)
                 return hedgehog::error("File does not exist: " + path.string());
 
+            if(exists && mode == open_mode::write_new)
+                return hedgehog::error("File already exists: " + path.string());
+
             // Open the file;
-            int fd = open(path.c_str(), O_RDONLY); // NOLINT
+            auto flag = static_cast<int>(mode);
+            if(use_direct)
+                flag |= O_DIRECT;
+
+            int fd = open(path.c_str(), flag, 0777); // NOLINT
 
             if(fd == -1)
             {
-                auto err = get_error_message_thread_safe();
+                auto err = std::string(strerror(errno));
                 return hedgehog::error("Failed to open file descriptor " + err);
             }
 
-            file_descriptor fd_wrapped{};
-            fd_wrapped._fd = fd;
-
-            // Get the size of the file
             size_t file_size = std::filesystem::file_size(path);
 
-            if(expected_size.has_value() && file_size != expected_size.value())
+            if(mode == open_mode::read_only && expected_size.has_value() && file_size != expected_size.value())
                 return hedgehog::error("Invalid file size! " + std::to_string(file_size) + " != " + std::to_string(expected_size.value()));
+            if(mode == open_mode::write_new && expected_size.has_value() && file_size > expected_size.value())
+            {
+                auto res = fallocate(fd, 0, 0, expected_size.value());
+                if(res == -1)
+                {
+                    auto err = get_error_message_thread_safe();
 
+                    std::filesystem::remove(path);
+                    close(fd);
+                    return hedgehog::error("Failed to allocate space for file: " + err);
+                }
+            }
+
+            file_descriptor fd_wrapped{};
+
+            fd_wrapped._fd = fd;
             fd_wrapped._file_size = file_size;
             fd_wrapped._path = path;
 
@@ -77,20 +104,18 @@ namespace hedgehog::fs
 
         file_descriptor() = default;
 
-        file_descriptor(file_descriptor&& other) : _fd(other._fd), _file_size(other._file_size), _path(std::move(other._path))
+        file_descriptor(file_descriptor&& other) : _fd(std::exchange(other._fd, -1)), _file_size(std::exchange(other._file_size, 0)), _path(std::move(other._path))
         {
-            other._fd = -1;
-            other._file_size = 0;
         }
 
         file_descriptor& operator=(file_descriptor&& other)
         {
-            this->_fd = other._fd;
-            this->_file_size = other._file_size;
-            this->_path = std::move(other._path);
+            if(this == &other)
+                return *this;
 
-            other._fd = -1;
-            other._file_size = 0;
+            this->_fd = std::exchange(other._fd, -1);
+            this->_file_size = std::exchange(other._file_size, 0);
+            this->_path = std::move(other._path);
 
             return *this;
         };
@@ -100,7 +125,7 @@ namespace hedgehog::fs
 
         ~file_descriptor()
         {
-            if(this->_fd != 0)
+            if(this->_fd >= 0)
                 close(this->_fd);
         }
     };
@@ -141,11 +166,10 @@ namespace hedgehog::fs
 
         static hedgehog::expected<mmap_wrapper> from_path(const std::filesystem::path& path, std::optional<size_t> expected_size = std::nullopt)
         {
-            auto fd_res = file_descriptor::from_path(path, expected_size);
+            auto fd_res = file_descriptor::from_path(path, file_descriptor::open_mode::read_only, false, expected_size);
             if(!fd_res.has_value())
-            {
                 return hedgehog::error("Failed to get file descriptor for mmap: " + fd_res.error().to_string());
-            }
+
             return from_fd_wrapper(std::move(fd_res.value()));
         }
 
@@ -297,5 +321,4 @@ namespace hedgehog::fs
         }
     };
 
-
-}
+} // namespace hedgehog::fs

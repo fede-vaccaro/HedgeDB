@@ -31,16 +31,31 @@ endif()
 include_directories(include ${asio-standalone_SOURCE_DIR}/asio/include)
 
 set(DB_SOURCES
+    common.cc
+    common.h
     index.cc
     index.h
     fs.hpp
+    paginated_view.cc
+    paginated_view.h
 )
 
-add_executable(index_test_w test_index_w.cc ${DB_SOURCES})
-add_executable(index_test_r from_disk_test.cc ${DB_SOURCES})
-
 ## io_executor files
-set(IO_EXECUTOR_SRCS io_executor.cc mailbox_impl.cc)
+set(IO_EXECUTOR_SRCS 
+    io_executor.cc
+    io_executor.h 
+    mailbox.h
+    mailbox_impl.cc
+    mailbox_impl.h
+    task.h
+    generator.h
+)
+
+add_executable(index_test_w test_index_w.cc ${DB_SOURCES} ${IO_EXECUTOR_SRCS})
+add_executable(index_test_r from_disk_test.cc ${DB_SOURCES} ${IO_EXECUTOR_SRCS})
+
+target_link_libraries(index_test_w uring)
+target_link_libraries(index_test_r uring)
 
 # executor_test.cc
 add_executable(executor_read_test ${IO_EXECUTOR_SRCS} executor_read_test.cc)
@@ -49,3 +64,11 @@ target_link_libraries(executor_read_test uring)
 # executor tests
 add_executable(executor_test ${IO_EXECUTOR_SRCS} test/io_executor.spec.cc)
 target_link_libraries(executor_test uring gtest gtest_main)
+
+# index tests
+add_executable(index_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index.spec.cc)
+target_link_libraries(index_test gtest gtest_main uring)
+
+# paginated_view tests
+add_executable(paginated_view_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/paginated_view.spec.cc)
+target_link_libraries(paginated_view_test uring gtest gtest_main)

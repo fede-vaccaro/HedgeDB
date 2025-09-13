@@ -82,7 +82,7 @@ public:
 
 std::atomic_uint64_t atomic_counter = 0;
 
-task<void> get_obj(read_request r, executor_context& executor, working_group& wg)
+hedgehog::async::task<void> get_obj(hedgehog::async::read_request r, hedgehog::async::executor_context& executor, working_group& wg)
 {
     auto response = co_await executor.submit_request(r);
 
@@ -120,7 +120,7 @@ int main()
     working_group wg;
 
     const uint32_t QUEUE_DEPTH = 64;
-    executor_context context(QUEUE_DEPTH);
+    hedgehog::async::executor_context context(QUEUE_DEPTH);
 
     auto [fd, file_size] = open_fd(INDEX_PATH);
 
@@ -133,7 +133,7 @@ int main()
     auto t0 = std::chrono::steady_clock::now();
     for(size_t i = 0; i < N_REQUESTS; i++)
     {
-        auto task = get_obj(read_request{.fd = fd, .offset = dist(rng) * PAGE_SIZE, .size = PAGE_SIZE}, context, wg);
+        auto task = get_obj(hedgehog::async::read_request{.fd = fd, .offset = dist(rng) * PAGE_SIZE, .size = PAGE_SIZE}, context, wg);
         context.submit_io_task(std::move(task));
     }
     std::cout << "Submitted " << N_REQUESTS << " jobs\n";
