@@ -18,7 +18,7 @@ namespace hedgehog::fs
 {
 
     // todo: switch to a thread-safe version of strerror
-    inline std::string get_error_message_thread_safe()
+    inline std::string get_error_message()
     {
         // constexpr size_t BUF_SIZE = 1024;
         // std::array<char, BUF_SIZE> buf{};
@@ -37,6 +37,8 @@ namespace hedgehog::fs
             undefined = -1,
             read_only = O_RDONLY,
             write_new = O_WRONLY | O_CREAT | O_TRUNC,
+            read_write = O_RDWR,
+            read_write_new = O_RDWR | O_CREAT | O_TRUNC,
         };
 
     private:
@@ -97,19 +99,29 @@ namespace hedgehog::fs
 
             size_t file_size = std::filesystem::file_size(path);
 
-            if(mode == open_mode::read_only && expected_size.has_value() && file_size != expected_size.value())
-                return hedgehog::error("Invalid file size! " + std::to_string(file_size) + " != " + std::to_string(expected_size.value()));
-            if(mode == open_mode::write_new && expected_size.has_value() && file_size > expected_size.value())
+            if(expected_size.has_value())
             {
-                auto res = fallocate(fd, 0, 0, expected_size.value());
-                if(res == -1)
+                switch(mode)
                 {
-                    auto err = get_error_message_thread_safe();
+                    case open_mode::undefined:
+                        break;
+                    case open_mode::read_write:
+                    case open_mode::read_only:
+                        if(file_size != expected_size.value())
+                            return hedgehog::error("Invalid file size! " + std::to_string(file_size) + " != " + std::to_string(expected_size.value()));
+                    case open_mode::write_new:
+                    case open_mode::read_write_new:
+                        auto res = fallocate(fd, 0, 0, expected_size.value());
+                        if(res == -1)
+                        {
+                            auto err = get_error_message();
 
-                    std::filesystem::remove(path);
-                    close(fd);
-                    return hedgehog::error("Failed to allocate space for file: " + err);
-                }
+                            std::filesystem::remove(path);
+                            close(fd);
+                            return hedgehog::error("Failed to allocate space for file: " + err);
+                        }
+                        break;
+                };
             }
 
             file_descriptor fd_wrapped{};
@@ -152,35 +164,45 @@ namespace hedgehog::fs
 
             size_t file_size = stats.file_size;
 
-            if(mode == open_mode::read_only && expected_size.has_value() && file_size != expected_size.value())
-                co_return hedgehog::error("File size different than expected: " + std::to_string(file_size) + " != " + std::to_string(expected_size.value()));
-            if(mode == open_mode::write_new && expected_size.has_value() && file_size > expected_size.value())
+            if(expected_size.has_value())
             {
-                auto res = co_await executor->submit_request(async::fallocate_request{
-                    .fd = fd,
-                    .mode = 0,
-                    .offset = 0,
-                    .length = expected_size.value()});
-
-                if(res.error_code)
+                switch(mode)
                 {
-                    auto err = std::string(strerror(-res.error_code));
-                    co_return hedgehog::error("Failed to allocate space for file: " + err);
+                    case open_mode::undefined:
+                        break;
+                    case open_mode::read_write:
+                    case open_mode::read_only:
+                        if(file_size != expected_size.value())
+                            co_return hedgehog::error("File size different than expected: " + std::to_string(file_size) + " != " + std::to_string(expected_size.value()));
+                    case open_mode::write_new:
+                    case open_mode::read_write_new:
+                        auto res = co_await executor->submit_request(async::fallocate_request{
+                            .fd = fd,
+                            .mode = 0777,
+                            .offset = 0,
+                            .length = expected_size.value()});
 
-                    std::filesystem::remove(path); // todo: implement mailbox based remove function
+                        if(res.error_code < 0)
+                        {
+                            auto err = std::string(strerror(-res.error_code));
+                            co_return hedgehog::error("Failed to allocate space for file: " + err);
 
-                    auto close_result = co_await executor->submit_request(async::close_request{fd});
+                            std::filesystem::remove(path); // todo: implement mailbox based remove function
 
-                    if(close_result.error_code)
-                    {
-                        auto err = std::string(strerror(-close_result.error_code));
-                        co_return hedgehog::error("Failed to close file descriptor after fallocate failure: " + err);
-                    }
+                            auto close_result = co_await executor->submit_request(async::close_request{fd});
 
-                    co_return hedgehog::error("Failed to allocate space for file: " + err);
-                }
+                            if(close_result.error_code < 0)
+                            {
+                                auto err = std::string(strerror(-close_result.error_code));
+                                co_return hedgehog::error("Failed to close file descriptor after fallocate failure: " + err);
+                            }
+
+                            co_return hedgehog::error("Failed to allocate space for file: " + err);
+                        }
+                        break;
+                };
             }
-
+            
             file_descriptor fd_wrapped{};
 
             fd_wrapped._fd = fd;
@@ -246,7 +268,7 @@ namespace hedgehog::fs
 
             if(mapped_ptr == MAP_FAILED)
             {
-                auto err_msg = get_error_message_thread_safe();
+                auto err_msg = get_error_message();
                 return hedgehog::error("Failed to mmap file: " + err_msg);
             }
 
@@ -350,7 +372,7 @@ namespace hedgehog::fs
 
             if(mapped_ptr == MAP_FAILED)
             {
-                auto err_msg = get_error_message_thread_safe();
+                auto err_msg = get_error_message();
                 return hedgehog::error("Failed to mmap file: " + err_msg);
             }
 
@@ -365,7 +387,7 @@ namespace hedgehog::fs
         tmp_mmap() = default;
 
         tmp_mmap(tmp_mmap&& other) noexcept
-            : _fd_wrapper(std::move(other._fd_wrapper)),
+            : _fd_wrapper(other._fd_wrapper),
               _mapped_ptr(other._mapped_ptr),
               _mapped_size(other._mapped_size)
         {
