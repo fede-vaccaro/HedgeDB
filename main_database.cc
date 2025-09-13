@@ -24,12 +24,13 @@ int main(int argc, char* argv[])
     std::cout << "Number of arguments: " << std::to_string(argc) << '\n';
 
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <N_FILES> <base_path>\n";
+        std::cerr << "Usage: " << argv[0] << " <N_FILES> <base_path> <FILE_SIZE>\n";
         return 1;
     }
 
     std::cout << "N_FILES (arg 1): " << argv[1] << '\n';
     std::cout << "Base Path (arg 2): " << argv[2] << '\n';
+    std::cout << "FILE_SIZE (arg 3): " << argv[2] << '\n';
 
     auto base_path = std::filesystem::path(argv[2]);
 
@@ -53,9 +54,14 @@ int main(int argc, char* argv[])
     auto N_FILES = std::stoul(argv[1]);
     std::cout << "N_FILES: " << N_FILES << '\n';
 
-    constexpr auto PAYLOAD_SIZE = 32; // 1KB payload
-    std::vector<uint8_t> data(PAYLOAD_SIZE, 0);
-    std::iota(data.begin(), data.end(), 0); // Fill with sequential data
+    auto VALUE_SIZE = std::stoul(argv[3]);
+    std::cout << "VALUE_SIZE: " << VALUE_SIZE << '\n';
+
+    std::vector<uint8_t> data(VALUE_SIZE);
+    std::random_device rd;
+    std::mt19937 generator(rd());
+    std::uniform_int_distribution<uint8_t> dist(0, 255);
+    std::generate(data.begin(), data.end(), [&]() { return dist(generator); });
 
     // Prepare for key generation and probabilistic selection
     std::random_device rd;
