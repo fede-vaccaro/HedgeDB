@@ -64,8 +64,10 @@ Elapsed time for deletes: 0 ms
 on HDD (50KB payloads):
 
 ```
+mkdir /tmp/hedgehog/
+$ ./hedgehog_table 2000000 /tmp/hedgehog 51200
 version 0.0.1a                                                                                
-BASE_PATH: "/data/ring"                                                                       
+BASE_PATH: /tmp/hedgehog/                                                                     
 N_FILES: 2000000                                                                              
 VALUE_SIZE: 51400                                                                             
 Key generated. n keys: 2000000                                                                
