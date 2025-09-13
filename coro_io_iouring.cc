@@ -1,7 +1,9 @@
+#include <atomic>
 #include <bits/types/timer_t.h>
 
 #include <cassert>
 #include <chrono>
+#include <condition_variable>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
@@ -71,45 +73,6 @@ struct GetPromise
 
 const std::string INDEX_PATH = "/tmp/iota.bin";
 
-struct executor
-{
-    struct promise_type
-    {
-        executor get_return_object()
-        {
-            return {.h_ = std::coroutine_handle<promise_type>::from_promise(*this)};
-        }
-        std::suspend_never initial_suspend() { return {}; }
-        std::suspend_always final_suspend() noexcept { return {}; }
-        void unhandled_exception() {}
-    };
-
-    bool await_ready() noexcept { return false; }
-    void await_suspend(std::coroutine_handle<>) noexcept {}
-    void await_resume() noexcept {}
-
-    bool operator()()
-    {
-        if(!h_.done())
-            h_.resume();
-
-        return h_.done();
-    }
-
-    bool ready() { return true; }
-
-    std::coroutine_handle<promise_type> h_;
-    operator std::coroutine_handle<promise_type>() const { return h_; }
-
-    ~executor()
-    {
-        if(this->h_)
-        {
-            this->h_.destroy();
-        };
-    }
-};
-
 struct mailbox
 {
     std::variant<std::monostate, read_request, read_response> msg;
@@ -117,14 +80,14 @@ struct mailbox
 
     read_request get_request()
     {
-        assert(!std::holds_alternative<std::monostate>(_msg) && "get_request called before request was set");
+        assert(!std::holds_alternative<std::monostate>(msg) && "get_request called before request was set");
         return std::get<read_request>(msg);
     }
 
     auto set_response(read_response r)
     {
         log("[mailbox] set_response called with ", r.data_size);
-        assert(std::holds_alternative<read_request>(_msg) && "set_response called before request was set");
+        assert(std::holds_alternative<read_request>(msg) && "set_response called before request was set");
         this->msg = std::move(r);
     }
 
@@ -135,7 +98,7 @@ struct mailbox
         if(this->continuation.done())
             return true;
 
-        assert(_continuation && !this->_continuation.done() && "resume called without a continuation set");
+        assert(continuation && !this->continuation.done() && "resume called without a continuation set");
 
         this->continuation.resume();
 
@@ -184,30 +147,45 @@ std::vector<T> pop_n(std::deque<T>& queue, size_t n)
     return slice;
 }
 
-constexpr auto QUEUE_DEPTH = 64;
+constexpr auto QUEUE_DEPTH = 256;
 
 class executor_context
 {
     size_t _queue_depth = QUEUE_DEPTH;
+    size_t _max_buffered_requests = QUEUE_DEPTH * 4;
 
     io_uring _ring;
 
-    using in_flight_request_t = std::pair<std::unique_ptr<mailbox>, read_response>; // todo merge response to mailbox
+    std::atomic_bool _running{true};
+    std::thread _worker;
 
+    using in_flight_request_t = std::pair<std::unique_ptr<mailbox>, read_response>;
     std::unordered_map<std::coroutine_handle<>, in_flight_request_t> _in_flight_requests;
 
     std::deque<std::unique_ptr<mailbox>> _waiting_for_io_queue;
     std::deque<std::unique_ptr<mailbox>> _ready_queue;
 
+    // task ingress buffer
+    std::condition_variable _cv;
+    std::mutex _pending_requests_mutex;
+    std::deque<task<void>> _pending_requests;
+
 public:
     void submit_sqe()
     {
-        if(!this->_in_flight_requests.empty()) // or: this->_in_flight_requests.size() > 16 // 32. should investigate
+        auto sq_ready = static_cast<int32_t>(io_uring_sq_ready(&this->_ring));
+        auto in_flight = static_cast<int32_t>(this->_in_flight_requests.size());
+
+        auto potential_cqe_ready = sq_ready + in_flight;
+        auto cqe_space_margin = static_cast<int32_t>(this->_queue_depth) * 2 - potential_cqe_ready;
+
+        if(cqe_space_margin <= 0) // avoid cqe overflow risk
             return;
 
-        auto sqe_space_left = io_uring_sq_space_left(&this->_ring);
+        auto sq_space_left = io_uring_sq_space_left(&this->_ring);
+        auto sq_to_submit = std::min(static_cast<int32_t>(sq_space_left), cqe_space_margin);
 
-        auto requests = pop_n(this->_waiting_for_io_queue, sqe_space_left);
+        auto requests = pop_n(this->_waiting_for_io_queue, sq_to_submit);
 
         if(requests.empty())
             return;
@@ -246,14 +224,14 @@ public:
 
             if(ready != submit) // todo might remove
             {
-                std::cerr << "Warning: io_uring_submit ready != submit. in flight: "
-                          << _in_flight_requests.size() << ", ready: " << ready << " submit: " << submit << std::endl;
+                // std::cerr << "Warning: io_uring_submit ready != submit. in flight: "
+                        //   << _in_flight_requests.size() << ", ready: " << ready << " submit: " << submit << " requests: " << requests.size() << std::endl;
             }
 
             if(ready != requests.size())
             {
-                std::cerr << "Warning: io_uring_submit ready != requests.size(). requests.size(): "
-                          << requests.size() << ", ready: " << ready << " submit: " << submit << " in flight: " << _in_flight_requests.size() << std::endl;
+                // std::cerr << "Warning: io_uring_submit ready != requests.size(). requests.size(): "
+                //   << requests.size() << ", ready: " << ready << " submit: " << submit << " in flight: " << _in_flight_requests.size() << std::endl;
             }
         }
     }
@@ -343,7 +321,7 @@ public:
             read_response await_resume() noexcept
             {
                 log("[awaitable_mailbox] await_resume called on mailbox with continuation: ", mbox.continuation.address());
-                assert(std::holds_alternative<read_response>(mbox._msg) && "await_resume called before response was set");
+                assert(std::holds_alternative<read_response>(mbox.msg) && "await_resume called before response was set");
                 return std::move(std::get<read_response>(mbox.msg));
             }
 
@@ -376,18 +354,151 @@ public:
             throw std::runtime_error("error with io_uring_queue_init: "s + strerror(-ret));
 
         log("[executor_context] io_uring initialized with QUEUE_DEPTH: ", this->_queue_depth);
+
+        this->_worker = std::thread([this]()
+                                    { this->_run(); });
     }
 
     ~executor_context()
     {
+        this->shutdown();
+
         io_uring_queue_exit(&this->_ring);
         log("[executor_context] io_uring exited");
     }
+
+    void submit_io_task(task<void> task)
+    {
+        if(!this->_running.load(std::memory_order_relaxed))
+        {
+            std::cerr << "cannot submit task: context closed" << std::endl;
+            return;
+        }
+
+        {
+            // back pressure here
+            std::unique_lock lk(this->_pending_requests_mutex);
+
+            this->_cv.wait(lk, [this]()
+                           { return this->_pending_requests.size() < this->_max_buffered_requests; });
+
+            this->_pending_requests.emplace_back(std::move(task));
+        }
+    };
+
+    void shutdown()
+    {
+        if(!this->_running.load(std::memory_order_relaxed))
+            return;
+
+        std::cout << "Closing uring_reader." << std::endl;
+
+        this->_running.store(false, std::memory_order_relaxed);
+
+        this->_cv.notify_all();
+
+        if(_worker.joinable())
+            _worker.join();
+    }
+
+private:
+    void _run()
+    {
+        log_always("Launching io executor. Queue depth: ", this->_queue_depth, " Max buffered tasks: ", this->_max_buffered_requests);
+
+        std::vector<task<void>> in_progress_tasks;
+        in_progress_tasks.reserve(this->_max_buffered_requests);
+
+        std::deque<task<void>> new_tasks;
+
+        while(true)
+        {
+            if(in_progress_tasks.size() < this->_max_buffered_requests)
+            {
+                std::unique_lock lk(this->_pending_requests_mutex); // should have priority over submit
+
+                while(!this->_pending_requests.empty() && in_progress_tasks.size() < this->_max_buffered_requests)
+                {
+                    auto task = std::move(this->_pending_requests.front());
+                    this->_pending_requests.pop_front();
+
+                    new_tasks.emplace_back(std::move(task));
+                }
+
+                if(!this->_running.load(std::memory_order_relaxed) && this->_pending_requests.empty())
+                    break;
+            }
+            this->_cv.notify_all();
+
+            this->submit_sqe();
+
+            while(!new_tasks.empty())
+            {
+                auto task = std::move(new_tasks.front());
+                new_tasks.pop_front();
+
+                bool done = task();
+                if(!done)
+                    in_progress_tasks.emplace_back(std::move(task));
+            }
+
+            in_progress_tasks.erase(
+                std::remove_if(in_progress_tasks.begin(), in_progress_tasks.end(),
+                               [](const auto& task)
+                               { return task.done(); }),
+                in_progress_tasks.end());
+
+            this->do_work();
+
+            // log("[main] waiting for cqes");
+
+            // print_status();
+
+            this->wait_for_cqe();
+        }
+    }
 };
 
-std::atomic_uint64_t completed = 0;
+class working_group
+{
+    std::atomic_uint64_t _counter{0};
+    std::atomic_bool _done{false};
 
-task<int> get_obj(read_request r, executor_context& executor)
+    std::condition_variable _cv;
+    std::mutex _mutex;
+
+public:
+    void incr()
+    {
+        this->_counter++;
+    }
+
+    void set(size_t count)
+    {
+        this->_counter = count;
+    }
+
+    void decr()
+    {
+        this->_counter--;
+
+        this->_done = this->_counter == 0;
+
+        if(this->_done)
+            this->_cv.notify_all();
+    }
+
+    void wait()
+    {
+        std::unique_lock lk(this->_mutex);
+        this->_cv.wait(lk, [this]()
+                       { return this->_done.load(); });
+    }
+};
+
+std::atomic_uint64_t atomic_counter = 0;
+
+task<void> get_obj(read_request r, executor_context& executor, working_group& wg)
 {
     auto response = co_await executor.submit_request(r);
 
@@ -397,30 +508,26 @@ task<int> get_obj(read_request r, executor_context& executor)
 
     // log("[get_obj] received data of size: ", data.size());
 
-    // auto start_value = r.offset / sizeof(uint64_t);
+    auto start_value = r.offset / sizeof(uint64_t);
 
-    // auto* ptr = reinterpret_cast<uint64_t*>(data.data());
-    // for(size_t i = 0; i < data.size() / sizeof(uint64_t); ++i)
-    // {
-    //     if(start_value + i != ptr[i])
-    //     {
-    //         std::cerr << "Error: expected value " << start_value << ", got " << ptr[i] << " at index " << i << " and offset " << r.offset << "\n";
-    //         throw std::runtime_error("Data mismatch");
-    //     }
-    // }
+    auto* ptr = reinterpret_cast<uint64_t*>(data.data());
+    for(size_t i = 0; i < data.size() / sizeof(uint64_t); ++i)
+    {
+        if(start_value + i != ptr[i])
+        {
+            std::cerr << "Error: expected value " << start_value << ", got " << ptr[i] << " at index " << i << " and offset " << r.offset << "\n";
+            throw std::runtime_error("Data mismatch");
+        }
+    }
 
-    // log_always("[get_obj] task complete with size ", data.size());
+    // log_always("[get_obj] task complete with size ", data.size(), "counting up to: ", atomic_counter++);
 
-    completed++;
-
-    co_return 0;
+    wg.decr();
 }
 
 int main()
 {
-    std::deque<task<int>> requests_queue;
-    std::vector<std::pair<task<int>, bool>> in_progress_tasks;
-
+    working_group wg;
     executor_context context{};
 
     auto [fd, file_size] = open_fd(INDEX_PATH);
@@ -428,70 +535,23 @@ int main()
     auto rng = std::mt19937(std::random_device{}());
     auto dist = std::uniform_int_distribution<size_t>(0, file_size / PAGE_SIZE - 10);
 
-    auto N_REQUESTS = 100000;
-    for(size_t i = 0; i < N_REQUESTS; i++)
-    {
-        auto task = get_obj(read_request{.fd = fd, .offset = dist(rng) * PAGE_SIZE, .size = PAGE_SIZE}, context);
-        requests_queue.emplace_back(std::move(task));
-    }
-
-    constexpr auto MAX_PARALLEL_REQUESTS = QUEUE_DEPTH * 2;
-
-    size_t time_prepare = 0;
-    size_t time_execute = 0;
-    size_t time_section_ready = 0;
+    auto N_REQUESTS = 1000000;
+    wg.set(N_REQUESTS);
 
     auto t0 = std::chrono::steady_clock::now();
-    while(true)
+    for(size_t i = 0; i < N_REQUESTS; i++)
     {
-        while(!requests_queue.empty() && in_progress_tasks.size() < MAX_PARALLEL_REQUESTS)
-        {
-            auto task = std::move(requests_queue.front());
-            requests_queue.pop_front();
-
-            in_progress_tasks.emplace_back(std::move(task), false);
-        }
-
-        context.submit_sqe();
-
-        for(auto& [task, started] : in_progress_tasks)
-        {
-            if(started)
-                continue;
-
-            task();
-            started = true; // mark task as started
-        }
-
-        in_progress_tasks.erase(
-            std::remove_if(in_progress_tasks.begin(), in_progress_tasks.end(),
-                           [](const auto& pair)
-                           { return pair.first.done(); }),
-            in_progress_tasks.end());
-
-        context.do_work();
-
-        log("[main] waiting for cqes");
-        context.wait_for_cqe(); // wait for cqe and process them
-
-        if(in_progress_tasks.empty())
-        {
-            if(context.in_flight_requests_size() > 0)
-            {
-                // log_always("[main] waiting for in-flight requests to complete: ", context.in_flight_requests_size());
-            }
-            else
-            {
-                log_always("[main] all tasks completed, exiting");
-                break; // exit if no tasks to process
-            }
-        }
+        auto task = get_obj(read_request{.fd = fd, .offset = dist(rng) * PAGE_SIZE, .size = PAGE_SIZE}, context, wg);
+        context.submit_io_task(std::move(task));
     }
-
+    // log_always("Submitted ", N_REQUESTS, " jobs");
+    wg.wait();
     auto t1 = std::chrono::steady_clock::now();
+
+    context.shutdown();
+
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
     std::cout << "Processed " << N_REQUESTS << " requests in " << duration.count() / 1000.0 << " ms." << std::endl;
     std::cout << "Average time per request: " << static_cast<double>(duration.count()) / N_REQUESTS << " us." << std::endl;
     std::cout << "Average throughput: " << static_cast<size_t>(static_cast<double>(N_REQUESTS) / (duration.count() / 1000000.0)) << " requests/sec." << std::endl;
-    std::cout << "Total completed: " << completed << std::endl;
 }

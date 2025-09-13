@@ -1,9 +1,6 @@
-#pragma once 
+#pragma once
 
 #include <coroutine>
-#include <cstddef>
-#include <iostream>
-#include <sstream> // Required for std::ostringstream
 #include <utility>
 
 #include "logger.h"
@@ -58,6 +55,41 @@ struct promise
     {
         log(id, "-task::promise::return_value ", value, "");
         this->value = std::move(value);
+    }
+
+    void unhandled_exception() {}
+};
+
+template <typename TASK>
+struct promise<TASK, void>
+{
+    using handle_t = std::coroutine_handle<promise<TASK, void>>;
+
+    std::coroutine_handle<> _continuation;
+    int id = counter++;
+
+    TASK get_return_object()
+    {
+        auto h = handle_t::from_promise(*this);
+        log(id, "-task::promise::get_return_object: ", h.address(), "");
+        return TASK{std::move(h)};
+    }
+
+    auto initial_suspend()
+    {
+        log(id, "-task::promise::initial_suspend");
+        return std::suspend_always{};
+    }
+
+    auto final_suspend() noexcept
+    {
+        log(id, "-task::promise::final_suspend");
+        return awaitable_final_suspend<promise>{};
+    }
+
+    void return_void()
+    {
+        log(id, "-task::promise::return_void");
     }
 
     void unhandled_exception() {}
@@ -120,6 +152,12 @@ public:
 
     RETURN_VALUE await_resume()
     {
+        if constexpr(std::is_void_v<RETURN_VALUE>)
+        {
+            log(this->_handle.promise().id, "-task::await_resume (void)");
+            return;
+        }
+
         log(this->_handle.promise().id, "-task::await_resume");
 
         if(this->_handle.done())
@@ -143,5 +181,4 @@ public:
     {
         return this->_handle.done();
     }
-    
 };
