@@ -102,15 +102,15 @@ namespace hedgehog::async
     {
         auto* sqe = sqes.front();
 
-        io_uring_prep_openat(sqe, AT_FDCWD, this->request.path.data(), this->request.flags, this->request.mode);
+        io_uring_prep_openat(sqe, AT_FDCWD, this->request.path.c_str(), this->request.flags, this->request.mode);
     }
 
     bool open_mailbox::handle_cqe(io_uring_cqe* cqe, uint8_t /* sub_request_idx */)
     {
-        if(cqe->res > -1)
+        if(cqe->res >= 0)
             this->response.file_descriptor = cqe->res;
-
-        this->response.error_code = cqe->res;
+        else
+            this->response.error_code = cqe->res;
 
         return true;
     }
