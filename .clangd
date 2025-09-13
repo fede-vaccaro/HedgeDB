@@ -1,0 +1,25 @@
+# .clangd
+
+CompileFlags:
+  # These flags are added to the command line for every file
+  Add: [-Wall, -Wextra, -std=c++20]
+
+# Enable background indexing for better performance
+Index:
+  Background: Build
+
+# Use clang-tidy for diagnostics
+Diagnostics:
+  ClangTidy:
+    Add: [modernize-*, performance-*, readability-*]
+    Remove: [clang-analyzer-*, "modernize-use-trailing-return-type", "readability-braces-around-statements", "readability-magic-numbers"]
+
+# Enable header insertion when using code completion
+Completion:
+  AllScopes: true
+
+# Inlay hints (if supported by your editor)
+InlayHints:
+  Enabled: true
+  ParameterNames: true
+  DeducedTypes: true
