@@ -3,7 +3,6 @@
 #include <cassert>
 #include <cstdint>
 #include <filesystem>
-#include <limits>
 #include <type_traits>
 #include <uuid.h>
 
@@ -19,13 +18,24 @@ namespace hedgehog
         uint32_t _table_id{};
 
     public:
+        value_ptr_t() = default;
+        value_ptr_t(const value_ptr_t&) = default;
+        value_ptr_t(value_ptr_t&&) = default;
+
+        value_ptr_t(uint64_t offset, uint32_t size, uint32_t table_id) : _offset(offset), _size(size), _table_id(table_id) {}
+
+        value_ptr_t& operator=(const value_ptr_t&) = default;
+        value_ptr_t& operator=(value_ptr_t&&) = default;
+
+        ~value_ptr_t() = default;
+
         [[nodiscard]] bool is_deleted() const
         {
 #ifdef __BYTE_ORDER__
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-            return (_offset >> 63) == 1;
+            return (this->_offset >> 63) == 1;
 #else
-            return (offset & 1) == 1;
+            return (this->_offset & 1) == 1;
 #endif
 #else
 #error "Byte order not defined. Please define __BYTE_ORDER__."
@@ -96,9 +106,6 @@ namespace hedgehog
 
             return this->table_id() > other.table_id() || offset() > other.offset() || (this->is_deleted() && !other.is_deleted());
         }
-
-        value_ptr_t() = default;
-        value_ptr_t(uint64_t offset, uint32_t size, uint32_t table_id) : _offset(offset), _size(size), _table_id(table_id) {}
     };
 
     struct index_key_t
@@ -108,7 +115,7 @@ namespace hedgehog
 
         bool operator<(const index_key_t& other) const
         {
-            return key < other.key || (key == other.key && value_ptr.table_id() < other.value_ptr.table_id());
+            return key < other.key;
         }
     };
 

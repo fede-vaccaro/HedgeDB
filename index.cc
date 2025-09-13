@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <unistd.h>
 #include <vector>
 
@@ -21,6 +22,57 @@
 
 namespace hedgehog::db
 {
+
+    struct footer_builder
+    {
+        std::optional<uint64_t> upper_bound{};
+        std::optional<uint64_t> indexed_keys{};
+        std::optional<uint64_t> meta_index_entries{};
+        std::optional<uint64_t> index_start_offset{};
+        std::optional<uint64_t> index_end_offset{};
+        std::optional<uint64_t> meta_index_start_offset{};
+        std::optional<uint64_t> meta_index_end_offset{};
+        std::optional<uint64_t> footer_start_offset{};
+
+        hedgehog::expected<sorted_index_footer> build()
+        {
+            if(!this->upper_bound.has_value())
+                return hedgehog::error("Footer upper_bound not set");
+
+            if(!this->indexed_keys.has_value())
+                return hedgehog::error("Footer indexed_keys not set");
+
+            if(!this->meta_index_entries.has_value())
+                return hedgehog::error("Footer meta_index_entries not set");
+
+            if(!this->index_start_offset.has_value())
+                return hedgehog::error("Footer index_start_offset not set");
+
+            if(!this->index_end_offset.has_value())
+                return hedgehog::error("Footer index_end_offset not set");
+
+            if(!this->meta_index_start_offset.has_value())
+                return hedgehog::error("Footer meta_index_start_offset not set");
+
+            if(!this->meta_index_end_offset.has_value())
+                return hedgehog::error("Footer meta_index_end_offset not set");
+
+            if(!this->footer_start_offset.has_value())
+                return hedgehog::error("Footer footer_start_offset not set");
+
+            return sorted_index_footer{
+                .upper_bound = this->upper_bound.value(),
+                .indexed_keys = this->indexed_keys.value(),
+                .meta_index_entries = this->meta_index_entries.value(),
+                .index_start_offset = this->index_start_offset.value(),
+                .index_end_offset = this->index_end_offset.value(),
+                .meta_index_start_offset = this->meta_index_start_offset.value(),
+                .meta_index_end_offset = this->meta_index_end_offset.value(),
+                .footer_start_offset = this->footer_start_offset.value(),
+            };
+        }
+    };
+
     std::vector<meta_index_entry> create_meta_index(const std::vector<index_key_t>& sorted_keys)
     {
         auto meta_index_size = (sorted_keys.size() + INDEX_PAGE_NUM_ENTRIES - 1) / INDEX_PAGE_NUM_ENTRIES;
@@ -80,7 +132,7 @@ namespace hedgehog::db
         return index_sorted;
     }
 
-    hedgehog::expected<std::vector<sorted_index>> index_ops::merge_and_flush(const std::filesystem::path& base_path, std::vector<mem_index>&& indices, size_t num_partition_exponent, size_t flush_iteration)
+    hedgehog::expected<std::vector<sorted_index>> index_ops::flush_mem_index(const std::filesystem::path& base_path, std::vector<mem_index>&& indices, size_t num_partition_exponent, size_t flush_iteration)
     {
         if(num_partition_exponent > 16)
             return hedgehog::error("Number of partitions exponent must be less than or equal to 16");
@@ -438,8 +490,6 @@ namespace hedgehog::db
                 {
                     .version = sorted_index_footer::CURRENT_FOOTER_VERSION,
                     .upper_bound = upper_bound,
-                    .min_key = sorted_keys.front().key,
-                    .max_key = sorted_keys.back().key,
                     .indexed_keys = sorted_keys.size(),
                     .meta_index_entries = ceil(sorted_keys.size(), INDEX_PAGE_NUM_ENTRIES),
                     .index_start_offset = 0,
@@ -536,25 +586,8 @@ namespace hedgehog::db
         if(left._footer.upper_bound != right._footer.upper_bound)
             co_return hedgehog::error("Cannot merge sorted indices with different upper bounds");
 
-        auto new_table_num_keys = left.size() + right.size();
-        auto [index_end_pos, meta_index_start_pos] = infer_index_end_pos(new_table_num_keys);
-        auto meta_index_entries = ceil(new_table_num_keys, INDEX_PAGE_NUM_ENTRIES);
-        auto meta_index_end_pos = meta_index_start_pos + (meta_index_entries * sizeof(meta_index_entry));
-
-        sorted_index_footer footer =
-            {
-                .version = sorted_index_footer::CURRENT_FOOTER_VERSION,
-                .upper_bound = left._footer.upper_bound,
-                .min_key = std::min(left._footer.min_key, right._footer.min_key),
-                .max_key = std::max(left._footer.max_key, right._footer.max_key),
-                .indexed_keys = new_table_num_keys,
-                .meta_index_entries = meta_index_entries,
-                .index_start_offset = 0,
-                .index_end_offset = index_end_pos,
-                .meta_index_start_offset = meta_index_start_pos,
-                .meta_index_end_offset = meta_index_end_pos,
-                .footer_start_offset = meta_index_end_pos,
-            };
+        footer_builder footer_builder;
+        footer_builder.upper_bound = left._footer.upper_bound;
 
         auto lhs_view = async::file_reader(
             left._fd,
@@ -596,7 +629,8 @@ namespace hedgehog::db
         if(!init_rhs)
             co_return hedgehog::error("Some error occurred while getting the first page from RHS inde: " + init_rhs.error().to_string());
 
-        size_t index_key_count = 0;
+        size_t indexed_keys = 0;
+        size_t filtered_keys = 0;
         size_t bytes_written = 0;
 
         std::vector<meta_index_entry> merged_meta_index;
@@ -621,7 +655,11 @@ namespace hedgehog::db
         };
 
         unique_buffer ubuf{}; // needed to handle possible duplicated keys between LHS and RHS
+        uuids::uuid last_written_key{};
 
+        footer_builder.index_start_offset = 0;
+
+        // start writing the actual index
         while(true)
         {
             std::vector<uint8_t> merged_keys(config.read_ahead_size * 2);
@@ -630,27 +668,33 @@ namespace hedgehog::db
 
             while(lhs.it() != lhs.end() && rhs.it() != rhs.end())
             {
-                [[maybe_unused]] uuids::uuid last_key;
                 if(*lhs.it() < *rhs.it())
                 {
-                    last_key = lhs.it()->key;
                     ubuf.push(*lhs.it());
                     ++lhs.it();
                 }
-                else if(*rhs.it() < *lhs.it())
+                else
                 {
-                    last_key = rhs.it()->key;
                     ubuf.push(*rhs.it());
                     ++rhs.it();
                 }
 
                 if(ubuf.ready())
                 {
-                    *merged_it = ubuf.pop();
+                    auto new_item = ubuf.pop();
 
-                    index_key_count++;
-                    if(index_key_count % INDEX_PAGE_NUM_ENTRIES == 0)
-                        merged_meta_index.emplace_back(merged_it->key);
+                    if(config.filter_deleted_keys && new_item.value_ptr.is_deleted())
+                    {
+                        filtered_keys++;
+                        continue;
+                    }
+
+                    *merged_it = new_item;
+                    last_written_key = new_item.key;
+
+                    indexed_keys++;
+                    if(indexed_keys % INDEX_PAGE_NUM_ENTRIES == 0)
+                        merged_meta_index.emplace_back(last_written_key);
 
                     if(++merged_it == merged_keys_span.end())
                         break;
@@ -682,53 +726,94 @@ namespace hedgehog::db
         auto& non_empty_view = !lhs.eof() ? lhs : rhs;
 
         std::vector<index_key_t> remaining_keys;
-        remaining_keys.reserve(non_empty_view.buffer().size() / sizeof(index_key_t));
+        remaining_keys.reserve((non_empty_view.buffer().size() + 1) / sizeof(index_key_t));
 
-        remaining_keys.push_back(ubuf.pop());
-        index_key_count++;
+        if(!non_empty_view.eof() && non_empty_view.it() != non_empty_view.end())
+        {
+            ubuf.push(*non_empty_view.it());
+            ++non_empty_view.it();
+        }
+        // from now on, we can ignore the ubuf since there are no duplicated keys within the same index
 
-        if(index_key_count % INDEX_PAGE_NUM_ENTRIES == 0)
-            merged_meta_index.emplace_back(remaining_keys.back().key);
+        std::vector<index_key_t> last_items{};
+        last_items.reserve(2);
+        if(ubuf.ready())
+            last_items.push_back(ubuf.pop());
+
+        last_items.push_back(ubuf.force_pop());
+
+        for(const auto& new_item : last_items)
+        {
+            if(config.filter_deleted_keys && new_item.value_ptr.is_deleted())
+            {
+                filtered_keys++;
+            }
+            else
+            {
+                remaining_keys.push_back(new_item);
+                last_written_key = new_item.key;
+                indexed_keys++;
+
+                if(indexed_keys % INDEX_PAGE_NUM_ENTRIES == 0)
+                    merged_meta_index.emplace_back(remaining_keys.back().key);
+            }
+        }
 
         while(!non_empty_view.eof())
         {
             while(non_empty_view.it() != non_empty_view.end())
             {
-                ++index_key_count;
+                if(config.filter_deleted_keys && non_empty_view.it()->value_ptr.is_deleted())
+                {
+                    filtered_keys++;
+                    continue;
+                }
 
-                if(index_key_count % INDEX_PAGE_NUM_ENTRIES == 0 || index_key_count == new_table_num_keys)
+                ++indexed_keys;
+
+                if(indexed_keys % INDEX_PAGE_NUM_ENTRIES == 0)
                     merged_meta_index.emplace_back(non_empty_view.it()->key);
 
+                last_written_key = non_empty_view.it()->key;
                 remaining_keys.push_back(*non_empty_view.it());
                 non_empty_view.it()++;
             }
 
-            auto res = co_await executor->submit_request(async::write_request{
-                .fd = fd.get(),
-                .data = reinterpret_cast<uint8_t*>(remaining_keys.data()),
-                .size = remaining_keys.size() * sizeof(index_key_t),
-                .offset = bytes_written});
+            if(!remaining_keys.empty())
+            {
+                auto res = co_await executor->submit_request(async::write_request{
+                    .fd = fd.get(),
+                    .data = reinterpret_cast<uint8_t*>(remaining_keys.data()),
+                    .size = remaining_keys.size() * sizeof(index_key_t),
+                    .offset = bytes_written});
 
-            if(res.error_code != 0)
-                co_return hedgehog::error("Failed to write remaining keys to file: " + std::string(strerror(res.error_code)));
+                remaining_keys.clear();
 
-            bytes_written += res.bytes_written;
+                if(res.error_code != 0)
+                    co_return hedgehog::error("Failed to write remaining keys to file: " + std::string(strerror(res.error_code)));
 
-            auto refresh_status = co_await non_empty_view.next(PAGE_SIZE_IN_BYTES);
+                bytes_written += res.bytes_written;
+            }
+
+            auto refresh_status = co_await non_empty_view.next(config.read_ahead_size);
 
             if(!refresh_status)
                 co_return hedgehog::error("Failed to refresh view: " + refresh_status.error().to_string());
         }
 
+        if(indexed_keys % INDEX_PAGE_NUM_ENTRIES != 0)
+            merged_meta_index.emplace_back(last_written_key);
+
         auto refresh_status = co_await refresh_buffers();
         if(!refresh_status)
             co_return hedgehog::error("Failed to refresh views after writing remaining keys: " + refresh_status.error().to_string());
 
-        assert(index_key_count == footer.indexed_keys && "Item count does not match footer indexed keys");
-        assert(index_key_count * sizeof(index_key_t) == footer.index_end_offset && "Item count does not match footer index end offset");
+        assert(indexed_keys == (left._footer.indexed_keys + right._footer.indexed_keys - filtered_keys * 2) && "Item count does not match footer indexed keys"); // <---- resume from here: index_count is lower if there are deleted keys
+        footer_builder.indexed_keys = indexed_keys;
+        footer_builder.index_end_offset = bytes_written;
 
         // write index padding if any
-        size_t padding_size = compute_alignment_padding<index_key_t>(index_key_count);
+        size_t padding_size = compute_alignment_padding<index_key_t>(indexed_keys);
         if(padding_size > 0)
         {
             auto padding = std::vector<uint8_t>(padding_size, 0);
@@ -744,6 +829,9 @@ namespace hedgehog::db
             bytes_written += res.bytes_written;
         }
 
+        footer_builder.meta_index_start_offset = bytes_written;
+        footer_builder.meta_index_entries = merged_meta_index.size();
+
         // write meta index
         {
             auto res = co_await executor->submit_request(async::write_request{
@@ -757,6 +845,8 @@ namespace hedgehog::db
 
             bytes_written += res.bytes_written;
         }
+
+        footer_builder.meta_index_end_offset = bytes_written;
 
         // write meta index padding if any
         size_t meta_index_padding_size = compute_alignment_padding<meta_index_entry>(merged_meta_index.size());
@@ -774,6 +864,14 @@ namespace hedgehog::db
 
             bytes_written += res.bytes_written;
         }
+
+        footer_builder.footer_start_offset = bytes_written;
+
+        auto maybe_footer = footer_builder.build();
+        if(!maybe_footer.has_value())
+            co_return hedgehog::error("Failed to build footer: " + maybe_footer.error().to_string());
+
+        auto& footer = maybe_footer.value();
 
         // write footer
         {
