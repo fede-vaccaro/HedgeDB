@@ -1,3 +1,5 @@
+// credits to https://github.com/mariusbancila/stduuid
+
 #ifndef STDUUID_H
 #define STDUUID_H
 
@@ -6,6 +8,7 @@
 #include <sstream>
 #include <iomanip>
 #include <array>
+
 #include <string_view>
 #include <iterator>
 #include <random>
