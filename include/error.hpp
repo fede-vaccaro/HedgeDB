@@ -18,6 +18,7 @@ namespace hedgehog
         VALUE_TABLE_NOT_ENOUGH_SPACE,
         KEY_NOT_FOUND,
         DELETED,
+        BUSY,
     };
 
     class error

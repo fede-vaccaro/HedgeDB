@@ -28,7 +28,7 @@ namespace hedgehog::db
 
         size_t keys_in_mem_before_flush = 2'000'000;           // default number of keys to push
         size_t num_partition_exponent = 10;                    // default partition exponent
-        double compactation_size_ratio = 0.2;                  // if during two way merge, rhs/lhs > 0.2, a compactation job is triggered
+        double compactation_size_ratio = 0.2;                  // if during two way merge, rhs/lhs > compactation_size_ratio, a compactation job is triggered
         size_t compactation_read_ahead_size_bytes = 16384;     // it will read from each table 16 KB at a time
         std::chrono::milliseconds compacation_timeout{120000}; // stop waiting if this timeout is due
         bool auto_compactation = true;                         // compactation is automatically triggered when the memtable reaches its limit
@@ -46,13 +46,14 @@ namespace hedgehog::db
         db_config _config;
 
         // persisted state
-        size_t _flush_iteration{0};
         using sorted_index_ptr_t = std::shared_ptr<hedgehog::db::sorted_index>;
         using sorted_indices_map_t = std::map<uint16_t, std::vector<sorted_index_ptr_t>>;
 
+        size_t _flush_iteration{0};
         std::mutex _sorted_index_mutex;
         sorted_indices_map_t _sorted_indices;
 
+        size_t _last_table_id{0};
         std::mutex _value_tables_mutex;
         std::unordered_map<uint32_t, std::shared_ptr<value_table>> _value_tables;
 
@@ -60,8 +61,13 @@ namespace hedgehog::db
         std::shared_ptr<value_table> _current_value_table;
         mem_index _mem_index;
 
-        // worker handling compactation and gc
-        async::worker async_worker;
+        // worker handling compaction and gc
+        async::worker compaction_worker;
+        async::worker gc_worker;
+
+        // they contain the new key->value_ptr mappings
+        std::mutex _gc_mem_indices_mutex;
+        std::vector<mem_index> _gc_mem_indices;
 
         // logger
         logger _logger{"database"};
@@ -86,9 +92,12 @@ namespace hedgehog::db
         database() = default;
 
         [[nodiscard]] size_t _find_matching_partition_for_key(const key_t& key) const;
+
         hedgehog::status _rotate_value_table();
         hedgehog::status _flush_mem_index();
         hedgehog::status _compactation_job(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor);
+        async::task<hedgehog::status> _garbage_collect_table(std::shared_ptr<value_table> table, size_t id, const std::shared_ptr<async::executor_context>& executor);
+        async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> _find_value_ptr_and_value_table(key_t key, const std::shared_ptr<async::executor_context>& executor);
     };
 
 } // namespace hedgehog::db
