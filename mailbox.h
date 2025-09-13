@@ -3,6 +3,7 @@
 #include <cassert>
 #include <coroutine>
 #include <liburing.h>
+#include <span>
 #include <variant>
 
 #include "mailbox_impl.h"
@@ -13,7 +14,7 @@ private:
     template <typename REQUEST_T>
     friend std::unique_ptr<mailbox> from_request(REQUEST_T&& request);
 
-    std::variant<read_mailbox> _mailbox_impl;
+    std::variant<read_mailbox, write_mailbox, multi_read_mailbox> _mailbox_impl;
 
 public:
     template <typename MAILBOX_T>
@@ -21,21 +22,27 @@ public:
     {
     }
 
-    bool prepare_sqes(io_uring* ring)
+    auto needed_sqes()
     {
-        return std::visit([ring](auto& impl)
-                          { return impl.prepare_sqes(ring); }, _mailbox_impl);
+        return std::visit([](auto& impl)
+                          { return impl.needed_sqes(); }, _mailbox_impl);
     }
 
-    bool handle_cqe(io_uring_cqe* cqe)
+    auto prepare_sqes(std::span<io_uring_sqe*> sqes)
     {
-        return std::visit([cqe](auto& impl)
-                          { return impl.handle_cqe(cqe); }, _mailbox_impl);
+        return std::visit([sqes](auto& impl)
+                          { return impl.prepare_sqes(sqes); }, _mailbox_impl);
     }
 
-    auto& get_response()
+    auto handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx)
     {
-        return std::visit([](auto& impl) -> auto&
+        return std::visit([cqe, sub_request_idx](auto& impl)
+                          { return impl.handle_cqe(cqe, sub_request_idx); }, _mailbox_impl);
+    }
+
+    void* get_response()
+    {
+        return std::visit([](auto& impl) -> void*
                           { return impl.get_response(); }, _mailbox_impl);
     }
 
@@ -45,13 +52,19 @@ public:
                    { impl.set_continuation(handle); }, _mailbox_impl);
     }
 
-    std::coroutine_handle<> get_continuation() const
+    auto get_continuation() const
     {
         return std::visit([](const auto& impl)
                           { return impl.continuation; }, _mailbox_impl);
     }
 
-    bool resume()
+    auto get_continuation_u64() const
+    {
+        return std::visit([](const auto& impl)
+                          { return reinterpret_cast<uint64_t>(impl.continuation.address()); }, _mailbox_impl);
+    }
+
+    auto resume()
     {
         return std::visit([](auto& impl)
                           { return impl.resume(); }, _mailbox_impl);
@@ -81,7 +94,7 @@ struct awaitable_mailbox
 
     auto await_resume() noexcept
     {
-        return std::move(mbox.get_response());
+        return std::move(*reinterpret_cast<RESPONSE_T*>(mbox.get_response()));
     }
 
     awaitable_mailbox(auto& m) : mbox(m)
