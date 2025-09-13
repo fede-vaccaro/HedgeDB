@@ -93,6 +93,16 @@ namespace hedgehog::db
 
         auto write_result = maybe_write_result.value();
 
+        // check infos
+        auto expected_info = value_table_info{
+            .current_offset = write_result.offset + write_result.size,
+            .items_count = 1,
+            .occupied_space = value.size() + sizeof(file_header),
+            .deleted_count = 0,
+            .freed_space = 0};
+        auto info = table.info();
+        EXPECT_EQ(info, expected_info);
+
         auto read_result = this->_executor->sync_submit(
             table.read_async(write_result.offset, write_result.size, this->_executor));
 
@@ -138,6 +148,16 @@ namespace hedgehog::db
             reservations.push_back(reservation.value());
             keys.push_back(key);
             write_results.push_back(maybe_write_result.value());
+
+            // check infos
+            auto expected_info = value_table_info{
+                .current_offset = write_results.back().offset + write_results.back().size,
+                .items_count = i + 1,
+                .occupied_space = (i + 1) * (payload_size + sizeof(file_header)),
+                .deleted_count = 0,
+                .freed_space = 0};
+            auto info = table.info();
+            EXPECT_EQ(info, expected_info);
         }
 
         // now asking for a reservation will result in an error
@@ -184,9 +204,15 @@ namespace hedgehog::db
 
         auto write_result = maybe_write_result.value();
 
-        // close the table
-        // auto close_status = table.close_writes();
-        // ASSERT_TRUE(close_status) << "An error occurred while closing the table: " << close_status.error().to_string();
+        // check infos
+        auto expected_info = value_table_info{
+            .current_offset = write_result.offset + write_result.size,
+            .items_count = 1,
+            .occupied_space = value.size() + sizeof(file_header),
+            .deleted_count = 0,
+            .freed_space = 0};
+        auto info = table.info();
+        EXPECT_EQ(info, expected_info);
 
         // try to read from the closed table
         auto read_result = this->_executor->sync_submit(
@@ -227,7 +253,7 @@ namespace hedgehog::db
         ASSERT_TRUE(maybe_write_result.has_value()) << "An error occurred while writing to the table: " << maybe_write_result.error().to_string();
 
         // try to reopen the table without closing it
-        auto reopen_maybe_table = value_table::load(table.fd().path(), fs::file_descriptor::open_mode::read_write, table.current_offset());
+        auto reopen_maybe_table = value_table::load(table.fd().path(), fs::file_descriptor::open_mode::read_write);
         ASSERT_TRUE(reopen_maybe_table.has_value()) << "An error occurred while reopening the table: " << reopen_maybe_table.error().to_string();
 
         // write again to the reopened table
@@ -257,6 +283,189 @@ namespace hedgehog::db
 
         ASSERT_TRUE(new_read_result.has_value()) << "An error occurred while reading from the reopened table: " << new_read_result.error().to_string();
         check_read_result(new_read_result.value(), new_key, new_value);
+    }
+
+    TEST_F(value_table_test, test_delete)
+    {
+        auto maybe_table = value_table::make_new(this->_base_path, 23);
+
+        ASSERT_TRUE(maybe_table.has_value()) << "An error occurred while creating the table: " << maybe_table.error().to_string();
+
+        auto table = std::move(maybe_table.value());
+
+        ASSERT_EQ(table.id(), 23);
+
+        size_t payload_size = 1024;
+
+        std::vector<std::vector<uint8_t>> values;
+        std::vector<value_table::write_reservation> reservations;
+        std::vector<key_t> keys;
+        std::vector<hedgehog::value_ptr_t> write_results;
+
+        auto constexpr N_ITEMS = 10;
+
+        for(auto i = 0UL; i < N_ITEMS; ++i)
+        {
+            auto value = this->make_random_vec(payload_size);
+            auto reservation = table.get_write_reservation(value.size());
+
+            ASSERT_TRUE(reservation.has_value()) << "An error occurred while reserving space for writing: " << reservation.error().to_string();
+
+            auto key = this->generate_uuid();
+
+            auto maybe_write_result = this->_executor->sync_submit(
+                table.write_async(key,
+                                  value,
+                                  reservation.value(),
+                                  this->_executor));
+
+            ASSERT_TRUE(maybe_write_result.has_value()) << "An error occurred while writing to the table: " << maybe_write_result.error().to_string();
+
+            values.push_back(std::move(value));
+            reservations.push_back(reservation.value());
+            keys.push_back(key);
+            write_results.push_back(maybe_write_result.value());
+
+            // check infos
+            auto expected_info = value_table_info{
+                .current_offset = write_results.back().offset + write_results.back().size,
+                .items_count = i + 1,
+                .occupied_space = (i + 1) * (payload_size + sizeof(file_header)),
+                .deleted_count = 0,
+                .freed_space = 0};
+            auto info = table.info();
+            EXPECT_EQ(info, expected_info);
+        }
+
+        // delete entry 3 and 7
+        auto status = this->_executor->sync_submit(table.delete_async(keys[3], write_results[3].offset, this->_executor));
+        ASSERT_TRUE(status) << "An error occurred on deletion: " << status.error().to_string();
+
+        status = this->_executor->sync_submit(table.delete_async(keys[7], write_results[7].offset, this->_executor));
+        ASSERT_TRUE(status) << "An error occurred on deletion: " << status.error().to_string();
+
+        // test readback
+        for(size_t i = 0; i < values.size(); ++i)
+        {
+            auto read_result = this->_executor->sync_submit(
+                table.read_async(write_results[i].offset, write_results[i].size, this->_executor));
+
+            if(i == 3 || i == 7)
+            {
+                ASSERT_FALSE(read_result);
+                ASSERT_EQ(read_result.error().code(), errc::DELETED);
+                continue;
+            }
+
+            ASSERT_TRUE(read_result.has_value()) << "An error occurred while reading from the table: " << read_result.error().to_string();
+
+            check_read_result(read_result.value(), keys[i], values[i]);
+        }
+    }
+
+    TEST_F(value_table_test, test_iterate_after_delete)
+    {
+        auto maybe_table = value_table::make_new(this->_base_path, 23);
+
+        ASSERT_TRUE(maybe_table.has_value()) << "An error occurred while creating the table: " << maybe_table.error().to_string();
+
+        auto table = std::move(maybe_table.value());
+
+        ASSERT_EQ(table.id(), 23);
+
+        size_t payload_size = 1024;
+
+        std::vector<std::vector<uint8_t>> values;
+        std::vector<value_table::write_reservation> reservations;
+        std::vector<key_t> keys;
+        std::vector<hedgehog::value_ptr_t> write_results;
+
+        auto constexpr N_ITEMS = 10;
+
+        for(auto i = 0UL; i < N_ITEMS; ++i)
+        {
+            auto value = this->make_random_vec(payload_size);
+            auto reservation = table.get_write_reservation(value.size());
+
+            ASSERT_TRUE(reservation.has_value()) << "An error occurred while reserving space for writing: " << reservation.error().to_string();
+
+            auto key = this->generate_uuid();
+
+            auto maybe_write_result = this->_executor->sync_submit(
+                table.write_async(key,
+                                  value,
+                                  reservation.value(),
+                                  this->_executor));
+
+            ASSERT_TRUE(maybe_write_result.has_value()) << "An error occurred while writing to the table: " << maybe_write_result.error().to_string();
+
+            values.push_back(std::move(value));
+            reservations.push_back(reservation.value());
+            keys.push_back(key);
+            write_results.push_back(maybe_write_result.value());
+
+            // check infos
+            auto expected_info = value_table_info{
+                .current_offset = write_results.back().offset + write_results.back().size,
+                .items_count = i + 1,
+                .occupied_space = (i + 1) * (payload_size + sizeof(file_header)),
+                .deleted_count = 0,
+                .freed_space = 0};
+            auto info = table.info();
+            EXPECT_EQ(info, expected_info);
+        }
+
+        // delete entry 3 and 7
+        auto status = this->_executor->sync_submit(table.delete_async(keys[3], write_results[3].offset, this->_executor));
+        ASSERT_TRUE(status) << "An error occurred on deletion: " << status.error().to_string();
+
+        // check infos after first deletion
+        auto info = table.info();
+        EXPECT_EQ(info.deleted_count, 1);
+        EXPECT_EQ(info.freed_space, write_results[3].size);
+
+        status = this->_executor->sync_submit(table.delete_async(keys[7], write_results[7].offset, this->_executor));
+        ASSERT_TRUE(status) << "An error occurred on deletion: " << status.error().to_string();
+
+        // check infos after second deletion
+        info = table.info();
+        EXPECT_EQ(info.deleted_count, 2);
+        EXPECT_EQ(info.freed_space, write_results[3].size + write_results[7].size);
+
+        auto count = 0;
+
+        size_t offset = write_results.front().offset;
+        size_t size = write_results.front().size;
+
+        std::vector<std::vector<uint8_t>> readback_values;
+
+        // test readback
+        while(true)
+        {
+            auto maybe_read_result = this->_executor->sync_submit(
+                table.read_file_and_next_header_async(offset, size, this->_executor));
+
+            ASSERT_TRUE(maybe_read_result.has_value()) << "An error occurred while reading from the table: " << maybe_read_result.error().to_string() << " at iteration " << count;
+
+            auto& read_result = maybe_read_result.value();
+
+            readback_values.push_back(std::move(read_result.first.binaries));
+
+            std::tie(offset, size) = read_result.second;
+
+            count++;
+
+            if(offset == std::numeric_limits<size_t>::max() && size == 0)
+                break;
+        }
+
+        EXPECT_EQ(count, N_ITEMS - 2) << "Expected to read " << (N_ITEMS - 2) << " items, but got " << count;
+
+        // check that deleted entries are not in the read values
+        values.erase(values.begin() + 7);
+        values.erase(values.begin() + 3);
+
+        EXPECT_EQ(values, readback_values) << "Read values do not match expected values after deletion";
     }
 
 } // namespace hedgehog::db
