@@ -17,6 +17,7 @@ namespace hedgehog
         GENERIC_ERROR = 0,
         VALUE_TABLE_NOT_ENOUGH_SPACE,
         KEY_NOT_FOUND,
+        DELETED,
     };
 
     class error

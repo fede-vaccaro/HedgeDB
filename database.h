@@ -75,7 +75,7 @@ namespace hedgehog::db
         async::task<hedgehog::status> put_async(key_t key, byte_buffer_t&& value, const std::shared_ptr<async::executor_context>& executor);
 
         async::task<hedgehog::status> remove_async(key_t key, const std::shared_ptr<async::executor_context>& executor);
-        hedgehog::status compact_sorted_indices(bool wait_sync, bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor);
+        std::future<hedgehog::status> compact_sorted_indices(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor);
 
         static expected<std::shared_ptr<database>> make_new(const std::filesystem::path& base_path, const db_config& config);
         static expected<std::shared_ptr<database>> load(const std::filesystem::path& base_path);
