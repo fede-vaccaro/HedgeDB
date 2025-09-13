@@ -242,7 +242,7 @@ namespace hedgehog::async
 
         std::string path;
         int32_t flags;
-        mode_t mode{777};
+        mode_t mode{0777};
     };
 
     struct open_response
@@ -253,7 +253,7 @@ namespace hedgehog::async
 
     struct open_mailbox : mailbox_base<open_mailbox>
     {
-        open_mailbox(open_request req) {}
+        open_mailbox(open_request req): request(std::move(req)) {}
 
         open_request request;
         open_response response;

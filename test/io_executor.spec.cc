@@ -153,9 +153,16 @@ TEST_F(test_executor, test_multi_read)
     ASSERT_EQ(std::string(response.responses[1].data.get(), response.responses[1].data.get() + response.responses[1].bytes_read), ", World!") << "Second read content mismatch";
 }
 
-
 TEST_F(test_executor, test_open_fallocate_write)
 {
+    std::filesystem::remove("/tmp/test_file"); // to be sure
+
+    auto fd = openat(AT_FDCWD, "/tmp/test_file", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    ASSERT_GE(fd, 0) << "Normal open() failed: " << strerror(errno);
+    write(fd, "Hello, World!", 13);
+    close(fd);
+    SUCCEED();
+
     auto promise = std::promise<int32_t>{};
     auto future = promise.get_future();
 
@@ -167,17 +174,17 @@ TEST_F(test_executor, test_open_fallocate_write)
 
         if(response.error_code < 0)
         {
-            promise.set_value(-1);
+            promise.set_value(response.error_code);
             co_return;
         }
 
         std::string input_data = "Hello, World!";
 
-        auto fallocate_response = co_await this->_executor->submit_request(fallocate_request{response.file_descriptor, 0, 0, input_data.size()}); 
+        auto fallocate_response = co_await this->_executor->submit_request(fallocate_request{response.file_descriptor, 0, 0, input_data.size()});
 
         if(fallocate_response.error_code < 0)
         {
-            promise.set_value(-1);
+            promise.set_value(fallocate_response.error_code);
             co_return;
         }
 
@@ -187,17 +194,18 @@ TEST_F(test_executor, test_open_fallocate_write)
 
         if(write_response.error_code < 0)
         {
-            promise.set_value(-1);
+            promise.set_value(write_response.error_code);
             co_return;
         }
 
         promise.set_value(0);
-
     };
 
     this->_executor->submit_io_task(task());
 
     auto response = future.get();
+
+    ASSERT_EQ(response, 0) << "Failed to open, fallocate or write to file: " << strerror(-response);
 
     std::ifstream file("/tmp/test_file", std::ios::binary);
     ASSERT_TRUE(file.is_open()) << "Failed to open file for reading: " << strerror(errno);

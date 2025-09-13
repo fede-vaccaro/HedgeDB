@@ -36,8 +36,8 @@ set(DB_SOURCES
     index.cc
     index.h
     fs.hpp
-    paginated_view.cc
-    paginated_view.h
+    file_reader.cc
+    file_reader.h
 )
 
 ## io_executor files
@@ -70,5 +70,5 @@ add_executable(index_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index.spec.cc)
 target_link_libraries(index_test gtest gtest_main uring)
 
 # paginated_view tests
-add_executable(paginated_view_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/paginated_view.spec.cc)
-target_link_libraries(paginated_view_test uring gtest gtest_main)
+add_executable(file_reader_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/file_reader.spec.cc)
+target_link_libraries(file_reader_test uring gtest gtest_main)

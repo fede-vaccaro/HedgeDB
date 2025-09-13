@@ -13,6 +13,7 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <logger.h>
 
@@ -40,6 +41,8 @@ namespace hedgehog::async
         std::condition_variable _cv;
         std::mutex _pending_requests_mutex;
         std::deque<task<void>> _pending_requests;
+
+        std::vector<int32_t> _registered_fds;
 
     public:
         executor_context() = default;
@@ -83,6 +86,8 @@ namespace hedgehog::async
 
             return awaitable;
         }
+
+        void register_fd(int32_t fd);
 
     private:
         void _submit_sqe();

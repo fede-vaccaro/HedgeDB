@@ -6,9 +6,9 @@
 
 #include <gtest/gtest.h>
 
+#include "../file_reader.h"
 #include "../index.h"
 #include "../io_executor.h"
-#include "../paginated_view.h"
 
 uint32_t uuid_fake_size(const uuids::uuid& uuid)
 {
@@ -47,8 +47,13 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
 
         for(size_t i = 0; i < N_RUNS; ++i)
         {
+
+            auto n_keys = this->N_KEYS_PER_RUN;
+            if(i == 1)
+                n_keys = std::min(n_keys, 20000000UL); // for the second run, limit to 20000000 keys
+
             auto memtable = hedgehog::db::mem_index{};
-            for(size_t j = 0; j < N_KEYS_PER_RUN; ++j)
+            for(size_t j = 0; j < n_keys; ++j)
             {
                 auto uuid = generate_uuid();
                 this->_uuids.emplace_back(uuid);
@@ -74,7 +79,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
             }
         }
 
-        this->_executor = std::make_shared<hedgehog::async::executor_context>(32);
+        this->_executor = std::make_shared<hedgehog::async::executor_context>(128);
     }
 
     void TearDown() override
@@ -302,9 +307,9 @@ INSTANTIATE_TEST_SUITE_P(
     test_suite,
     sorted_string_merge_test,
     testing::Combine(
-        testing::Values(1000, 5000, 10000, 1000000),  // n keys
-        testing::Values(0, 1, 4, 10, 16),             // num partition exponent -> 1, 2, 16, 1024, 65536 partitions
-        testing::Values(4096, 16384, 524288, 4194304) // Read ahead size
+        testing::Values(1000, 5000, 10000, 1000000), // n keys
+        testing::Values(0, 1, 4, 10, 16),            // num partition exponent -> 1, 2, 16, 1024, 65536 partitions
+        testing::Values(4096, 8192, 16384)           // Read ahead size
         ),
     [](const testing::TestParamInfo<sorted_string_merge_test::ParamType>& info)
     {

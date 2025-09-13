@@ -11,6 +11,9 @@
 
 #include <error.hpp>
 
+#include "io_executor.h"
+#include "mailbox_impl.h"
+#include "task.h"
 namespace hedgehog::fs
 {
 
@@ -26,17 +29,22 @@ namespace hedgehog::fs
 
     class file_descriptor
     {
-        int _fd = -1;
-        size_t _file_size{};
-        std::filesystem::path _path;
-
     public:
-        enum class open_mode
+        enum class open_mode : int32_t
         {
+            undefined = -1,
             read_only = O_RDONLY,
             write_new = O_WRONLY | O_CREAT | O_TRUNC,
         };
 
+    private:
+        int _fd = -1;
+        size_t _file_size{};
+        std::filesystem::path _path;
+        open_mode _mode{open_mode::undefined};
+        bool _use_direct{false};
+
+    public:
         [[nodiscard]] int get() const
         {
             return this->_fd;
@@ -52,9 +60,18 @@ namespace hedgehog::fs
             return this->_path;
         }
 
+        [[nodiscard]] open_mode mode() const
+        {
+            return this->_mode;
+        }
+
+        [[nodiscard]] bool use_direct() const
+        {
+            return this->_use_direct;
+        }
+
         static hedgehog::expected<file_descriptor> from_path(const std::filesystem::path& path, open_mode mode, bool use_direct = false, std::optional<size_t> expected_size = std::nullopt)
         {
-
             auto exists = std::filesystem::exists(path);
 
             if(!exists && mode == open_mode::read_only)
@@ -98,13 +115,88 @@ namespace hedgehog::fs
             fd_wrapped._fd = fd;
             fd_wrapped._file_size = file_size;
             fd_wrapped._path = path;
+            fd_wrapped._mode = mode;
+            fd_wrapped._use_direct = use_direct;
 
             return std::move(fd_wrapped);
         }
 
+        static async::task<hedgehog::expected<file_descriptor>> from_path_async(const std::filesystem::path& path, open_mode mode, std::shared_ptr<async::executor_context> executor, bool use_direct = false, std::optional<size_t> expected_size = std::nullopt)
+        {
+            // auto exists = std::filesystem::exists(path);
+            auto stats = co_await executor->submit_request(async::file_info_request{
+                .path = path.string()});
+
+            if(!stats.exists && mode == open_mode::read_only)
+                co_return hedgehog::error("File does not exist: " + path.string());
+
+            if(stats.exists && mode == open_mode::write_new)
+                co_return hedgehog::error("File already exists: " + path.string());
+
+            // Open the file;
+            auto flags = static_cast<int32_t>(mode);
+            if(use_direct)
+                flags |= O_DIRECT;
+
+            auto open_retvalue = co_await executor->submit_request(async::open_request{
+                .path = path.string(),
+                .flags = flags,
+                .mode = 0777});
+
+            if(open_retvalue.error_code < 0)
+                co_return hedgehog::error("Failed to open file descriptor: " + std::string(strerror(-open_retvalue.error_code)));
+
+            int fd = open_retvalue.file_descriptor;
+
+            size_t file_size = stats.file_size;
+
+            if(mode == open_mode::read_only && expected_size.has_value() && file_size != expected_size.value())
+                co_return hedgehog::error("File size different than expected: " + std::to_string(file_size) + " != " + std::to_string(expected_size.value()));
+            if(mode == open_mode::write_new && expected_size.has_value() && file_size > expected_size.value())
+            {
+                auto res = co_await executor->submit_request(async::fallocate_request{
+                    .fd = fd,
+                    .mode = 0,
+                    .offset = 0,
+                    .length = expected_size.value()});
+
+                if(res.error_code)
+                {
+                    auto err = std::string(strerror(-res.error_code));
+                    co_return hedgehog::error("Failed to allocate space for file: " + err);
+
+                    std::filesystem::remove(path); // todo: implement mailbox based remove function
+
+                    auto close_result = co_await executor->submit_request(async::close_request{fd});
+
+                    if(close_result.error_code)
+                    {
+                        auto err = std::string(strerror(-close_result.error_code));
+                        co_return hedgehog::error("Failed to close file descriptor after fallocate failure: " + err);
+                    }
+
+                    co_return hedgehog::error("Failed to allocate space for file: " + err);
+                }
+            }
+
+            file_descriptor fd_wrapped{};
+
+            fd_wrapped._fd = fd;
+            fd_wrapped._file_size = file_size;
+            fd_wrapped._path = path;
+            fd_wrapped._mode = mode;
+            fd_wrapped._use_direct = use_direct;
+
+            co_return std::move(fd_wrapped);
+        }
+
         file_descriptor() = default;
 
-        file_descriptor(file_descriptor&& other) : _fd(std::exchange(other._fd, -1)), _file_size(std::exchange(other._file_size, 0)), _path(std::move(other._path))
+        file_descriptor(file_descriptor&& other) : _fd(std::exchange(other._fd, -1)),
+                                                   _file_size(std::exchange(other._file_size, 0)),
+                                                   _path(std::move(other._path)),
+                                                   _mode(std::exchange(other._mode, open_mode::undefined)),
+                                                   _use_direct(std::exchange(other._use_direct, false))
         {
         }
 
