@@ -45,6 +45,27 @@ namespace hedgehog::async
         return true;
     }
 
+    void unaligned_read_mailbox::prepare_sqes(std::span<io_uring_sqe*> sqes)
+    {
+        io_uring_sqe* sqe = sqes.front();
+
+        this->response = {
+            .data = std::vector<uint8_t>(request.size),
+            .bytes_read = 0};
+
+        io_uring_prep_read(sqe, this->request.fd, this->response.data.data(), this->request.size, this->request.offset);
+    }
+
+    bool unaligned_read_mailbox::handle_cqe(io_uring_cqe* cqe, uint8_t /* sub_request_idx */)
+    {
+        if(cqe->res < 0)
+            this->response.error_code = cqe->res;
+        else
+            this->response.bytes_read = cqe->res;
+
+        return true;
+    }
+
     void write_mailbox::prepare_sqes(std::span<io_uring_sqe*> sqes)
     {
         io_uring_sqe* sqe = sqes.front();
@@ -162,6 +183,21 @@ namespace hedgehog::async
 
         this->response.exists = true;
         this->response.file_size = this->_statx_buf.stx_size;
+
+        return true;
+    }
+
+    void fsync_mailbox::prepare_sqes(std::span<io_uring_sqe*> sqes)
+    {
+        auto* sqe = sqes.front();
+
+        io_uring_prep_fsync(sqe, this->request.fd, 0);
+    }
+
+    bool fsync_mailbox::handle_cqe(io_uring_cqe* cqe, uint8_t /* sub_request_idx */)
+    {
+        if(cqe->res < 0)
+            this->response.error_code = cqe->res;
 
         return true;
     }
