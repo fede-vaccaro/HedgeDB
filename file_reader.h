@@ -16,14 +16,14 @@ namespace hedgehog::async
 
     class file_reader
     {
-        fs::file_descriptor& _fd;
+        const fs::file_descriptor& _fd;
         file_reader_config _config;
         size_t _current_offset{0};
 
         std::shared_ptr<async::executor_context> _executor;
 
     public:
-        file_reader(fs::file_descriptor& fd, const file_reader_config& config, std::shared_ptr<async::executor_context> executor);
+        file_reader(const fs::file_descriptor& fd, const file_reader_config& config, std::shared_ptr<async::executor_context> executor);
 
         async::task<expected<std::vector<uint8_t>>> next(size_t num_bytes, bool clamp_at_end = true);
 

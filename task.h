@@ -58,7 +58,9 @@ namespace hedgehog::async
             this->_value = new(this->_data) RETURN_VALUE{std::move(value)};
         }
 
-        void unhandled_exception() {}
+        void unhandled_exception() {
+            throw;
+        }
     };
 
     template <typename TASK>
