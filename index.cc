@@ -20,7 +20,7 @@
 #include "task.h"
 #include "uuid.h"
 
-namespace hedgehog::db
+namespace hedge::db
 {
 
     struct footer_builder
@@ -34,31 +34,31 @@ namespace hedgehog::db
         std::optional<uint64_t> meta_index_end_offset{};
         std::optional<uint64_t> footer_start_offset{};
 
-        hedgehog::expected<sorted_index_footer> build()
+        hedge::expected<sorted_index_footer> build()
         {
             if(!this->upper_bound.has_value())
-                return hedgehog::error("Footer upper_bound not set");
+                return hedge::error("Footer upper_bound not set");
 
             if(!this->indexed_keys.has_value())
-                return hedgehog::error("Footer indexed_keys not set");
+                return hedge::error("Footer indexed_keys not set");
 
             if(!this->meta_index_entries.has_value())
-                return hedgehog::error("Footer meta_index_entries not set");
+                return hedge::error("Footer meta_index_entries not set");
 
             if(!this->index_start_offset.has_value())
-                return hedgehog::error("Footer index_start_offset not set");
+                return hedge::error("Footer index_start_offset not set");
 
             if(!this->index_end_offset.has_value())
-                return hedgehog::error("Footer index_end_offset not set");
+                return hedge::error("Footer index_end_offset not set");
 
             if(!this->meta_index_start_offset.has_value())
-                return hedgehog::error("Footer meta_index_start_offset not set");
+                return hedge::error("Footer meta_index_start_offset not set");
 
             if(!this->meta_index_end_offset.has_value())
-                return hedgehog::error("Footer meta_index_end_offset not set");
+                return hedge::error("Footer meta_index_end_offset not set");
 
             if(!this->footer_start_offset.has_value())
-                return hedgehog::error("Footer footer_start_offset not set");
+                return hedge::error("Footer footer_start_offset not set");
 
             return sorted_index_footer{
                 .upper_bound = this->upper_bound.value(),
@@ -132,10 +132,10 @@ namespace hedgehog::db
         return index_sorted;
     }
 
-    hedgehog::expected<std::vector<sorted_index>> index_ops::flush_mem_index(const std::filesystem::path& base_path, std::vector<mem_index>&& indices, size_t num_partition_exponent, size_t flush_iteration)
+    hedge::expected<std::vector<sorted_index>> index_ops::flush_mem_index(const std::filesystem::path& base_path, std::vector<mem_index>&& indices, size_t num_partition_exponent, size_t flush_iteration)
     {
         if(num_partition_exponent > 16)
-            return hedgehog::error("Number of partitions exponent must be less than or equal to 16");
+            return hedge::error("Number of partitions exponent must be less than or equal to 16");
 
         size_t num_space_partitions = 1 << num_partition_exponent; // 2^num_partition_exponent
 
@@ -146,7 +146,7 @@ namespace hedgehog::db
         std::vector<sorted_index> sorted_indices{};
         std::vector<index_key_t> current_index{};
 
-        size_t current_partition = hedgehog::find_partition_prefix_for_key(index_sorted[0].key, partition_size);
+        size_t current_partition = hedge::find_partition_prefix_for_key(index_sorted[0].key, partition_size);
 
         // todo: upon error, the db might end in undefined state
 
@@ -158,7 +158,7 @@ namespace hedgehog::db
 
             size_t next_partition{};
             bool last_entry_for_partition =
-                (it + 1 == index_sorted.end()) || (next_partition = hedgehog::find_partition_prefix_for_key((it + 1)->key, partition_size)) != current_partition;
+                (it + 1 == index_sorted.end()) || (next_partition = hedge::find_partition_prefix_for_key((it + 1)->key, partition_size)) != current_partition;
 
             if(last_entry_for_partition)
             {
@@ -216,7 +216,7 @@ namespace hedgehog::db
         return std::distance(this->_meta_index.begin(), it);
     }
 
-    hedgehog::expected<std::optional<value_ptr_t>> sorted_index::lookup(const key_t& key) const
+    hedge::expected<std::optional<value_ptr_t>> sorted_index::lookup(const key_t& key) const
     {
         auto maybe_page_id = this->_find_page_id(key);
 
@@ -299,7 +299,7 @@ namespace hedgehog::db
                 offset,
                 this->path().string(),
                 strerror(response.error_code));
-            co_return hedgehog::error(err_msg);
+            co_return hedge::error(err_msg);
         }
 
         if(response.bytes_read != PAGE_SIZE_IN_BYTES)
@@ -310,7 +310,7 @@ namespace hedgehog::db
                 PAGE_SIZE_IN_BYTES,
                 this->path().string(),
                 offset);
-            co_return hedgehog::error(err_msg);
+            co_return hedge::error(err_msg);
         }
 
         co_return std::move(response.data);
@@ -331,12 +331,12 @@ namespace hedgehog::db
         return std::nullopt;
     }
 
-    async::task<hedgehog::status> sorted_index::_update_in_page(const index_key_t& entry, size_t page_id, const index_key_t* start, const index_key_t* end, const std::shared_ptr<async::executor_context>& executor)
+    async::task<hedge::status> sorted_index::_update_in_page(const index_key_t& entry, size_t page_id, const index_key_t* start, const index_key_t* end, const std::shared_ptr<async::executor_context>& executor)
     {
         const auto* it = std::lower_bound(start, end, index_key_t{.key = entry.key, .value_ptr = {}});
 
         if(it == end || it->key != entry.key)
-            co_return hedgehog::error("Key not found", errc::KEY_NOT_FOUND);
+            co_return hedge::error("Key not found", errc::KEY_NOT_FOUND);
 
         const auto* entry_ptr = reinterpret_cast<const uint8_t*>(&entry);
 
@@ -348,21 +348,21 @@ namespace hedgehog::db
         });
 
         if(write_response.error_code != 0)
-            co_return hedgehog::error("An error occurred while updating an index entry: " + std::string(strerror(-write_response.error_code)));
+            co_return hedge::error("An error occurred while updating an index entry: " + std::string(strerror(-write_response.error_code)));
 
-        co_return hedgehog::ok();
+        co_return hedge::ok();
     }
 
-    async::task<hedgehog::status> sorted_index::try_update_async(const index_key_t& entry, const std::shared_ptr<async::executor_context>& executor)
+    async::task<hedge::status> sorted_index::try_update_async(const index_key_t& entry, const std::shared_ptr<async::executor_context>& executor)
     {
         std::unique_lock<std::mutex> lock(*this->_compaction_mutex, std::try_to_lock); // try to acquire
 
         if(!lock.owns_lock())
-            co_return hedgehog::error("Busy, index is being compacted", errc::BUSY);
+            co_return hedge::error("Busy, index is being compacted", errc::BUSY);
 
         auto maybe_page_id = this->_find_page_id(entry.key);
         if(!maybe_page_id)
-            co_return hedgehog::error("Not found", errc::KEY_NOT_FOUND);
+            co_return hedge::error("Not found", errc::KEY_NOT_FOUND);
 
         auto page_id = maybe_page_id.value();
 
@@ -391,10 +391,10 @@ namespace hedgehog::db
         this->_index = std::vector<index_key_t>{};
     }
 
-    hedgehog::status sorted_index::load_index()
+    hedge::status sorted_index::load_index()
     {
         if(!this->_index.empty())
-            return hedgehog::ok(); // already loaded
+            return hedge::ok(); // already loaded
 
         auto mmap = fs::non_owning_mmap::from_fd_wrapper(*this);
 
@@ -405,7 +405,7 @@ namespace hedgehog::db
 
         this->_index.assign(mmap_ptr, mmap_ptr + this->_footer.indexed_keys);
 
-        return hedgehog::ok();
+        return hedge::ok();
     }
 
     sorted_index::sorted_index(fs::file fd, std::vector<index_key_t> index, std::vector<meta_index_entry> meta_index, sorted_index_footer footer)
@@ -474,10 +474,10 @@ namespace hedgehog::db
         ofs.read(reinterpret_cast<char*>(allocated_data.data()), static_cast<std::streamsize>(allocated_data.size() * sizeof(T)));
     }
 
-    hedgehog::expected<sorted_index> index_ops::save_as_sorted_index(const std::filesystem::path& path, std::vector<index_key_t>&& sorted_keys, size_t upper_bound, bool merge_with_existent)
+    hedge::expected<sorted_index> index_ops::save_as_sorted_index(const std::filesystem::path& path, std::vector<index_key_t>&& sorted_keys, size_t upper_bound, bool merge_with_existent)
     {
         if(merge_with_existent)
-            return hedgehog::error("Merging with existing sorted index is not supported yet");
+            return hedge::error("Merging with existing sorted index is not supported yet");
 
         auto meta_index = create_meta_index(sorted_keys);
 
@@ -489,7 +489,7 @@ namespace hedgehog::db
             std::ofstream ofs_sorted_index(path, std::ios::binary);
 
             if(!ofs_sorted_index.good())
-                return hedgehog::error("Failed to open sorted index file for writing: " + path.string());
+                return hedge::error("Failed to open sorted index file for writing: " + path.string());
 
             auto [end_of_index, end_of_index_padding] = write_to(ofs_sorted_index, sorted_keys, true);
 
@@ -511,7 +511,7 @@ namespace hedgehog::db
             write_to(ofs_sorted_index, footer, false);
 
             if(!ofs_sorted_index.good())
-                return hedgehog::error("Failed to write sorted index file: " + path.string());
+                return hedge::error("Failed to write sorted index file: " + path.string());
 
             // std::cout << "Sorted index saved to: " << path.string() << std::endl;
         }
@@ -523,21 +523,21 @@ namespace hedgehog::db
         return ss;
     }
 
-    hedgehog::expected<sorted_index> index_ops::load_sorted_index(const std::filesystem::path& path, bool load_index)
+    hedge::expected<sorted_index> index_ops::load_sorted_index(const std::filesystem::path& path, bool load_index)
     {
         if(!std::filesystem::exists(path))
-            return hedgehog::error("Sorted index file does not exist: " + path.string());
+            return hedge::error("Sorted index file does not exist: " + path.string());
 
         auto fd_res = fs::file::from_path(path, fs::file::open_mode::read_only, false, std::nullopt);
 
         if(!fd_res.has_value())
-            return hedgehog::error("Failed to open sorted index file: " + fd_res.error().to_string());
+            return hedge::error("Failed to open sorted index file: " + fd_res.error().to_string());
 
         // read footer first
         std::ifstream ifs(path, std::ios::binary);
 
         if(!ifs.good())
-            return hedgehog::error("Failed to open sorted index file for reading: " + path.string());
+            return hedge::error("Failed to open sorted index file for reading: " + path.string());
 
         ifs.seekg(-static_cast<std::streamoff>(sizeof(sorted_index_footer)), std::ios::end);
 
@@ -545,7 +545,7 @@ namespace hedgehog::db
         read_from(ifs, footer);
 
         if(!ifs.good())
-            return hedgehog::error("Failed to read sorted index footer: " + path.string());
+            return hedge::error("Failed to read sorted index footer: " + path.string());
 
         std::vector<meta_index_entry> meta_index(footer.meta_index_entries);
 
@@ -554,7 +554,7 @@ namespace hedgehog::db
         read_from(ifs, meta_index);
 
         if(!ifs.good())
-            return hedgehog::error("Failed to read sorted index meta index: " + path.string());
+            return hedge::error("Failed to read sorted index meta index: " + path.string());
 
         auto ss = sorted_index(std::move(fd_res.value()), {}, std::move(meta_index), footer);
 
@@ -563,7 +563,7 @@ namespace hedgehog::db
 
         // read index if requested
         if(auto status = ss.load_index(); !status)
-            return hedgehog::error("Failed to load sorted index: " + status.error().to_string());
+            return hedge::error("Failed to load sorted index: " + status.error().to_string());
 
         return ss;
     }
@@ -577,23 +577,23 @@ namespace hedgehog::db
         return {index_end_pos - padding, index_end_pos};
     }
 
-    async::task<hedgehog::expected<sorted_index>> index_ops::two_way_merge_async(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor)
+    async::task<hedge::expected<sorted_index>> index_ops::two_way_merge_async(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor)
     {
         std::unique_lock lk_left(*left._compaction_mutex);
         std::unique_lock lk_right(*right._compaction_mutex);
 
         if(config.read_ahead_size < PAGE_SIZE_IN_BYTES)
-            co_return hedgehog::error("Read ahead size must be at least one page size");
+            co_return hedge::error("Read ahead size must be at least one page size");
 
         if(config.read_ahead_size % PAGE_SIZE_IN_BYTES != 0)
-            co_return hedgehog::error("Read ahead size must be page aligned (page size: " + std::to_string(PAGE_SIZE_IN_BYTES) + ")");
+            co_return hedge::error("Read ahead size must be page aligned (page size: " + std::to_string(PAGE_SIZE_IN_BYTES) + ")");
 
         if(left._footer.version != sorted_index_footer::CURRENT_FOOTER_VERSION ||
            right._footer.version != sorted_index_footer::CURRENT_FOOTER_VERSION)
-            co_return hedgehog::error("Cannot merge sorted indices with different versions");
+            co_return hedge::error("Cannot merge sorted indices with different versions");
 
         if(left._footer.upper_bound != right._footer.upper_bound)
-            co_return hedgehog::error("Cannot merge sorted indices with different upper bounds");
+            co_return hedge::error("Cannot merge sorted indices with different upper bounds");
 
         footer_builder footer_builder;
         footer_builder.upper_bound = left._footer.upper_bound;
@@ -621,7 +621,7 @@ namespace hedgehog::db
         auto fd_maybe = co_await fs::file::from_path_async(new_path, fs::file::open_mode::write_new, executor, false);
 
         if(!fd_maybe.has_value())
-            co_return hedgehog::error("Failed to create file descriptor for merged index at " + new_path.string() + ": " + fd_maybe.error().to_string());
+            co_return hedge::error("Failed to create file descriptor for merged index at " + new_path.string() + ": " + fd_maybe.error().to_string());
 
         auto fd = std::move(fd_maybe.value());
 
@@ -631,12 +631,12 @@ namespace hedgehog::db
         auto init_lhs = co_await lhs_rbuf.next(config.read_ahead_size);
 
         if(!init_lhs)
-            co_return hedgehog::error("Some error occurred while getting the first page from LHS inde: " + init_lhs.error().to_string());
+            co_return hedge::error("Some error occurred while getting the first page from LHS inde: " + init_lhs.error().to_string());
 
         auto init_rhs = co_await rhs_rbuf.next(config.read_ahead_size);
 
         if(!init_rhs)
-            co_return hedgehog::error("Some error occurred while getting the first page from RHS inde: " + init_rhs.error().to_string());
+            co_return hedge::error("Some error occurred while getting the first page from RHS inde: " + init_rhs.error().to_string());
 
         size_t indexed_keys = 0;
         size_t filtered_keys = 0;
@@ -648,19 +648,19 @@ namespace hedgehog::db
         auto& lhs = lhs_rbuf;
         auto& rhs = rhs_rbuf;
 
-        auto refresh_buffers = [&]() -> async::task<hedgehog::status>
+        auto refresh_buffers = [&]() -> async::task<hedge::status>
         {
             auto status = co_await lhs.next(config.read_ahead_size);
 
             if(!status)
-                co_return hedgehog::error("Cannot refresh LHS view: " + status.error().to_string());
+                co_return hedge::error("Cannot refresh LHS view: " + status.error().to_string());
 
             status = co_await rhs.next(config.read_ahead_size);
 
             if(!status)
-                co_return hedgehog::error("Cannot refresh RHS view: " + status.error().to_string());
+                co_return hedge::error("Cannot refresh RHS view: " + status.error().to_string());
 
-            co_return hedgehog::ok();
+            co_return hedge::ok();
         };
 
         unique_buffer ubuf{}; // needed to handle possible duplicated keys between LHS and RHS
@@ -722,11 +722,11 @@ namespace hedgehog::db
             bytes_written += res.bytes_written;
 
             if(res.error_code != 0)
-                co_return hedgehog::error("Failed to write merged keys to file: " + std::string(strerror(res.error_code)));
+                co_return hedge::error("Failed to write merged keys to file: " + std::string(strerror(res.error_code)));
 
             auto status = co_await refresh_buffers();
             if(!status)
-                co_return hedgehog::error("Failed to refresh views: " + status.error().to_string());
+                co_return hedge::error("Failed to refresh views: " + status.error().to_string());
 
             if(lhs.eof() || rhs.eof())
                 break;
@@ -799,7 +799,7 @@ namespace hedgehog::db
                 remaining_keys.clear();
 
                 if(res.error_code != 0)
-                    co_return hedgehog::error("Failed to write remaining keys to file: " + std::string(strerror(res.error_code)));
+                    co_return hedge::error("Failed to write remaining keys to file: " + std::string(strerror(res.error_code)));
 
                 bytes_written += res.bytes_written;
             }
@@ -807,7 +807,7 @@ namespace hedgehog::db
             auto refresh_status = co_await non_empty_view.next(config.read_ahead_size);
 
             if(!refresh_status)
-                co_return hedgehog::error("Failed to refresh view: " + refresh_status.error().to_string());
+                co_return hedge::error("Failed to refresh view: " + refresh_status.error().to_string());
         }
 
         if(indexed_keys % INDEX_PAGE_NUM_ENTRIES != 0)
@@ -815,7 +815,7 @@ namespace hedgehog::db
 
         auto refresh_status = co_await refresh_buffers();
         if(!refresh_status)
-            co_return hedgehog::error("Failed to refresh views after writing remaining keys: " + refresh_status.error().to_string());
+            co_return hedge::error("Failed to refresh views after writing remaining keys: " + refresh_status.error().to_string());
 
         // assert(indexed_keys == (left._footer.indexed_keys + right._footer.indexed_keys - filtered_keys) && "Item count does not match footer indexed keys");
         footer_builder.indexed_keys = indexed_keys;
@@ -833,7 +833,7 @@ namespace hedgehog::db
                 .offset = bytes_written});
 
             if(res.error_code != 0)
-                co_return hedgehog::error("Failed to write padding to file: " + std::string(strerror(res.error_code)));
+                co_return hedge::error("Failed to write padding to file: " + std::string(strerror(res.error_code)));
 
             bytes_written += res.bytes_written;
         }
@@ -850,7 +850,7 @@ namespace hedgehog::db
                 .offset = bytes_written});
 
             if(res.error_code != 0)
-                co_return hedgehog::error("Failed to write meta index to file: " + std::string(strerror(res.error_code)));
+                co_return hedge::error("Failed to write meta index to file: " + std::string(strerror(res.error_code)));
 
             bytes_written += res.bytes_written;
         }
@@ -869,7 +869,7 @@ namespace hedgehog::db
                 .offset = bytes_written});
 
             if(res.error_code != 0)
-                co_return hedgehog::error("Failed to write meta index padding to file: " + std::string(strerror(res.error_code)));
+                co_return hedge::error("Failed to write meta index padding to file: " + std::string(strerror(res.error_code)));
 
             bytes_written += res.bytes_written;
         }
@@ -878,7 +878,7 @@ namespace hedgehog::db
 
         auto maybe_footer = footer_builder.build();
         if(!maybe_footer.has_value())
-            co_return hedgehog::error("Failed to build footer: " + maybe_footer.error().to_string());
+            co_return hedge::error("Failed to build footer: " + maybe_footer.error().to_string());
 
         auto& footer = maybe_footer.value();
 
@@ -891,7 +891,7 @@ namespace hedgehog::db
                 .offset = bytes_written});
 
             if(res.error_code != 0)
-                co_return hedgehog::error("Failed to write footer to file: " + std::string(strerror(res.error_code)));
+                co_return hedge::error("Failed to write footer to file: " + std::string(strerror(res.error_code)));
 
             bytes_written += res.bytes_written;
         }
@@ -900,7 +900,7 @@ namespace hedgehog::db
 
         auto read_fd = fs::file::from_path(fd.path(), fs::file::open_mode::read_only, false, bytes_written);
         if(!read_fd.has_value())
-            co_return hedgehog::error("Failed to open merged index file for reading: " + read_fd.error().to_string());
+            co_return hedge::error("Failed to open merged index file for reading: " + read_fd.error().to_string());
 
         sorted_index result{
             std::move(read_fd.value()),
@@ -911,17 +911,17 @@ namespace hedgehog::db
         co_return result;
     }
 
-    hedgehog::expected<sorted_index> index_ops::two_way_merge(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor)
+    hedge::expected<sorted_index> index_ops::two_way_merge(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor)
     {
         if(!executor)
-            return hedgehog::error("Executor context is null");
+            return hedge::error("Executor context is null");
 
         auto result = executor->sync_submit(two_way_merge_async(config, left, right, executor));
 
         if(!result.has_value())
-            return hedgehog::error("Failed to merge sorted indices: " + result.error().to_string());
+            return hedge::error("Failed to merge sorted indices: " + result.error().to_string());
 
         return std::move(result.value());
     }
 
-} // namespace hedgehog::db
+} // namespace hedge::db

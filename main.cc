@@ -37,7 +37,7 @@ int main(int argc, char* argv[])
 
     auto base_path = std::filesystem::path(argv[2]);
 
-    hedgehog::db::memtable_db database = hedgehog::db::memtable_db::make_new(base_path, "test_db");
+    hedge::db::memtable_db database = hedge::db::memtable_db::make_new(base_path, "test_db");
 
     auto N_FILES = std::stoul(argv[1]);
     auto VALUE_SIZE = std::stoul(argv[3]);
@@ -60,7 +60,7 @@ int main(int argc, char* argv[])
     });
 
     auto constexpr N_THREADS = 10;
-    std::array<std::vector<hedgehog::db::key_t>, N_THREADS> key_sets;
+    std::array<std::vector<hedge::db::key_t>, N_THREADS> key_sets;
 
     std::vector<std::thread> threads;
 
@@ -82,7 +82,7 @@ int main(int argc, char* argv[])
     for(auto& thread : threads)
         thread.join();
 
-    std::vector<hedgehog::db::key_t> keys;
+    std::vector<hedge::db::key_t> keys;
     for(auto& key_set : key_sets)
     {
         keys.insert(keys.end(), key_set.begin(), key_set.end());
@@ -110,7 +110,7 @@ int main(int argc, char* argv[])
 
     // Flush the database
     t0 = std::chrono::high_resolution_clock::now();
-    auto maybe_ss_db = hedgehog::db::flush_memtable_db(std::move(database));
+    auto maybe_ss_db = hedge::db::flush_memtable_db(std::move(database));
     if(!maybe_ss_db)
     {
         std::cerr << "Flushing went wrong: " << maybe_ss_db.error().to_string() << '\n';
@@ -183,7 +183,7 @@ int main(int argc, char* argv[])
     constexpr auto ELEMENTS_TO_DELETE = 5;
     int N_DELETES = std::min(ELEMENTS_TO_DELETE, static_cast<int>(N_FILES));
 
-    std::unordered_set<hedgehog::db::key_t> keys_to_delete;
+    std::unordered_set<hedge::db::key_t> keys_to_delete;
     for(int i = 0; i < N_DELETES; ++i)
     {
         auto it = keys.begin();

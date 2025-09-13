@@ -9,7 +9,7 @@
 
 static int counter = 0;
 
-namespace hedgehog::async
+namespace hedge::async
 {
     template <typename PROMISE>
     struct awaitable_final_suspend
@@ -172,4 +172,4 @@ namespace hedgehog::async
         }
     };
 
-} // namespace hedgehog::async
+} // namespace hedge::async

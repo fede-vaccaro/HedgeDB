@@ -11,7 +11,7 @@
 #include "../io_executor.h"
 #include "../task.h"
 
-using namespace hedgehog::async;
+using namespace hedge::async;
 
 struct test_executor : public ::testing::Test
 {

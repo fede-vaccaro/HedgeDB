@@ -7,7 +7,7 @@
 #include "error.hpp"
 #include "file_reader.h"
 
-namespace hedgehog::db
+namespace hedge::db
 {
 
     // rolling_buffer
@@ -77,31 +77,31 @@ namespace hedgehog::db
             return this->_buffer;
         }
 
-        async::task<hedgehog::status> next(size_t bytes_to_read)
+        async::task<hedge::status> next(size_t bytes_to_read)
         {
             co_return co_await this->_next(bytes_to_read);
         }
 
     private:
-        async::task<hedgehog::expected<std::vector<uint8_t>>> _read_from_io(size_t read_ahead_size)
+        async::task<hedge::expected<std::vector<uint8_t>>> _read_from_io(size_t read_ahead_size)
         {
             auto maybe_buffer = co_await this->_reader.next(read_ahead_size);
             if(!maybe_buffer.has_value())
-                co_return hedgehog::error("Failed to read from io: " + maybe_buffer.error().to_string());
+                co_return hedge::error("Failed to read from io: " + maybe_buffer.error().to_string());
 
             co_return std::move(maybe_buffer.value());
         };
 
-        async::task<hedgehog::status> _next(size_t bytes_to_read)
+        async::task<hedge::status> _next(size_t bytes_to_read)
         {
             auto maybe_new_read = co_await this->_read_from_io(bytes_to_read);
 
             if(!maybe_new_read)
-                co_return hedgehog::error("Failed to read from index view: " + maybe_new_read.error().to_string()); // todo: more meaningful error
+                co_return hedge::error("Failed to read from index view: " + maybe_new_read.error().to_string()); // todo: more meaningful error
 
             this->_consume_and_push(std::move(maybe_new_read.value()));
 
-            co_return hedgehog::ok();
+            co_return hedge::ok();
         }
 
         void _consume_and_push(byte_buffer_t&& new_buffer)
@@ -163,4 +163,4 @@ namespace hedgehog::db
         }
     };
 
-} // namespace hedgehog::db
+} // namespace hedge::db

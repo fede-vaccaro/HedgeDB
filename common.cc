@@ -2,7 +2,7 @@
 
 #include "common.h"
 
-namespace hedgehog
+namespace hedge
 {
     std::vector<std::pair<size_t, std::filesystem::path>> get_prefixes(const std::filesystem::path& base_path, size_t num_space_partitions)
     {
@@ -42,4 +42,4 @@ namespace hedgehog
         return std::pair{path, filename};
     }
 
-} // namespace hedgehog
+} // namespace hedge

@@ -1,6 +1,6 @@
 # ignore executables
-hedgehog_table
-hedgehog_db
+hedge_table
+hedge_db
 
 # clangd
 .cache/*

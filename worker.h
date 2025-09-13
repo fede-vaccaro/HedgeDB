@@ -6,7 +6,7 @@
 #include <thread>
 #include <mutex>
 
-namespace hedgehog::async
+namespace hedge::async
 {
 
     class worker
@@ -32,4 +32,4 @@ namespace hedgehog::async
     private:
         void _run();
     };
-} // namespace hedgehog::db
+} // namespace hedge::db

@@ -8,7 +8,7 @@
 #include "../io_executor.h"
 #include "../working_group.h"
 
-namespace hedgehog::db
+namespace hedge::db
 {
     struct database_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, size_t>>
     {
@@ -21,7 +21,7 @@ namespace hedgehog::db
             if(std::filesystem::exists(this->_base_path))
                 std::filesystem::remove_all(this->_base_path);
 
-            this->_executor = std::make_shared<hedgehog::async::executor_context>(128);
+            this->_executor = std::make_shared<hedge::async::executor_context>(128);
         }
 
         uuids::uuid generate_uuid()
@@ -72,7 +72,7 @@ namespace hedgehog::db
         double DELETE_PROBABILITY{0.02}; // if deletion test is enabled, how many keys of total should be removed
 
         // runtime
-        std::shared_ptr<hedgehog::async::executor_context> _executor;
+        std::shared_ptr<hedge::async::executor_context> _executor;
         std::filesystem::path _base_path = "/tmp/db";
 
         // rng and seed stuff
@@ -227,4 +227,4 @@ namespace hedgehog::db
             return name;
         });
 
-} // namespace hedgehog::db
+} // namespace hedge::db
