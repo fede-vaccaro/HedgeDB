@@ -22,9 +22,9 @@ namespace hedge::db
 
     struct index_ops
     {
-        static std::vector<index_key_t> merge_memtables_in_mem(std::vector<mem_index>&& indices);
+        static std::vector<index_entry_t> merge_memtables_in_mem(std::vector<mem_index>&& indices);
         static hedge::expected<sorted_index> load_sorted_index(const std::filesystem::path& path, bool load_index = false);
-        static hedge::expected<sorted_index> save_as_sorted_index(const std::filesystem::path& path, std::vector<index_key_t>&& sorted_keys, size_t upper_bound, bool merge_with_existent = false);
+        static hedge::expected<sorted_index> save_as_sorted_index(const std::filesystem::path& path, std::vector<index_entry_t>&& sorted_keys, size_t upper_bound, bool merge_with_existent = false);
         static hedge::expected<std::vector<sorted_index>> flush_mem_index(const std::filesystem::path& base_path, std::vector<mem_index>&& indices, size_t num_partition_exponent, size_t flush_iteration);
 
         struct merge_config
@@ -124,14 +124,14 @@ namespace hedge::db
     {
         friend struct index_ops;
 
-        std::vector<index_key_t> _index;
+        std::vector<index_entry_t> _index;
         std::vector<meta_index_entry> _meta_index;
         sorted_index_footer _footer;
 
         std::unique_ptr<std::mutex> _compaction_mutex = std::make_unique<std::mutex>(); // let sorted_index to be mutable
 
     public:
-        sorted_index(fs::file fd, std::vector<index_key_t> index, std::vector<meta_index_entry> meta_index, sorted_index_footer footer);
+        sorted_index(fs::file fd, std::vector<index_entry_t> index, std::vector<meta_index_entry> meta_index, sorted_index_footer footer);
         sorted_index() = default;
 
         sorted_index(sorted_index&& other) noexcept = default;
@@ -142,7 +142,7 @@ namespace hedge::db
 
         [[nodiscard]] hedge::expected<std::optional<value_ptr_t>> lookup(const key_t& key) const;
         [[nodiscard]] async::task<expected<std::optional<value_ptr_t>>> lookup_async(const key_t& key, const std::shared_ptr<async::executor_context>& executor) const;
-        [[nodiscard]] async::task<hedge::status> try_update_async(const index_key_t& entry, const std::shared_ptr<async::executor_context>& executor);
+        [[nodiscard]] async::task<hedge::status> try_update_async(const index_entry_t& entry, const std::shared_ptr<async::executor_context>& executor);
 
         hedge::status load_index();
 
@@ -178,11 +178,11 @@ namespace hedge::db
         void clear_index();
 
     private:
-        static std::optional<value_ptr_t> _find_in_page(const key_t& key, const index_key_t* page_start, const index_key_t* page_end);
+        static std::optional<value_ptr_t> _find_in_page(const key_t& key, const index_entry_t* page_start, const index_entry_t* page_end);
 
         [[nodiscard]] std::optional<size_t> _find_page_id(const key_t& key) const;
         [[nodiscard]] async::task<expected<std::unique_ptr<uint8_t>>> _load_page_async(size_t offset, const std::shared_ptr<async::executor_context>& executor) const;
-        [[nodiscard]] async::task<hedge::status> _update_in_page(const index_key_t& entry, size_t page_id, const index_key_t* start, const index_key_t* end, const std::shared_ptr<async::executor_context>& executor);
+        [[nodiscard]] async::task<hedge::status> _update_in_page(const index_entry_t& entry, size_t page_id, const index_entry_t* start, const index_entry_t* end, const std::shared_ptr<async::executor_context>& executor);
     };
 
 } // namespace hedge::db

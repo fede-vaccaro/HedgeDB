@@ -16,7 +16,7 @@ namespace hedge::db
     // Currently needed as a helper class for the secondary memory merge sort.
     //
     // This is a helper class needed for mantaining a rolling buffer while
-    // loading pages of subsequent index_key_t from a sorted index file
+    // loading pages of subsequent index_entry_t from a sorted index file
     // assume that we loaded a page, and we are iterating over it through
     // iterator_t& rolling_buffer::iterator(). This is the buffer and the
     // object at which the iterator points is highlited by '[]'
@@ -32,13 +32,13 @@ namespace hedge::db
     // is appended and the iterator is updated
     //
     // It's important to note that for convenience the iterator "views" the
-    // buffer as an array of `index_key_t`, while the underlying type is
+    // buffer as an array of `index_entry_t`, while the underlying type is
     // uint8_t.
     class rolling_buffer
     {
         using byte_buffer_t = std::vector<uint8_t>;
-        using span_t = std::span<index_key_t>;
-        using iterator_t = std::span<index_key_t>::iterator;
+        using span_t = std::span<index_entry_t>;
+        using iterator_t = std::span<index_entry_t>::iterator;
         using buffer_iterator_t = byte_buffer_t::iterator;
 
         fs::file_reader _reader;
@@ -109,27 +109,27 @@ namespace hedge::db
         {
             this->_buffer.erase(this->_buffer.begin(), this->buffer_it());
             this->_buffer.insert(this->_buffer.end(), new_buffer.begin(), new_buffer.end());
-            this->_view = view_as<index_key_t>(this->_buffer);
+            this->_view = view_as<index_entry_t>(this->_buffer);
             this->_it = this->_view.begin();
         }
 
         void _init()
         {
-            this->_view = view_as<index_key_t>(this->_buffer);
+            this->_view = view_as<index_entry_t>(this->_buffer);
             this->_it = this->_view.begin();
         }
     };
 
     class unique_buffer
     {
-        std::optional<index_key_t> _buffered_item{};
+        std::optional<index_entry_t> _buffered_item{};
 
-        std::optional<index_key_t> _ready_item{};
+        std::optional<index_entry_t> _ready_item{};
 
     public:
         unique_buffer() = default;
 
-        void push(index_key_t new_item)
+        void push(index_entry_t new_item)
         {
             if(!this->_buffered_item)
                 this->_buffered_item = new_item;
@@ -144,7 +144,7 @@ namespace hedge::db
             return this->_ready_item.has_value();
         }
 
-        index_key_t force_pop()
+        index_entry_t force_pop()
         {
             if(this->_ready_item.has_value())
                 throw std::runtime_error("Ready item still present, cannot pop last");
@@ -155,7 +155,7 @@ namespace hedge::db
             return this->_buffered_item.value();
         }
 
-        index_key_t pop()
+        index_entry_t pop()
         {
             if(this->_ready_item.has_value())
                 return std::exchange(this->_ready_item, std::nullopt).value();

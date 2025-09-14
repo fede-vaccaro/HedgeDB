@@ -72,7 +72,7 @@ namespace hedge::db
         }
     };
 
-    std::vector<meta_index_entry> create_meta_index(const std::vector<index_key_t>& sorted_keys)
+    std::vector<meta_index_entry> create_meta_index(const std::vector<index_entry_t>& sorted_keys)
     {
         auto meta_index_size = (sorted_keys.size() + INDEX_PAGE_NUM_ENTRIES - 1) / INDEX_PAGE_NUM_ENTRIES;
 
@@ -110,12 +110,12 @@ namespace hedge::db
         return new_path;
     }
 
-    std::vector<index_key_t> index_ops::merge_memtables_in_mem(std::vector<mem_index>&& indices)
+    std::vector<index_entry_t> index_ops::merge_memtables_in_mem(std::vector<mem_index>&& indices)
     {
         auto total_size = std::accumulate(indices.begin(), indices.end(), 0, [](size_t acc, const mem_index& idx)
                                           { return acc + idx._index.size(); });
 
-        std::vector<index_key_t> index_sorted;
+        std::vector<index_entry_t> index_sorted;
         index_sorted.reserve(total_size);
 
         for(auto& idx : indices)
@@ -143,7 +143,7 @@ namespace hedge::db
         auto index_sorted = merge_memtables_in_mem(std::move(indices));
 
         std::vector<sorted_index> sorted_indices{};
-        std::vector<index_key_t> current_index{};
+        std::vector<index_entry_t> current_index{};
 
         size_t current_partition = hedge::find_partition_prefix_for_key(index_sorted[0].key, partition_size);
 
@@ -175,7 +175,7 @@ namespace hedge::db
 
                 OUTCOME_TRY(auto sorted_index, index_ops::save_as_sorted_index(
                                                    path,
-                                                   std::exchange(current_index, std::vector<index_key_t>{}),
+                                                   std::exchange(current_index, std::vector<index_entry_t>{}),
                                                    current_partition,
                                                    false));
 
@@ -226,7 +226,7 @@ namespace hedge::db
 
         // std::cout << "Found page ID: " << page_id << " for key: " << key << std::endl;
 
-        const index_key_t* page_start_ptr{};
+        const index_entry_t* page_start_ptr{};
 
         fs::non_owning_mmap mmap;
 
@@ -238,12 +238,12 @@ namespace hedge::db
         {
             OUTCOME_TRY(mmap, fs::non_owning_mmap::from_fd_wrapper(*this));
 
-            page_start_ptr = reinterpret_cast<index_key_t*>(mmap.get_ptr());
+            page_start_ptr = reinterpret_cast<index_entry_t*>(mmap.get_ptr());
         }
 
         page_start_ptr += page_id * INDEX_PAGE_NUM_ENTRIES;
 
-        const index_key_t* page_end_ptr = page_start_ptr + INDEX_PAGE_NUM_ENTRIES;
+        const index_entry_t* page_end_ptr = page_start_ptr + INDEX_PAGE_NUM_ENTRIES;
 
         if(bool is_last_page = page_id == this->_meta_index.size() - 1; is_last_page)
         {
@@ -270,8 +270,8 @@ namespace hedge::db
         if(!maybe_page_ptr)
             co_return maybe_page_ptr.error();
 
-        auto* page_start_ptr = reinterpret_cast<index_key_t*>(maybe_page_ptr.value().get());
-        index_key_t* page_end_ptr = page_start_ptr + INDEX_PAGE_NUM_ENTRIES;
+        auto* page_start_ptr = reinterpret_cast<index_entry_t*>(maybe_page_ptr.value().get());
+        index_entry_t* page_end_ptr = page_start_ptr + INDEX_PAGE_NUM_ENTRIES;
 
         if(bool is_last_page = page_id == this->_meta_index.size() - 1; is_last_page)
         {
@@ -315,9 +315,9 @@ namespace hedge::db
         co_return std::move(response.data);
     }
 
-    std::optional<value_ptr_t> sorted_index::_find_in_page(const key_t& key, const index_key_t* start, const index_key_t* end)
+    std::optional<value_ptr_t> sorted_index::_find_in_page(const key_t& key, const index_entry_t* start, const index_entry_t* end)
     {
-        const auto* it = std::lower_bound(start, end, index_key_t{.key = key, .value_ptr = {}});
+        const auto* it = std::lower_bound(start, end, index_entry_t{.key = key, .value_ptr = {}});
 
         if(it != end && it->key == key)
             return it->value_ptr;
@@ -330,9 +330,9 @@ namespace hedge::db
         return std::nullopt;
     }
 
-    async::task<hedge::status> sorted_index::_update_in_page(const index_key_t& entry, size_t page_id, const index_key_t* start, const index_key_t* end, const std::shared_ptr<async::executor_context>& executor)
+    async::task<hedge::status> sorted_index::_update_in_page(const index_entry_t& entry, size_t page_id, const index_entry_t* start, const index_entry_t* end, const std::shared_ptr<async::executor_context>& executor)
     {
-        const auto* it = std::lower_bound(start, end, index_key_t{.key = entry.key, .value_ptr = {}});
+        const auto* it = std::lower_bound(start, end, index_entry_t{.key = entry.key, .value_ptr = {}});
 
         if(it == end || it->key != entry.key)
             co_return hedge::error("Key not found", errc::KEY_NOT_FOUND);
@@ -342,7 +342,7 @@ namespace hedge::db
         auto write_response = co_await executor->submit_request(async::write_request{
             .fd = this->get_fd(), // todo: use a rw fd or write fd + fsync at the end
             .data = const_cast<uint8_t*>(entry_ptr),
-            .size = sizeof(index_key_t),
+            .size = sizeof(index_entry_t),
             .offset = (PAGE_SIZE_IN_BYTES * page_id) + (it - start),
         });
 
@@ -352,7 +352,7 @@ namespace hedge::db
         co_return hedge::ok();
     }
 
-    async::task<hedge::status> sorted_index::try_update_async(const index_key_t& entry, const std::shared_ptr<async::executor_context>& executor)
+    async::task<hedge::status> sorted_index::try_update_async(const index_entry_t& entry, const std::shared_ptr<async::executor_context>& executor)
     {
         std::unique_lock<std::mutex> lock(*this->_compaction_mutex, std::try_to_lock); // try to acquire
 
@@ -372,8 +372,8 @@ namespace hedge::db
         if(!maybe_page_ptr)
             co_return maybe_page_ptr.error();
 
-        auto* page_start_ptr = reinterpret_cast<index_key_t*>(maybe_page_ptr.value().get());
-        index_key_t* page_end_ptr = page_start_ptr + INDEX_PAGE_NUM_ENTRIES;
+        auto* page_start_ptr = reinterpret_cast<index_entry_t*>(maybe_page_ptr.value().get());
+        index_entry_t* page_end_ptr = page_start_ptr + INDEX_PAGE_NUM_ENTRIES;
 
         if(bool is_last_page = page_id == this->_meta_index.size() - 1; is_last_page)
         {
@@ -387,7 +387,7 @@ namespace hedge::db
 
     void sorted_index::clear_index()
     {
-        this->_index = std::vector<index_key_t>{};
+        this->_index = std::vector<index_entry_t>{};
     }
 
     hedge::status sorted_index::load_index()
@@ -400,14 +400,14 @@ namespace hedge::db
         if(!mmap.has_value())
             throw std::runtime_error("Failed to mmap index file: " + mmap.error().to_string());
 
-        auto* mmap_ptr = reinterpret_cast<index_key_t*>(mmap.value().get_ptr());
+        auto* mmap_ptr = reinterpret_cast<index_entry_t*>(mmap.value().get_ptr());
 
         this->_index.assign(mmap_ptr, mmap_ptr + this->_footer.indexed_keys);
 
         return hedge::ok();
     }
 
-    sorted_index::sorted_index(fs::file fd, std::vector<index_key_t> index, std::vector<meta_index_entry> meta_index, sorted_index_footer footer)
+    sorted_index::sorted_index(fs::file fd, std::vector<index_entry_t> index, std::vector<meta_index_entry> meta_index, sorted_index_footer footer)
         : fs::file(std::move(fd)), _index(std::move(index)), _meta_index(std::move(meta_index)), _footer(footer)
     {
     }
@@ -473,7 +473,7 @@ namespace hedge::db
         ofs.read(reinterpret_cast<char*>(allocated_data.data()), static_cast<std::streamsize>(allocated_data.size() * sizeof(T)));
     }
 
-    hedge::expected<sorted_index> index_ops::save_as_sorted_index(const std::filesystem::path& path, std::vector<index_key_t>&& sorted_keys, size_t upper_bound, bool merge_with_existent)
+    hedge::expected<sorted_index> index_ops::save_as_sorted_index(const std::filesystem::path& path, std::vector<index_entry_t>&& sorted_keys, size_t upper_bound, bool merge_with_existent)
     {
         if(merge_with_existent)
             return hedge::error("Merging with existing sorted index is not supported yet");
@@ -571,7 +571,7 @@ namespace hedge::db
     {
         size_t num_pages = ceil(indexed_keys, INDEX_PAGE_NUM_ENTRIES);
         size_t index_end_pos = num_pages * PAGE_SIZE_IN_BYTES;
-        size_t padding = compute_alignment_padding<index_key_t>(indexed_keys);
+        size_t padding = compute_alignment_padding<index_entry_t>(indexed_keys);
 
         return {index_end_pos - padding, index_end_pos};
     }
@@ -671,7 +671,7 @@ namespace hedge::db
         while(true)
         {
             std::vector<uint8_t> merged_keys(config.read_ahead_size * 2);
-            auto merged_keys_span = view_as<index_key_t>(merged_keys);
+            auto merged_keys_span = view_as<index_entry_t>(merged_keys);
             auto merged_it = merged_keys_span.begin();
 
             while(lhs.it() != lhs.end() && rhs.it() != rhs.end())
@@ -710,7 +710,7 @@ namespace hedge::db
             }
 
             auto this_run_keys = std::distance(merged_keys_span.begin(), merged_it);
-            merged_keys.resize(this_run_keys * sizeof(index_key_t));
+            merged_keys.resize(this_run_keys * sizeof(index_entry_t));
 
             auto res = co_await executor->submit_request(async::write_request{
                 .fd = fd.get_fd(),
@@ -733,8 +733,8 @@ namespace hedge::db
 
         auto& non_empty_view = !lhs.eof() ? lhs : rhs;
 
-        std::vector<index_key_t> remaining_keys;
-        remaining_keys.reserve((non_empty_view.buffer().size() + 1) / sizeof(index_key_t));
+        std::vector<index_entry_t> remaining_keys;
+        remaining_keys.reserve((non_empty_view.buffer().size() + 1) / sizeof(index_entry_t));
 
         if(!non_empty_view.eof() && non_empty_view.it() != non_empty_view.end())
         {
@@ -743,7 +743,7 @@ namespace hedge::db
         }
         // from now on, we can ignore the ubuf since there are no duplicated keys within the same index
 
-        std::vector<index_key_t> last_items{};
+        std::vector<index_entry_t> last_items{};
         last_items.reserve(2);
         if(ubuf.ready())
             last_items.push_back(ubuf.pop());
@@ -792,7 +792,7 @@ namespace hedge::db
                 auto res = co_await executor->submit_request(async::write_request{
                     .fd = fd.get_fd(),
                     .data = reinterpret_cast<uint8_t*>(remaining_keys.data()),
-                    .size = remaining_keys.size() * sizeof(index_key_t),
+                    .size = remaining_keys.size() * sizeof(index_entry_t),
                     .offset = bytes_written});
 
                 remaining_keys.clear();
@@ -821,7 +821,7 @@ namespace hedge::db
         footer_builder.index_end_offset = bytes_written;
 
         // write index padding if any
-        size_t padding_size = compute_alignment_padding<index_key_t>(indexed_keys);
+        size_t padding_size = compute_alignment_padding<index_entry_t>(indexed_keys);
         if(padding_size > 0)
         {
             auto padding = std::vector<uint8_t>(padding_size, 0);
