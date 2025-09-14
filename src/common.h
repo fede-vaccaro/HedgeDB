@@ -83,19 +83,19 @@ namespace hedge
         }
     };
 
-    struct index_key_t
+    struct index_entry_t
     {
         key_t key{};
         value_ptr_t value_ptr{};
 
-        bool operator<(const index_key_t& other) const
+        bool operator<(const index_entry_t& other) const
         {
             return key < other.key;
         }
     };
 
     constexpr size_t PAGE_SIZE_IN_BYTES = 4096;
-    constexpr size_t INDEX_PAGE_NUM_ENTRIES = PAGE_SIZE_IN_BYTES / sizeof(index_key_t);
+    constexpr size_t INDEX_PAGE_NUM_ENTRIES = PAGE_SIZE_IN_BYTES / sizeof(index_entry_t);
 
     inline std::filesystem::path with_extension(const std::filesystem::path& path, std::string_view ext)
     {
