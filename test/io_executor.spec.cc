@@ -91,9 +91,9 @@ TEST_F(test_executor, test_write_simple)
 
     auto task = [&]() -> ::task<void>
     {
-        auto request = write_request{fd, buffer.data(), buffer.size()};
+        auto request = write_request{fd, buffer.data(), buffer.size(), 0};
 
-        auto response = co_await this->_executor->submit_request(std::move(request));
+        [[maybe_unused]] auto response = co_await this->_executor->submit_request(std::move(request));
 
         promise.set_value();
     };
@@ -190,7 +190,7 @@ TEST_F(test_executor, test_open_fallocate_write)
 
         uint8_t* input_data_ptr = reinterpret_cast<uint8_t*>(input_data.data());
 
-        auto write_response = co_await this->_executor->submit_request(write_request{response.file_descriptor, input_data_ptr, input_data.size()});
+        auto write_response = co_await this->_executor->submit_request(write_request{response.file_descriptor, input_data_ptr, input_data.size(), 0});
 
         if(write_response.error_code < 0)
         {

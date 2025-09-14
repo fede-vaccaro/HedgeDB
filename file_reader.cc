@@ -7,7 +7,7 @@
 namespace hedge::async
 {
     file_reader::file_reader(const fs::file& fd, const file_reader_config& config, std::shared_ptr<async::executor_context> executor)
-        : _fd(fd), _config(config), _executor(std::move(executor)), _current_offset(config.start_offset)
+        : _fd(fd), _config(config), _current_offset(config.start_offset), _executor(std::move(executor))
     {
     }
 
@@ -30,11 +30,10 @@ namespace hedge::async
 
         // round to page size if using direct I/O
         auto actual_num_bytes_to_read = num_bytes_to_read;
-        
+
         if(this->_fd.use_direct() && num_bytes_to_read % PAGE_SIZE_IN_BYTES != 0)
             num_bytes_to_read += PAGE_SIZE_IN_BYTES - (num_bytes_to_read % PAGE_SIZE_IN_BYTES);
 
-        
         auto response = co_await this->_executor->submit_request(async::read_request{.fd = this->_fd.get_fd(), .offset = this->_current_offset, .size = num_bytes_to_read});
 
         this->_current_offset += num_bytes_to_read;

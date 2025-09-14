@@ -140,7 +140,7 @@ namespace hedge::fs
             fd_wrapped._mode = mode;
             fd_wrapped._use_direct = use_direct;
 
-            return std::move(fd_wrapped);
+            return fd_wrapped;
         }
 
         static async::task<hedge::expected<file>> from_path_async(const std::filesystem::path& path, open_mode mode, std::shared_ptr<async::executor_context> executor, bool use_direct = false, std::optional<size_t> expected_size = std::nullopt)
@@ -220,7 +220,7 @@ namespace hedge::fs
             fd_wrapped._mode = mode;
             fd_wrapped._use_direct = use_direct;
 
-            co_return std::move(fd_wrapped);
+            co_return fd_wrapped;
         }
 
         file() = default;
@@ -295,7 +295,7 @@ namespace hedge::fs
             wrapper._mapped_ptr = mapped_ptr;
             wrapper._mapped_size = wrapper._fd_wrapper.file_size();
 
-            return std::move(wrapper);
+            return wrapper;
         }
 
         static hedge::expected<mmap_owning> from_path(const std::filesystem::path& path, std::optional<size_t> expected_size = std::nullopt)
@@ -404,7 +404,7 @@ namespace hedge::fs
             wrapper._mapped_size = range ? range->size : fd_w.file_size();
             wrapper._range = range;
 
-            return std::move(wrapper);
+            return wrapper;
         }
 
         non_owning_mmap() = default;

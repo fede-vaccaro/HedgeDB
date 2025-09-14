@@ -22,13 +22,11 @@ endif()
 
 if (CMAKE_BUILD_TYPE MATCHES "Debug")
     message (STATUS "Building in Debug mode")
-    set(CMAKE_CXX_FLAGS "-g -fno-omit-frame-pointer")
+    set(CMAKE_CXX_FLAGS "-g -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Werror")
 elseif (CMAKE_BUILD_TYPE MATCHES "Release")
     message (STATUS "Building in Release mode")
     set(CMAKE_CXX_FLAGS "-O2")
 endif()
-
-include_directories(include ${asio-standalone_SOURCE_DIR}/asio/include)
 
 set(DB_SOURCES
     common.cc
@@ -54,7 +52,6 @@ set(IO_EXECUTOR_SRCS
     mailbox_impl.cc
     mailbox_impl.h
     task.h
-    generator.h
 )
 
 # executor_test.cc

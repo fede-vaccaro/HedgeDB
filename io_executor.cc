@@ -173,17 +173,13 @@ namespace hedge::async
             if(submit < 0)
                 throw std::runtime_error("io_uring_submit: "s + strerror(-submit));
 
-            if(ready != submit) // todo might remove
-            {
-                // std::cerr << "Warning: io_uring_submit ready != submit. in flight: "
-                //   << _in_flight_requests.size() << ", ready: " << ready << " submit: " << submit << " requests: " << requests.size() << std::endl;
-            }
+            // if(ready != submit) // todo might remove
+            // {
+            // }
 
-            if(ready != requests.size())
-            {
-                // std::cerr << "Warning: io_uring_submit ready != requests.size(). requests.size(): "
-                //   << requests.size() << ", ready: " << ready << " submit: " << submit << " in flight: " << _in_flight_requests.size() << std::endl;
-            }
+            // if(ready != requests.size())
+            // {
+            // }
         }
     }
 
@@ -318,10 +314,6 @@ namespace hedge::async
                 in_progress_tasks.end());
 
             this->_do_work();
-
-            // log("[main] waiting for cqes");
-
-            // print_status();
 
             this->_wait_for_cqe();
         }
