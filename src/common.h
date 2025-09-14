@@ -79,31 +79,6 @@ namespace hedge
          */
         bool operator<(const value_ptr_t& other) const
         {
-            /**
-            This might looks weird but it follows a design choice on how to implement updates and deletion.
-
-            Every time we apply some change to a key-value, we put into the mem_index a new entry
-            At the current time, the only allowed updates are key/value deletion and the update is possible when a value
-            is moved to a new table when garbage-collection is occurring. However, through this way, we still anticipate the
-            value update.
-
-            Keep in mind that the table_id is strictly monotonic increasing by design. This implies that:
-
-            - every time a value is moved to a table, the destination table has higher index (it checks the highest priority definition)
-            - if we update the key/value, it might get pushed to the same table but necessarily with higher offset (it checks the highest priority definition)
-            - if we delete a key, an index_key_t is pushed with "make_deleted_value_ptr" (it checks the highest priority definition)
-            - but if we make an insert-after-delete, the table_id will be necessarily higher.
-              ...actually, this is not true, because we might be pushing the new value to the same original table.
-              this needs to be handled ASAP because insert-after-delete IS ALLOWED.
-              I'm not sure this case can handled. FUCK.
-
-              I could use a bit from the offset or the size and call it the "deleted bit".
-
-              todo: update the code that use ::offset
-
-              It looks that with this change, it fits all of the cases
-            */
-
             return this->table_id() > other.table_id() || offset() > other.offset() || (this->is_deleted() && !other.is_deleted());
         }
     };

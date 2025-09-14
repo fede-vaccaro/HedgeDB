@@ -5,11 +5,10 @@
 #include <future>
 #include <gtest/gtest.h>
 #include <iostream>
-#include <numeric>
 #include <vector>
 
-#include "../io_executor.h"
-#include "../task.h"
+#include "async/io_executor.h"
+#include "async/task.h"
 
 using namespace hedge::async;
 

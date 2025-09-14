@@ -4,9 +4,9 @@
 #include <gtest/gtest.h>
 #include <random>
 
-#include "../database.h"
-#include "../io_executor.h"
-#include "../working_group.h"
+#include "async/io_executor.h"
+#include "async/working_group.h"
+#include "db/database.h"
 
 namespace hedge::db
 {
@@ -206,6 +206,7 @@ namespace hedge::db
         duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         std::cout << "Total duration for retrieval: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
         std::cout << "Average duration per retrieval: " << (double)duration.count() / this->N_KEYS << " us" << std::endl;
+        std::cout << "Retrieval throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000)  << " items/s" << std::endl;
         std::cout << "Retrieval bandwidth: " << (double)this->N_KEYS * (this->PAYLOAD_SIZE / 1024.0) / (duration.count() / 1000.0) << " MB/s" << std::endl;
     }
 
@@ -214,7 +215,7 @@ namespace hedge::db
         database_test,
         testing::Combine(
             testing::Values(4'000'000), // n keys
-            testing::Values(1024),      // payload size
+            testing::Values(4096),      // payload size
             testing::Values(1'000'000)  // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)

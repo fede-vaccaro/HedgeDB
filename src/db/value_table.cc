@@ -2,12 +2,11 @@
 #include <cstring>
 #include <error.hpp>
 #include <filesystem>
-#include <limits>
 
+#include "async/io_executor.h"
+#include "async/mailbox_impl.h"
 #include "common.h"
-#include "io_executor.h"
-#include "mailbox_impl.h"
-#include "value_table.h"
+#include "db/value_table.h"
 
 namespace hedge::db
 {
@@ -86,9 +85,9 @@ namespace hedge::db
         if(file_offset + file_size > this->_current_offset)
         {
             co_return hedge::error(std::format("Requested file offset ({}) + size ({}) exceeds current table offset ({})",
-                                                  file_offset,
-                                                  file_size,
-                                                  this->_current_offset));
+                                               file_offset,
+                                               file_size,
+                                               this->_current_offset));
         }
 
         auto read_response = co_await executor->submit_request(async::unaligned_read_request{
@@ -100,16 +99,16 @@ namespace hedge::db
         if(read_response.error_code != 0)
         {
             co_return hedge::error(std::format("Failed to read file from value table (path: {}): {}",
-                                                  this->path().string(),
-                                                  strerror(-read_response.error_code)));
+                                               this->path().string(),
+                                               strerror(-read_response.error_code)));
         }
 
         if(read_response.bytes_read != file_size)
         {
             co_return hedge::error(std::format("Failed to read file from value table (path: {}): expected {}, got {}",
-                                                  this->path().string(),
-                                                  file_size,
-                                                  read_response.bytes_read));
+                                               this->path().string(),
+                                               file_size,
+                                               read_response.bytes_read));
         }
 
         file_header header;
@@ -118,25 +117,25 @@ namespace hedge::db
         if(!skip_delete_check && header.deleted_flag)
         {
             co_return hedge::error(std::format("File with key '{}' is marked as deleted in value table (path: {}) at offset {}",
-                                                  uuids::to_string(header.key),
-                                                  this->path().string(),
-                                                  file_offset),
-                                      hedge::errc::DELETED);
+                                               uuids::to_string(header.key),
+                                               this->path().string(),
+                                               file_offset),
+                                   hedge::errc::DELETED);
         }
 
         if(header.separator != FILE_SEPARATOR)
         {
             co_return hedge::error(std::format("Invalid file header separator in value table (path: {}) at offset {}",
-                                                  this->path().string(),
-                                                  file_offset));
+                                               this->path().string(),
+                                               file_offset));
         }
 
         if(header.file_size != file_size - sizeof(file_header))
         {
             co_return hedge::error(std::format("Invalid file size in value table (path: {}): expected {}, got {}",
-                                                  this->path().string(),
-                                                  header.file_size,
-                                                  file_size - sizeof(file_header)));
+                                               this->path().string(),
+                                               header.file_size,
+                                               file_size - sizeof(file_header)));
         }
 
         read_response.data.erase(read_response.data.begin(), read_response.data.begin() + sizeof(file_header));
@@ -156,9 +155,9 @@ namespace hedge::db
             return hedge::error("File already exists: " + file_path.string());
 
         auto file_desc = fs::file::from_path(file_path,
-                                                        fs::file::open_mode::read_write_new,
-                                                        false,
-                                                        preallocate ? std::optional{value_table::TABLE_ACTUAL_MAX_SIZE} : std::nullopt);
+                                             fs::file::open_mode::read_write_new,
+                                             false,
+                                             preallocate ? std::optional{value_table::TABLE_ACTUAL_MAX_SIZE} : std::nullopt);
 
         if(!file_desc)
             return hedge::error("Failed to create file descriptor: " + file_desc.error().to_string());
@@ -206,16 +205,16 @@ namespace hedge::db
     {
         // todo: fix table locking to avoid a race condition between GC and delete_async
 
-        // std::unique_lock<std::mutex> try_lock(*this->_delete_mutex, std::try_to_lock); 
+        // std::unique_lock<std::mutex> try_lock(*this->_delete_mutex, std::try_to_lock);
 
         // if(!try_lock.owns_lock())
-            // co_return hedge::error("Cannot delete object, garbage collection is running and the table is locked", errc::BUSY);
+        // co_return hedge::error("Cannot delete object, garbage collection is running and the table is locked", errc::BUSY);
 
         if(offset + sizeof(file_header) > this->_current_offset)
             co_return hedge::error(std::format("Requested file offset ({}) + size ({}) exceeds current table offset ({})",
-                                                  offset,
-                                                  sizeof(file_header),
-                                                  this->_current_offset));
+                                               offset,
+                                               sizeof(file_header),
+                                               this->_current_offset));
 
         auto read_response = co_await executor->submit_request(async::unaligned_read_request{
             .fd = this->get_fd(),
@@ -226,16 +225,16 @@ namespace hedge::db
         if(read_response.error_code != 0)
         {
             co_return hedge::error(std::format("Failed to read file header from value table (path: {}): {}",
-                                                  this->path().string(),
-                                                  strerror(-read_response.error_code)));
+                                               this->path().string(),
+                                               strerror(-read_response.error_code)));
         }
 
         if(read_response.bytes_read != sizeof(file_header))
         {
             co_return hedge::error(std::format("Failed to read file header from value table (path: {}): expected {}, got {}",
-                                                  this->path().string(),
-                                                  sizeof(file_header),
-                                                  read_response.bytes_read));
+                                               this->path().string(),
+                                               sizeof(file_header),
+                                               read_response.bytes_read));
         }
 
         file_header header;
@@ -244,8 +243,8 @@ namespace hedge::db
         if(header.separator != FILE_SEPARATOR)
         {
             co_return hedge::error(std::format("Invalid file header separator in value table (path: {}) at offset {}",
-                                                  this->path().string(),
-                                                  offset));
+                                               this->path().string(),
+                                               offset));
         }
 
         if(header.key != key)
@@ -277,16 +276,16 @@ namespace hedge::db
         if(write_response.error_code != 0)
         {
             co_return hedge::error(std::format("Failed to write delete marker to value table (path: {}): {}",
-                                                  this->path().string(),
-                                                  strerror(-write_response.error_code)));
+                                               this->path().string(),
+                                               strerror(-write_response.error_code)));
         }
 
         if(write_response.bytes_written != sizeof(file_header))
         {
             co_return hedge::error(std::format("Failed to write delete marker to value table (path: {}): expected {}, got {}",
-                                                  this->path().string(),
-                                                  sizeof(file_header),
-                                                  write_response.bytes_written));
+                                               this->path().string(),
+                                               sizeof(file_header),
+                                               write_response.bytes_written));
         }
         co_return hedge::ok();
     }
@@ -328,16 +327,16 @@ namespace hedge::db
         if(get_next_header.error_code != 0)
         {
             co_return hedge::error(std::format("Failed to read next file header from value table (path: {}): {}",
-                                                  this->path().string(),
-                                                  strerror(-get_next_header.error_code)));
+                                               this->path().string(),
+                                               strerror(-get_next_header.error_code)));
         }
 
         if(get_next_header.bytes_read != sizeof(file_header))
         {
             co_return hedge::error(std::format("Failed to read next file header from value table (path: {}): expected {}, got {}",
-                                                  this->path().string(),
-                                                  sizeof(file_header),
-                                                  get_next_header.bytes_read));
+                                               this->path().string(),
+                                               sizeof(file_header),
+                                               get_next_header.bytes_read));
         }
 
         auto next_header = file_header{};
@@ -353,8 +352,8 @@ namespace hedge::db
         if(next_header.separator != FILE_SEPARATOR)
         {
             co_return hedge::error(std::format("Invalid next file header separator in value table (path: {}) at offset {}",
-                                                  this->path().string(),
-                                                  next_header_offset));
+                                               this->path().string(),
+                                               next_header_offset));
         }
 
         co_return std::pair(
@@ -377,8 +376,8 @@ namespace hedge::db
         if(get_first_header.error_code != 0)
         {
             co_return hedge::error(std::format("Failed to read next file header from value table (path: {}): {}",
-                                                  this->path().string(),
-                                                  strerror(-get_first_header.error_code)));
+                                               this->path().string(),
+                                               strerror(-get_first_header.error_code)));
         }
 
         file_header header;

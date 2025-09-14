@@ -8,12 +8,13 @@
 #include <string>
 #include <unordered_map>
 
+#include <error.hpp>
+
+#include "async/working_group.h"
 #include "common.h"
 #include "database.h"
-#include "error.hpp"
 #include "index.h"
 #include "value_table.h"
-#include "working_group.h"
 
 namespace hedge::db
 {
