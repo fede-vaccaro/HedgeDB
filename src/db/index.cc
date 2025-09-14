@@ -9,16 +9,15 @@
 #include <vector>
 
 #include <error.hpp>
+#include <uuid.h>
 
+#include "async/io_executor.h"
+#include "async/mailbox_impl.h"
+#include "async/task.h"
 #include "common.h"
-#include "file_reader.h"
-#include "fs.hpp"
+#include "fs/fs.hpp"
 #include "index.h"
-#include "io_executor.h"
-#include "mailbox_impl.h"
 #include "merge_utils.h"
-#include "task.h"
-#include "uuid.h"
 
 namespace hedge::db
 {
@@ -598,7 +597,7 @@ namespace hedge::db
         footer_builder footer_builder;
         footer_builder.upper_bound = left._footer.upper_bound;
 
-        auto lhs_view = async::file_reader(
+        auto lhs_view = fs::file_reader(
             left,
             {
                 .start_offset = 0,
@@ -606,7 +605,7 @@ namespace hedge::db
             },
             executor);
 
-        auto rhs_view = async::file_reader(
+        auto rhs_view = fs::file_reader(
             right,
             {
                 .start_offset = 0,
@@ -639,7 +638,7 @@ namespace hedge::db
             co_return hedge::error("Some error occurred while getting the first page from RHS inde: " + init_rhs.error().to_string());
 
         size_t indexed_keys = 0;
-        size_t filtered_keys = 0;
+        [[maybe_unused]] size_t filtered_keys = 0; // todo: this was used for an assert that is currently disabled
         size_t bytes_written = 0;
 
         std::vector<meta_index_entry> merged_meta_index;

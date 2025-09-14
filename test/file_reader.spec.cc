@@ -2,13 +2,13 @@
 #include <gtest/gtest.h>
 #include <numeric>
 
-#include "../common.h"
-#include "../file_reader.h"
-#include "../fs.hpp"
-#include "../io_executor.h"
-#include "../task.h"
+#include <error.hpp>
 
-#include "error.hpp"
+#include "async/io_executor.h"
+#include "async/task.h"
+#include "common.h"
+#include "fs/file_reader.h"
+#include "fs/fs.hpp"
 
 namespace hedge::async
 {
@@ -44,9 +44,9 @@ namespace hedge::async
         auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
         ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
 
-        auto view = file_reader{
+        auto view = fs::file_reader{
             fd.value(),
-            file_reader_config{.start_offset = 0, .end_offset = 64},
+            fs::file_reader_config{.start_offset = 0, .end_offset = 64},
             this->_executor};
 
         auto task = view.next(64, false);
@@ -72,9 +72,9 @@ namespace hedge::async
         auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
         ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
 
-        auto view = file_reader{
+        auto view = fs::file_reader{
             fd.value(),
-            file_reader_config{.start_offset = 0, .end_offset = 64},
+            fs::file_reader_config{.start_offset = 0, .end_offset = 64},
             this->_executor};
 
         for(int i = 0; i < 4; i++)
@@ -108,9 +108,9 @@ namespace hedge::async
         auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
         ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
 
-        auto view = file_reader{
+        auto view = fs::file_reader{
             fd.value(),
-            file_reader_config{.start_offset = 0, .end_offset = 64},
+            fs::file_reader_config{.start_offset = 0, .end_offset = 64},
             this->_executor};
 
         auto task = view.next(1000, true); // Request more pages than available
@@ -136,9 +136,9 @@ namespace hedge::async
         auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
         ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
 
-        auto view = file_reader{
+        auto view = fs::file_reader{
             fd.value(),
-            file_reader_config{.start_offset = 0, .end_offset = 64},
+            fs::file_reader_config{.start_offset = 0, .end_offset = 64},
             this->_executor};
 
         auto promise = std::promise<expected<std::vector<uint8_t>>>{};
@@ -183,9 +183,9 @@ namespace hedge::async
         auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
         ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
 
-        auto view = file_reader{
+        auto view = fs::file_reader{
             fd.value(),
-            file_reader_config{.start_offset = 0, .end_offset = 36864},
+            fs::file_reader_config{.start_offset = 0, .end_offset = 36864},
             this->_executor};
 
         for(int i = 0; i < 9; i++)
@@ -235,9 +235,9 @@ namespace hedge::async
         auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
         ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
 
-        auto view = file_reader{
+        auto view = fs::file_reader{
             fd.value(),
-            file_reader_config{.start_offset = 0, .end_offset = 50},
+            fs::file_reader_config{.start_offset = 0, .end_offset = 50},
             this->_executor};
 
         auto task = view.next(64, true);
@@ -266,9 +266,9 @@ namespace hedge::async
         auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
         ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
 
-        auto view = file_reader{
+        auto view = fs::file_reader{
             fd.value(),
-            file_reader_config{.start_offset = 0, .end_offset = 50},
+            fs::file_reader_config{.start_offset = 0, .end_offset = 50},
             this->_executor};
 
         // first page

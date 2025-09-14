@@ -25,37 +25,38 @@ if (CMAKE_BUILD_TYPE MATCHES "Debug")
     set(CMAKE_CXX_FLAGS "-g -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Werror")
 elseif (CMAKE_BUILD_TYPE MATCHES "Release")
     message (STATUS "Building in Release mode")
-    set(CMAKE_CXX_FLAGS "-O2")
+    set(CMAKE_CXX_FLAGS "-O3")
 endif()
 
 set(DB_SOURCES
-    common.cc
-    common.h
-    index.cc
-    index.h
-    fs.hpp
-    file_reader.cc
-    file_reader.h
-    value_table.cc
-    value_table.h
-    worker.cc
-    worker.h
-    database.cc
-    database.h
+    src/common.cc
+    src/common.h
+    src/db/index.cc
+    src/db/index.h
+    src/fs/fs.hpp
+    src/fs/file_reader.cc
+    src/fs/file_reader.h
+    src/db/value_table.cc
+    src/db/value_table.h
+    src/async/worker.cc
+    src/async/worker.h
+    src/db/database.cc
+    src/db/database.h
 )
 
-## io_executor files
 set(IO_EXECUTOR_SRCS 
-    io_executor.cc
-    io_executor.h 
-    mailbox.h
-    mailbox_impl.cc
-    mailbox_impl.h
-    task.h
+    src/async/io_executor.cc
+    src/async/io_executor.h 
+    src/async/mailbox.h
+    src/async/mailbox_impl.cc
+    src/async/mailbox_impl.h
+    src/async/task.h
 )
 
-# executor_test.cc
-add_executable(executor_read_test ${IO_EXECUTOR_SRCS} executor_read_test.cc)
+include_directories(PRIVATE "src/include" "src")
+
+# executor_read_test.cc
+add_executable(executor_read_test ${IO_EXECUTOR_SRCS} src/executor_read_test.cc)
 target_link_libraries(executor_read_test uring)
 
 # executor tests

@@ -6,8 +6,8 @@
 
 #include <gtest/gtest.h>
 
-#include "../io_executor.h"
-#include "../value_table.h"
+#include "async/io_executor.h"
+#include "db/value_table.h"
 
 namespace hedge::db
 {

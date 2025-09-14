@@ -4,9 +4,10 @@
 #include <error.hpp>
 #include <sys/types.h>
 
+#include "async/io_executor.h"
 #include "fs.hpp"
-#include "io_executor.h"
-namespace hedge::async
+
+namespace hedge::fs
 {
     struct file_reader_config
     {
@@ -33,4 +34,4 @@ namespace hedge::async
         void reset_it(size_t it);
     };
 
-} // namespace hedge::async
+} // namespace hedge::fs

@@ -4,7 +4,7 @@
 #include "file_reader.h"
 #include "fs.hpp"
 
-namespace hedge::async
+namespace hedge::fs
 {
     file_reader::file_reader(const fs::file& fd, const file_reader_config& config, std::shared_ptr<async::executor_context> executor)
         : _fd(fd), _config(config), _current_offset(config.start_offset), _executor(std::move(executor))

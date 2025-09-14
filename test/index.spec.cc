@@ -5,9 +5,9 @@
 
 #include <gtest/gtest.h>
 
-#include "../index.h"
-#include "../io_executor.h"
-#include "../working_group.h"
+#include "db/index.h"
+#include "async/io_executor.h"
+#include "async/working_group.h"
 
 uint32_t uuid_fake_size(const uuids::uuid& uuid)
 {

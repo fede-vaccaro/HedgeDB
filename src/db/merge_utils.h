@@ -3,9 +3,10 @@
 #include <cstdint>
 #include <optional>
 
+#include <error.hpp>
+
 #include "common.h"
-#include "error.hpp"
-#include "file_reader.h"
+#include "fs/file_reader.h"
 
 namespace hedge::db
 {
@@ -40,14 +41,14 @@ namespace hedge::db
         using iterator_t = std::span<index_key_t>::iterator;
         using buffer_iterator_t = byte_buffer_t::iterator;
 
-        async::file_reader _reader;
+        fs::file_reader _reader;
 
         byte_buffer_t _buffer;
         span_t _view;
         iterator_t _it;
 
     public:
-        rolling_buffer(async::file_reader&& reader) : _reader(std::move(reader))
+        rolling_buffer(fs::file_reader&& reader) : _reader(std::move(reader))
         {
             this->_init();
         }
