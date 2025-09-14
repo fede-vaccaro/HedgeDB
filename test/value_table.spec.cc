@@ -99,7 +99,8 @@ namespace hedge::db
             .items_count = 1,
             .occupied_space = value.size() + sizeof(file_header),
             .deleted_count = 0,
-            .freed_space = 0};
+            .freed_space = 0,
+            .padding = {}};
         auto info = table.info();
         EXPECT_EQ(info, expected_info);
 
@@ -155,7 +156,8 @@ namespace hedge::db
                 .items_count = i + 1,
                 .occupied_space = (i + 1) * (payload_size + sizeof(file_header)),
                 .deleted_count = 0,
-                .freed_space = 0};
+                .freed_space = 0,
+                .padding = {}};
             auto info = table.info();
             EXPECT_EQ(info, expected_info);
         }
@@ -210,7 +212,8 @@ namespace hedge::db
             .items_count = 1,
             .occupied_space = value.size() + sizeof(file_header),
             .deleted_count = 0,
-            .freed_space = 0};
+            .freed_space = 0,
+            .padding = {}};
         auto info = table.info();
         EXPECT_EQ(info, expected_info);
 
@@ -332,7 +335,8 @@ namespace hedge::db
                 .items_count = i + 1,
                 .occupied_space = (i + 1) * (payload_size + sizeof(file_header)),
                 .deleted_count = 0,
-                .freed_space = 0};
+                .freed_space = 0,
+                .padding = {}};
             auto info = table.info();
             EXPECT_EQ(info, expected_info);
         }
@@ -410,7 +414,8 @@ namespace hedge::db
                 .items_count = i + 1,
                 .occupied_space = (i + 1) * (payload_size + sizeof(file_header)),
                 .deleted_count = 0,
-                .freed_space = 0};
+                .freed_space = 0,
+                .padding = {}};
             auto info = table.info();
             EXPECT_EQ(info, expected_info);
         }

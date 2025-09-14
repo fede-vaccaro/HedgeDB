@@ -2,11 +2,11 @@
 #include <gtest/gtest.h>
 #include <numeric>
 
+#include "../common.h"
 #include "../file_reader.h"
 #include "../fs.hpp"
 #include "../io_executor.h"
 #include "../task.h"
-#include "../common.h"
 
 #include "error.hpp"
 
@@ -204,7 +204,9 @@ namespace hedge::async
                 << "Expected to read sequential bytes, but got different data at page " << i;
 
             if(i == 8)
+            {
                 ASSERT_TRUE(view.is_eof()) << "Expected view to be at EOF after reading all pages";
+            }
         }
 
         for(int i = 0; i < 4; i++)

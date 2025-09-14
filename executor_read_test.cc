@@ -127,7 +127,7 @@ int main()
     auto rng = std::mt19937(std::random_device{}());
     auto dist = std::uniform_int_distribution<size_t>(0, file_size / PAGE_SIZE - 10);
 
-    auto N_REQUESTS = 1000000;
+    auto N_REQUESTS = 1000000UL;
     wg.set(N_REQUESTS);
 
     auto t0 = std::chrono::steady_clock::now();

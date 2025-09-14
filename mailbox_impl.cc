@@ -82,9 +82,6 @@ namespace hedge::async
 
         this->response.bytes_written = cqe->res;
 
-        if(cqe->res != this->request.size)
-            log("Wrong read: expected ", this->request.size, ", got ", cqe->res, " (user_data: ", cqe->user_data, ")");
-
         return true;
     }
 

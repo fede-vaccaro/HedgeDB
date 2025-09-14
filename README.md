@@ -51,7 +51,7 @@ One of the core design element is to avoid 3rd party dependencies as much as pos
 For compiling with `cmake`:
 
 ```bash
-cmake . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev && cmake --build build -j 16
+cmake . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev && cmake --build build -j$(nproc)
 ```
 
 Of course you can change build type to `Debug`, or change the number of jobs.
@@ -60,7 +60,15 @@ Of course you can change build type to `Debug`, or change the number of jobs.
 
 You can run the `database_test` for a write/read test with 75M 1KB records. This test is going to be time-measured, though.
 
+Might be useful to raise the number of file descriptors, though:
+
+```bash
+ulimit -n 1048576
 ```
+
+Then, for starting the test:
+
+```bash
 $ ./build/database_test
 [==========] Running 1 test from 1 test suite.
 [----------] Global test environment set-up.
