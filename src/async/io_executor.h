@@ -71,7 +71,8 @@ namespace hedge::async
             return future.get();
         }
 
-        void submit_io_task(task<void> task);
+        void submit_io_task(task<void> task); // do NOT call this from a task, otherwise it will deadlock! TODO: address this
+
         void shutdown();
 
         auto submit_request(auto request)
