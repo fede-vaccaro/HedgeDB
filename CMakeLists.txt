@@ -87,3 +87,12 @@ target_link_libraries(worker_test uring gtest gtest_main)
 # database tests
 add_executable(database_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/database.spec.cc)
 target_link_libraries(database_test uring gtest gtest_main)
+
+
+# library and tests
+add_library(hedgedb STATIC ${IO_EXECUTOR_SRCS} ${DB_SOURCES} api/api.h api/api.cc api/config.h)
+target_link_libraries(hedgedb PRIVATE uring)
+
+# db api tests
+add_executable(db_api_test test/api.spec.cc)
+target_link_libraries(db_api_test PUBLIC hedgedb gtest gtest_main)
