@@ -8,6 +8,7 @@
 
 #include "async/io_executor.h"
 #include "db/value_table.h"
+#include "utils.h"
 
 namespace hedge::db
 {

@@ -3,10 +3,11 @@
 #include <error.hpp>
 #include <filesystem>
 
+#include "types.h"
+#include "utils.h"
 #include "async/io_executor.h"
 #include "async/mailbox_impl.h"
-#include "common.h"
-#include "db/value_table.h"
+#include "value_table.h"
 
 namespace hedge::db
 {

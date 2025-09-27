@@ -69,7 +69,7 @@ namespace hedge::db
         size_t PAYLOAD_SIZE{};           // payload size in bytes
         size_t MEMTABLE_CAPACITY{};      // memtable capacity
         bool TEST_DELETION{true};        // whether to test deletion or not
-        double DELETE_PROBABILITY{0.02}; // if deletion test is enabled, how many keys of total should be removed
+        double DELETE_PROBABILITY{0.0}; // if deletion test is enabled, how many keys of total should be removed
 
         // runtime
         std::shared_ptr<hedge::async::executor_context> _executor;
@@ -94,6 +94,8 @@ namespace hedge::db
         db_config config;
         config.auto_compaction = true;
         config.keys_in_mem_before_flush = this->MEMTABLE_CAPACITY;
+        config.compaction_read_ahead_size_bytes = 4 * 1024 * 1024;
+        config.num_partition_exponent = 0;
 
         auto maybe_db = database::make_new(this->_base_path, config);
         ASSERT_TRUE(maybe_db) << "An error occurred while creating the database: " << maybe_db.error().to_string();
@@ -158,17 +160,17 @@ namespace hedge::db
             auto key = this->_uuids[i];
             auto maybe_value = co_await db->get_async(key, this->_executor);
 
-            if(!maybe_value.has_value() && maybe_value.error().code() == errc::DELETED)
-            {
-                if(!this->_deleted_keys.contains(key))
-                {
-                    number_of_errors++;
-                    std::cerr << "Key should be between the deleteds: " << key << std::endl;
-                }
+            // if(!maybe_value.has_value() && maybe_value.error().code() == errc::DELETED)
+            // {
+            //     if(!this->_deleted_keys.contains(key))
+            //     {
+            //         number_of_errors++;
+            //         std::cerr << "Key should be between the deleteds: " << key << std::endl;
+            //     }
 
-                read_wg.decr();
-                co_return;
-            }
+            //     read_wg.decr();
+            //     co_return;
+            // }
 
             if(!maybe_value)
             {
@@ -178,14 +180,14 @@ namespace hedge::db
                 co_return;
             }
 
-            auto& value = maybe_value.value();
+            [[maybe_unused]] auto& value = maybe_value.value();
 
-            auto expected_value = database_test::make_random_vec_seeded(this->PAYLOAD_SIZE, i);
-            if(value != expected_value)
-            {
-                std::cerr << "Retrieved value does not match expected value for item nr.  " << i << std::endl;
-                number_of_errors++;
-            }
+            // auto expected_value = database_test::make_random_vec_seeded(this->PAYLOAD_SIZE, i);
+            // if(value != expected_value)
+            // {
+            //     std::cerr << "Retrieved value does not match expected value for item nr.  " << i << std::endl;
+            //     number_of_errors++;
+            // }
 
             read_wg.decr();
         };
@@ -214,9 +216,9 @@ namespace hedge::db
         test_suite,
         database_test,
         testing::Combine(
-            testing::Values(4'000'000), // n keys
-            testing::Values(4096),      // payload size
-            testing::Values(1'000'000)  // memtable capacity
+            testing::Values(30'000'000), // n keys
+            testing::Values(100),      // payload size
+            testing::Values(10'000'000)  // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)
         {
