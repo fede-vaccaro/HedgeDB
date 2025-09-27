@@ -30,7 +30,7 @@ struct api_example_util
         this->_uuids.reserve(_n_keys);
     }
 
-    // Parameters hardcoded from the original INSTANTIATE_TEST_SUITE_P
+    // Configurable (todo) test parameters
     size_t _n_keys;            // number of keys
     size_t _payload_size;      // payload size in bytes
     size_t _memtable_capacity; // memtable capacity
@@ -44,14 +44,14 @@ struct api_example_util
 
     uuids::uuid generate_uuid()
     {
+        // The uuids are stored for read-back verification
         this->_uuids.emplace_back(this->gen());
         return this->_uuids.back();
     }
 
     static std::vector<uint8_t> make_random_vec_seeded(size_t size, size_t seed)
     {
-        // Note: In a real application, a static cache like this might be risky across threads.
-        // For this example, we keep the original test logic.
+        // The payloads are cached to avoid compute and space overhead
         static std::unordered_map<size_t, std::vector<uint8_t>> cache;
         constexpr size_t MAX_CACHE_ITEMS_CAPACITY = 1024;
 
@@ -65,12 +65,10 @@ struct api_example_util
         std::ranges::generate(vec, [&dist, &generator]()
                               { return dist(generator); });
 
-        // To prevent cache bloat in a long test, use the modulo of the seed for caching
         cache[seed % MAX_CACHE_ITEMS_CAPACITY] = vec;
         return cache[seed % MAX_CACHE_ITEMS_CAPACITY];
     }
 };
-
 
 int main()
 {
@@ -112,7 +110,7 @@ int main()
         db->put(key,
                 std::move(value),
                 [&write_wg](auto status)
-                {                    
+                {
                     if(!status)
                         std::cerr << "An error occurred during insertion: " << status.error().to_string() << std::endl;
                     write_wg.decr();
@@ -145,9 +143,7 @@ int main()
     double load_factor = db->load_factor();
     std::cout << "Database load factor after compaction: " << load_factor << std::endl;
     if(std::abs(load_factor - 1.0) > 0.0001) // Simple check for near-equality
-    {
         std::cerr << "Warning: Read amplification is " << load_factor << " (Expected 1.0 after full compaction)" << std::endl;
-    }
 
     // --- 4. Retrieval Test ---
     hedge::async::working_group read_wg;
