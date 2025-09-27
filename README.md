@@ -77,7 +77,9 @@ ulimit -n 1048576
 
 It will attempt to create the db in `/tmp/db`. It will delete the directory at the next start.
 
-From the example you can also understand the basic DB operators.
+From the example, you can also understand the basic DB operators.
+
+_You might need to run the example with `sudo`_
 
 ## Benchmarks
 
