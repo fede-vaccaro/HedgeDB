@@ -24,7 +24,7 @@ So far it is only Linux compatible as it heavily leverage [liburing](https://git
 
 #### TODO
 
-- [ ] **Values garbage collection**: (in progress) space from deleted values is not freed yet.
+- [ ] **Values garbage collection**: space from deleted values is not freed yet.
 
 - [ ] **Key/Value update**: Key update feature should follow the deletion right away, but a value update was not implemented yet.
 
@@ -32,9 +32,11 @@ So far it is only Linux compatible as it heavily leverage [liburing](https://git
 
 - [ ] **Write-ahead log & crash recovery**: if any fault occur during write, there might be some data loss and/or the database will end up in an undefined state. This feature is fundamental for a production-ready storage.
 
-- [ ] **General purpose API**: currently the `database` class API is only usable within a `async::task<void>` (which can be spawned on the `executor`); a callback-based API would improve the database usability.
+- [x] **General purpose API**: currently the `database` class API is only usable within a `async::task<void>` (which can be spawned on the `executor`); a callback-based API would improve the database usability.
 
-## How to compile it
+- [ ] **Add arguments to the example**: just for exploring
+
+## Compile & install
 
 Other than `liburing` (which you can install with `sudo apt install liburing`), HedgeDB just needs to be compiled with a modern C++ compiler.
 
@@ -55,6 +57,27 @@ cmake . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev && cmake --build build -j$(
 ```
 
 Of course you can change build type to `Debug`, or change the number of jobs.
+
+Finally, you can install it in the `./hedgedb` directory with:
+
+```bash
+cmake --install build --prefix hedgedb
+```
+
+## Running the example
+
+After having built and installed the library, you can build and run the example:
+
+```bash
+cd example
+cmake . -B build && cmake --build build
+ulimit -n 1048576 
+./build/example
+```
+
+It will attempt to create the db in `/tmp/db`. It will delete the directory at the next start.
+
+From the example you can also understand the basic DB operators.
 
 ## Benchmarks
 

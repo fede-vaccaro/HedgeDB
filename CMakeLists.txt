@@ -1,5 +1,4 @@
 cmake_minimum_required(VERSION 3.10) 
-
 project(hedgeDB CXX)
 
 enable_testing()
@@ -10,6 +9,7 @@ FetchContent_Declare(
         URL https://github.com/google/googletest/archive/03597a01ee50ed33e9dfd640b249b4be3799d395.zip
 )
 
+set(INSTALL_GTEST OFF)
 FetchContent_MakeAvailable(googletest)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -28,9 +28,20 @@ elseif (CMAKE_BUILD_TYPE MATCHES "Release")
     set(CMAKE_CXX_FLAGS "-O3")
 endif()
 
+set(PUBLIC_INCLUDES 
+    "include"
+    "include/api"
+    "include/async"
+)
+
+include_directories(PUBLIC ${PUBLIC_INCLUDES})
+include_directories(PRIVATE "src")
+
+
 set(DB_SOURCES
-    src/common.cc
-    src/common.h
+    src/types.h
+    src/utils.cc
+    src/utils.h
     src/db/index.cc
     src/db/index.h
     src/fs/fs.hpp
@@ -38,22 +49,15 @@ set(DB_SOURCES
     src/fs/file_reader.h
     src/db/value_table.cc
     src/db/value_table.h
-    src/async/worker.cc
-    src/async/worker.h
     src/db/database.cc
     src/db/database.h
 )
 
 set(IO_EXECUTOR_SRCS 
     src/async/io_executor.cc
-    src/async/io_executor.h 
-    src/async/mailbox.h
     src/async/mailbox_impl.cc
-    src/async/mailbox_impl.h
-    src/async/task.h
+    src/async/worker.cc
 )
-
-include_directories(PRIVATE "src/include" "src")
 
 # executor_read_test.cc
 add_executable(executor_read_test ${IO_EXECUTOR_SRCS} src/executor_read_test.cc)
@@ -88,11 +92,18 @@ target_link_libraries(worker_test uring gtest gtest_main)
 add_executable(database_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/database.spec.cc)
 target_link_libraries(database_test uring gtest gtest_main)
 
-
-# library and tests
-add_library(hedgedb STATIC ${IO_EXECUTOR_SRCS} ${DB_SOURCES} api/api.h api/api.cc api/config.h)
+# library
+add_library(hedgedb STATIC ${IO_EXECUTOR_SRCS} ${DB_SOURCES} src/api/api.cc)
 target_link_libraries(hedgedb PRIVATE uring)
+target_include_directories(hedgedb PUBLIC $<INSTALL_INTERFACE:${PUBLIC_INCLUDES}> $<BUILD_INTERFACE:${PUBLIC_INCLUDES}>)
 
 # db api tests
 add_executable(db_api_test test/api.spec.cc)
 target_link_libraries(db_api_test PUBLIC hedgedb gtest gtest_main)
+
+# installation rules
+install(TARGETS hedgedb
+    ARCHIVE 
+    DESTINATION lib
+)
+install(DIRECTORY include/ DESTINATION include)

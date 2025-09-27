@@ -5,8 +5,8 @@
 
 #include <error.hpp>
 
-#include "common.h"
 #include "fs/file_reader.h"
+#include "types.h"
 
 namespace hedge::db
 {

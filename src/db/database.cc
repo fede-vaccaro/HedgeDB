@@ -11,7 +11,8 @@
 #include <error.hpp>
 
 #include "async/working_group.h"
-#include "common.h"
+#include "types.h"
+#include "utils.h"
 #include "database.h"
 #include "index.h"
 #include "value_table.h"

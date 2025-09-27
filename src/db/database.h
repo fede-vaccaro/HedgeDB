@@ -9,10 +9,11 @@
 #include <logger.h>
 #include <sys/types.h>
 
+#include "types.h"
+#include "utils.h"
 #include "async/io_executor.h"
 #include "async/task.h"
 #include "async/worker.h"
-#include "common.h"
 #include "index.h"
 #include "value_table.h"
 

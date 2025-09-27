@@ -158,7 +158,7 @@ TEST_F(test_executor, test_open_fallocate_write)
 
     auto fd = openat(AT_FDCWD, "/tmp/test_file", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     ASSERT_GE(fd, 0) << "Normal open() failed: " << strerror(errno);
-    write(fd, "Hello, World!", 13);
+    [[maybe_unused]] auto res = write(fd, "Hello, World!", 13);
     close(fd);
     SUCCEED();
 
