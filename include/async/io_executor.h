@@ -36,7 +36,7 @@ namespace hedge::async
         std::unordered_map<uint64_t, std::unique_ptr<mailbox>> _in_flight_requests;
 
         std::deque<std::unique_ptr<mailbox>> _waiting_for_io_queue;
-        std::deque<std::unique_ptr<mailbox>> _ready_queue;
+        std::deque<std::unique_ptr<mailbox>> _io_ready_queue;
 
         std::condition_variable _cv;
         std::mutex _pending_requests_mutex;
@@ -94,7 +94,7 @@ namespace hedge::async
         void _submit_sqe();
         void _do_work();
         void _wait_for_cqe();
-        void _run();
+        void _event_loop();
         std::vector<io_uring_sqe*>& _fill_sqes(size_t sqes_requested);
 
         static uint64_t forge_request_key(uint64_t request_id, uint8_t sub_request_idx);

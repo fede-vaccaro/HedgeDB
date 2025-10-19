@@ -7,6 +7,7 @@
 
 #include "fs/file_reader.h"
 #include "types.h"
+#include "utils.h"
 
 namespace hedge::db
 {
@@ -31,7 +32,7 @@ namespace hedge::db
     // As you can see, the read section is discarded, the newly read buffer
     // is appended and the iterator is updated
     //
-    // It's important to note that for convenience the iterator "views" the
+    // It's important to note that for convenience, the iterator sees the
     // buffer as an array of `index_entry_t`, while the underlying type is
     // uint8_t.
     class rolling_buffer
@@ -70,7 +71,7 @@ namespace hedge::db
 
         bool eof()
         {
-            return this->_buffer.empty();
+            return this->_buffer.empty() && this->_reader.is_eof();
         }
 
         const byte_buffer_t& buffer()
