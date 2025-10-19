@@ -58,7 +58,7 @@ namespace hedge::async
             throw std::runtime_error("error with io_uring_queue_init: "s + strerror(-ret));
 
         this->_worker = std::thread([this]()
-                                    { this->_run(); });
+                                    { this->_event_loop(); });
     }
 
     executor_context::~executor_context()
@@ -116,7 +116,7 @@ namespace hedge::async
         {
             io_uring_sqe* sqe = io_uring_get_sqe(&this->_ring);
 
-            if(!sqe)
+            if(sqe == nullptr)
                 throw std::runtime_error("io_uring_get_sqe failed");
 
             uint64_t sqe_id = forge_request_key(this->current_request_id, static_cast<uint8_t>(i));
@@ -134,7 +134,7 @@ namespace hedge::async
         auto in_flight = static_cast<int32_t>(this->_in_flight_requests.size());
 
         auto potential_cqe_ready = sq_ready + in_flight;
-        auto cqe_space_margin = static_cast<int32_t>(this->_queue_depth) * 2 - potential_cqe_ready;
+        auto cqe_space_margin = (static_cast<int32_t>(this->_queue_depth) * 2) - potential_cqe_ready;
 
         if(cqe_space_margin <= 0) // avoid cqe overflow risk
             return;
@@ -210,7 +210,7 @@ namespace hedge::async
 
             if(mailbox->handle_cqe(cqe, sub_request_id))
             {
-                this->_ready_queue.emplace_back(std::move(mailbox));
+                this->_io_ready_queue.emplace_back(std::move(mailbox));
                 this->_in_flight_requests.erase(it);
             }
 
@@ -222,10 +222,10 @@ namespace hedge::async
 
     void executor_context::_do_work()
     {
-        while(!this->_ready_queue.empty())
+        while(!this->_io_ready_queue.empty())
         {
-            auto mailbox = std::move(this->_ready_queue.front());
-            this->_ready_queue.pop_front();
+            auto mailbox = std::move(this->_io_ready_queue.front());
+            this->_io_ready_queue.pop_front();
 
             mailbox->resume();
 
@@ -267,7 +267,7 @@ namespace hedge::async
             this->_worker.join();
     }
 
-    void executor_context::_run()
+    void executor_context::_event_loop()
     {
         log_always("Launching io executor. Queue depth: ", this->_queue_depth, " Max buffered tasks: ", this->_max_buffered_requests);
 
