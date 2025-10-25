@@ -5,16 +5,18 @@
 
 #include <gtest/gtest.h>
 
-#include "db/index.h"
 #include "async/io_executor.h"
 #include "async/working_group.h"
+#include "db/index_ops.h"
+#include "db/mem_index.h"
+#include "db/sorted_index.h"
+#include "utils.h"
 
 uint32_t uuid_fake_size(const uuids::uuid& uuid)
 {
     const auto& uuids_as_std_array = reinterpret_cast<const std::array<uint8_t, 16>&>(uuid);
     return uuids_as_std_array[0] + (uuids_as_std_array[1] % 125); // Just a fake size based on the first two bytes
 };
-
 
 struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, size_t>>
 {
@@ -367,8 +369,8 @@ INSTANTIATE_TEST_SUITE_P(
     sorted_string_merge_test,
     testing::Combine(
         testing::Values(1000, 5000, 10'000, 1'000'000), // n keys
-        testing::Values(0, 1, 4, 10, 16),    // num partition exponent -> 1, 2, 16, 1024, 65536 partitions
-        testing::Values(4096, 8192, 16384)   // Read ahead size
+        testing::Values(0, 1, 4, 10, 16),               // num partition exponent -> 1, 2, 16, 1024, 65536 partitions
+        testing::Values(4096, 8192, 16384)              // Read ahead size
         ),
     [](const testing::TestParamInfo<sorted_string_merge_test::ParamType>& info)
     {

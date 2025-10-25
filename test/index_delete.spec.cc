@@ -8,7 +8,10 @@
 
 #include "async/io_executor.h"
 #include "async/working_group.h"
-#include "db/index.h"
+#include "db/index_ops.h"
+#include "db/mem_index.h"
+#include "db/sorted_index.h"
+#include "utils.h"
 
 uint32_t uuid_fake_size(const uuids::uuid& uuid)
 {

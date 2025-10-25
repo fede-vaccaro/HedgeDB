@@ -9,12 +9,12 @@
 #include <logger.h>
 #include <sys/types.h>
 
-#include "types.h"
-#include "utils.h"
 #include "async/io_executor.h"
 #include "async/task.h"
 #include "async/worker.h"
-#include "index.h"
+#include "mem_index.h"
+#include "sorted_index.h"
+#include "types.h"
 #include "value_table.h"
 
 namespace hedge::db

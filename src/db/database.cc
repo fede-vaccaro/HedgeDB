@@ -14,8 +14,9 @@
 #include "types.h"
 #include "utils.h"
 #include "database.h"
-#include "index.h"
+#include "sorted_index.h"
 #include "value_table.h"
+#include "index_ops.h"
 
 namespace hedge::db
 {
