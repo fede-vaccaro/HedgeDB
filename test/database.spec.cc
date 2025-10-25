@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <cstddef>
 #include <filesystem>
-#include <gtest/gtest.h>
 #include <random>
+#include <unordered_set>
+
+#include <gtest/gtest.h>
 
 #include "async/io_executor.h"
 #include "async/working_group.h"
@@ -65,10 +67,10 @@ namespace hedge::db
         }
 
         // test parameters
-        size_t N_KEYS{};                 // number of keys per run
-        size_t PAYLOAD_SIZE{};           // payload size in bytes
-        size_t MEMTABLE_CAPACITY{};      // memtable capacity
-        bool TEST_DELETION{true};        // whether to test deletion or not
+        size_t N_KEYS{};                // number of keys per run
+        size_t PAYLOAD_SIZE{};          // payload size in bytes
+        size_t MEMTABLE_CAPACITY{};     // memtable capacity
+        bool TEST_DELETION{true};       // whether to test deletion or not
         double DELETE_PROBABILITY{0.0}; // if deletion test is enabled, how many keys of total should be removed
 
         // runtime
@@ -148,7 +150,7 @@ namespace hedge::db
         duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         std::cout << "Total duration for compaction: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
 
-        EXPECT_DOUBLE_EQ(db->load_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
+        EXPECT_DOUBLE_EQ(db->read_amplification_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
 
         async::working_group read_wg;
         read_wg.set(this->N_KEYS);
@@ -208,7 +210,7 @@ namespace hedge::db
         duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         std::cout << "Total duration for retrieval: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
         std::cout << "Average duration per retrieval: " << (double)duration.count() / this->N_KEYS << " us" << std::endl;
-        std::cout << "Retrieval throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000)  << " items/s" << std::endl;
+        std::cout << "Retrieval throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000) << " items/s" << std::endl;
         std::cout << "Retrieval bandwidth: " << (double)this->N_KEYS * (this->PAYLOAD_SIZE / 1024.0) / (duration.count() / 1000.0) << " MB/s" << std::endl;
     }
 
@@ -217,7 +219,7 @@ namespace hedge::db
         database_test,
         testing::Combine(
             testing::Values(30'000'000), // n keys
-            testing::Values(100),      // payload size
+            testing::Values(100),        // payload size
             testing::Values(10'000'000)  // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)

@@ -4,19 +4,19 @@
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 #include <error.hpp>
 
 #include "async/working_group.h"
+#include "database.h"
+#include "index_ops.h"
+#include "sorted_index.h"
 #include "types.h"
 #include "utils.h"
-#include "database.h"
-#include "sorted_index.h"
 #include "value_table.h"
-#include "index_ops.h"
 
 namespace hedge::db
 {
@@ -42,61 +42,68 @@ namespace hedge::db
         std::filesystem::create_directories(db->_indices_path);
         std::filesystem::create_directories(db->_values_path);
 
-        // todo write manifest file
-        //
+        // TODO: Write a manifest file to store configuration and database state (e.g., last table ID).
+        // This might be relevant for correctly loading the database later.
 
-        // init inner data structures
         db->_mem_index.reserve(config.keys_in_mem_before_flush);
 
         auto new_value_table = value_table::make_new(db->_values_path, 0);
         if(!new_value_table)
-            return hedge::error("Failed to create value table: " + new_value_table.error().to_string());
+            return hedge::error("Failed to create initial value table: " + new_value_table.error().to_string());
 
         db->_current_value_table = std::make_shared<value_table>(std::move(new_value_table.value()));
+        db->_last_table_id = 0;
+
         return db;
     }
 
     expected<std::shared_ptr<database>> database::load(const std::filesystem::path& /* base_path */)
     {
+        // TODO: Implement database loading:
+        // 1. Read manifest file (contains config, last table ID, index file list, etc.).
+        // 2. Validate paths and configuration.
+        // 3. Load all sorted_index files mentioned in the manifest into `_sorted_indices`.
+        // 4. Load all value_table files (except the current one) into `_value_tables`.
+        // 5. Load the most recent value_table as `_current_value_table`.
+        // 6. Potentially replay WAL if implemented.
         return hedge::error("Load database from path not implemented yet");
     }
 
     async::task<hedge::status> database::put_async(key_t key, const byte_buffer_t& value, const std::shared_ptr<async::executor_context>& executor)
     {
-        // lazy flush the memtable if no space left in the memtable
+        // Check if the memtable has reached its capacity limit.
         if(this->_mem_index.size() >= this->_config.keys_in_mem_before_flush)
         {
             if(auto status = this->_flush_mem_index(); !status)
                 co_return hedge::error("An error occurred while flushing the mem_index: " + status.error().to_string());
 
-            // trigger compaction
+            // Trigger compaction
             if(this->_config.auto_compaction)
-                this->compact_sorted_indices(false, executor);
+                (void)this->compact_sorted_indices(false, executor);
         }
 
-        // first it tries writing the data to the value table
-        auto value_table = this->_current_value_table; // acquire ownership of the current value table
-        auto reservation = value_table->get_write_reservation(value.size());
+        // --- Write value to Value Table ---
+        std::shared_ptr<value_table> value_table_local = this->_current_value_table;
+        expected<value_table::write_reservation> reservation = value_table_local->get_write_reservation(value.size());
 
-        // make a new value table if the space limit is reached
         if(!reservation && reservation.error().code() == hedge::errc::VALUE_TABLE_NOT_ENOUGH_SPACE)
         {
             if(auto status = this->_rotate_value_table(); !status)
                 co_return hedge::error("Failed to rotate value table: " + status.error().to_string());
 
-            value_table = this->_current_value_table; // acquire ownership of the new value table
-            reservation = value_table->get_write_reservation(value.size());
+            value_table_local = this->_current_value_table; // acquire ownership of the new value table
+            reservation = value_table_local->get_write_reservation(value.size());
         }
 
         if(!reservation)
             co_return hedge::error("Failed to reserve space in value table: " + reservation.error().to_string());
 
-        // execute the actual writes
-        auto write_response = co_await value_table->write_async(key, value, reservation.value(), executor);
+        auto write_response = co_await value_table_local->write_async(key, value, reservation.value(), executor);
 
         if(!write_response)
             co_return hedge::error("Failed to write value to value table: " + write_response.error().to_string());
 
+        // --- Update Memtable ---
         this->_mem_index.put(key, write_response.value());
 
         co_return hedge::ok();
@@ -109,28 +116,28 @@ namespace hedge::db
 
     async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> database::_find_value_ptr_and_value_table(key_t key, const std::shared_ptr<async::executor_context>& executor)
     {
-        // try from memtable
-        auto value_ptr = this->_mem_index.get(key);
+        // Step 1: Check the memtable first (contains the most recent data).
+        std::optional<value_ptr_t> value_ptr_opt = this->_mem_index.get(key);
 
-        // fallback to sorted indices
-        if(!value_ptr.has_value())
+        // Step 2: If not found in memtable, search the relevant sorted index files.
+        if(!value_ptr_opt.has_value())
         {
             size_t matching_partition_id = this->_find_matching_partition_for_key(key);
-            std::vector<sorted_index_ptr_t> sorted_indices;
+            std::vector<sorted_index_ptr_t> sorted_indices_local; // Local copy for safe iteration
 
             {
                 std::lock_guard lk(this->_sorted_index_mutex);
                 auto sorted_indices_it = this->_sorted_indices.find(matching_partition_id);
 
                 if(sorted_indices_it == this->_sorted_indices.end())
-                    co_return hedge::error("Cannot find matching sorted index", errc::KEY_NOT_FOUND);
+                    co_return hedge::error("Key partition not found in sorted indices", errc::KEY_NOT_FOUND);
 
-                // acquire (temporary) ownership of the sorted_indices
-                sorted_indices = sorted_indices_it->second;
+                sorted_indices_local = sorted_indices_it->second;
             }
 
-            // lookup for the key in every sorted index with same key
-            for(auto& sorted_index_ptr : sorted_indices)
+            // Need to search ALL indices in the partition and find the one with the highest priority `value_ptr_t`.
+            // TODO: Add bloom filter support to skip unnecessary lookups.
+            for(auto& sorted_index_ptr : sorted_indices_local)
             {
                 auto maybe_value_ptr = co_await sorted_index_ptr->lookup_async(key, executor);
                 if(!maybe_value_ptr.has_value())
@@ -138,21 +145,22 @@ namespace hedge::db
 
                 if(auto& opt_value_ptr = maybe_value_ptr.value(); opt_value_ptr.has_value())
                 {
-                    if(!value_ptr.has_value())
-                        value_ptr = opt_value_ptr.value();
-                    else if(value_ptr && *opt_value_ptr < *value_ptr)
-                        value_ptr = opt_value_ptr.value();
+                    if(!value_ptr_opt.has_value())
+                        value_ptr_opt = opt_value_ptr.value();
+                    else if(value_ptr_opt && *opt_value_ptr < *value_ptr_opt)
+                        value_ptr_opt = opt_value_ptr.value();
                 }
             }
         }
 
-        if(!value_ptr.has_value())
+        if(!value_ptr_opt.has_value())
             co_return hedge::error("Key not found", errc::KEY_NOT_FOUND);
 
-        if(value_ptr.value().is_deleted())
+        if(value_ptr_opt.value().is_deleted())
             co_return hedge::error("Key deleted from index", errc::DELETED);
 
-        auto table_finder = [this](size_t id) -> std::shared_ptr<value_table>
+        // Step 4: Find the corresponding value table based on the table ID in the value pointer.
+        auto table_finder = [this](uint32_t id) -> std::shared_ptr<value_table>
         {
             if(this->_current_value_table->id() == id)
                 return this->_current_value_table;
@@ -166,11 +174,12 @@ namespace hedge::db
             return nullptr;
         };
 
-        auto table_ptr = table_finder(value_ptr->table_id());
+        // Get the table pointer using the finder lambda.
+        std::shared_ptr<value_table> table_ptr = table_finder(value_ptr_opt->table_id());
         if(table_ptr == nullptr)
-            co_return hedge::error("Could not find the matching table " + std::to_string(value_ptr->table_id()));
+            co_return hedge::error("Value table with ID " + std::to_string(value_ptr_opt->table_id()) + " not found");
 
-        co_return {value_ptr.value(), std::move(table_ptr)};
+        co_return {value_ptr_opt.value(), std::move(table_ptr)};
     }
 
     async::task<expected<database::byte_buffer_t>> database::get_async(key_t key, const std::shared_ptr<async::executor_context>& executor)
@@ -185,26 +194,35 @@ namespace hedge::db
         auto maybe_file = co_await table_ptr->read_async(value_ptr.offset(), value_ptr.size(), executor);
 
         if(!maybe_file)
-            co_return hedge::error(std::format("An error occurred while reading from table {}: {}", table_ptr->path().string(), maybe_file.error().to_string()));
+            co_return hedge::error(std::format("Error reading value from table {}: {}", table_ptr->path().string(), maybe_file.error().to_string()));
 
-        // todo implement paranoid check between header and binaries
+        // TODO: Implement optional paranoid check: compare the key in the read header (`maybe_file.value().header.key`)
+        // with the requested `key` to detect potential data corruption or pointer errors.
 
         co_return std::move(maybe_file.value().binaries);
     }
 
     size_t database::_find_matching_partition_for_key(const key_t& key) const
     {
+        // Calculate the range of key prefixes covered by each partition.
+        // Total key space is 2^16 (for 16-bit prefix). Number of partitions is 2^exponent.
         size_t partition_size = (1 << 16) / (1 << this->_config.num_partition_exponent);
 
-        auto matching_partition_id = hedge::find_partition_prefix_for_key(key, partition_size);
+        // Use the utility function to find the upper-bound prefix ID for the partition containing the key.
+        size_t matching_partition_id = hedge::find_partition_prefix_for_key(key, partition_size); // Corrected type
 
         return matching_partition_id;
     }
 
     async::task<hedge::status> database::remove_async(key_t key, const std::shared_ptr<async::executor_context>& executor)
     {
+        // First, locate the latest version of the key (value_ptr and its table).
+        // This is necessary to potentially mark the entry deleted in the value log itself (if not already handled by GC).
         auto maybe_value_ptr_table = co_await this->_find_value_ptr_and_value_table(key, executor);
 
+        // TODO: We might want to allow deleting non-existing keys (idempotent delete)
+        // and completely skip the lookup. This will create some overhead in the memtable
+        // but should not be inconsistent
         if(!maybe_value_ptr_table)
             co_return maybe_value_ptr_table.error();
 
@@ -213,8 +231,10 @@ namespace hedge::db
         auto table_delete_result = co_await table_ptr->delete_async(key, value_ptr.offset(), executor);
 
         if(!table_delete_result)
-            co_return hedge::error("An error occurred while deleting an object from table: {}" + table_delete_result.error().to_string());
+            co_return hedge::error("Error marking entry deleted in value table: " + table_delete_result.error().to_string());
 
+        // TODO: As written above, we might want to allow deleting non-existing keys
+        // Hence, we might want to always run this step
         this->_mem_index.put(
             key,
             value_ptr_t::apply_delete(value_ptr));
@@ -242,10 +262,13 @@ namespace hedge::db
 
     hedge::status database::_flush_mem_index()
     {
-        this->_logger.log("Flushing mem index to ", this->_indices_path, " with number of items: ", this->_mem_index.size());
+        if(this->_mem_index.size() == 0)
+        {
+            this->_logger.log("Skipping mem index flush: Memtable is empty.");
+            return hedge::ok();
+        }
 
-        if(this->_mem_index.size() < this->_config.keys_in_mem_before_flush)
-            return hedge::error(std::format("Not enough keys in mem_index to flush: {} < {}", this->_mem_index.size(), this->_config.keys_in_mem_before_flush));
+        this->_logger.log("Flushing mem index to ", this->_indices_path, " with number of items: ", this->_mem_index.size());
 
         std::vector<mem_index> vec_memtable;
         vec_memtable.emplace_back(std::move(this->_mem_index));
@@ -282,16 +305,21 @@ namespace hedge::db
 
         {
             std::lock_guard lk(this->_sorted_index_mutex);
+
+            // Acquire shared ownership of the current sorted indices for compaction
+            // Every newly added sorted index during compaction will not be considered in this job
             indices_local_copy = this->_sorted_indices;
         }
 
-        // we'll need it for later to know how to update the database's indices
+        // It is needed in case new sorted indices are pushed back during compaction
+        // We only want to remove the original indices that were present at the start of compaction
         std::unordered_map<size_t, size_t> initial_vec_sizes;
         for(auto& [prefix, vec] : indices_local_copy)
             initial_vec_sizes.emplace(prefix, vec.size());
 
-        bool stability_reached = false;
+        bool stability_reached = false; // @see database::compact_sorted_indices() to understand compaction stability
 
+        // Main compaction loop
         while(!stability_reached)
         {
             stability_reached = true;
@@ -299,12 +327,12 @@ namespace hedge::db
             std::vector<hedge::error> errors;
             async::working_group wg;
 
-            wg.set(indices_local_copy.size());
+            wg.set(indices_local_copy.size()); // One task per partition
 
             auto make_compaction_sub_task = [this, &wg, &executor, &errors, this_iteration_id = this->_flush_iteration++](std::vector<sorted_index_ptr_t>& index_vec) -> async::task<void>
             {
-                auto last_it = index_vec.begin() + (index_vec.size() - 1);
-                auto second_last_it = last_it - 1;
+                auto smallest_index_it = index_vec.begin() + (index_vec.size() - 1);
+                auto second_smallest_index_it = smallest_index_it - 1;
 
                 auto merge_config = hedge::db::index_ops::merge_config{
                     .read_ahead_size = this->_config.compaction_read_ahead_size_bytes,
@@ -314,22 +342,23 @@ namespace hedge::db
 
                 auto maybe_compacted_table = co_await index_ops::two_way_merge_async(
                     merge_config,
-                    **second_last_it,
-                    **last_it,
+                    **second_smallest_index_it,
+                    **smallest_index_it,
                     executor);
 
                 if(!maybe_compacted_table)
                 {
                     errors.emplace_back(
                         std::format("An error occurred while compacting {} and {}: {}",
-                                    (*last_it)->path().string(),
-                                    (*second_last_it)->path().string(),
+                                    (*smallest_index_it)->path().string(),
+                                    (*second_smallest_index_it)->path().string(),
                                     maybe_compacted_table.error().to_string()));
                 }
                 else
                 {
-                    index_vec.erase(last_it);
-                    index_vec.erase(second_last_it);
+                    // Replace the two merged indices with the new one
+                    index_vec.erase(smallest_index_it);
+                    index_vec.erase(second_smallest_index_it);
 
                     index_vec.emplace_back(std::make_shared<sorted_index>(std::move(maybe_compacted_table.value())));
                 }
@@ -339,23 +368,26 @@ namespace hedge::db
 
             for(auto& [prefix, index_vec] : indices_local_copy)
             {
-                if(index_vec.size() <= 1) // nothing to compact
+                if(index_vec.size() <= 1) // Nothing to compact
                 {
                     wg.decr();
                     continue;
                 }
 
+                // Compacts the two smallest sorted indices in the partition if the size ratio condition
+                // This minimizes the number of overall operations if we stick to the two_ways_merge strategy
+                // K-way merge could be more efficient but is more complex to implement
                 std::ranges::sort(
                     index_vec,
-                    [](const sorted_index_ptr_t& a, const sorted_index_ptr_t& b)
+                    [](const sorted_index_ptr_t& lhs, const sorted_index_ptr_t& rhs)
                     {
-                        return a->size() > b->size();
+                        return lhs->size() > rhs->size();
                     });
 
-                auto lhs_size = static_cast<double>(index_vec[index_vec.size() - 1]->size());
-                auto rhs_size = static_cast<double>(index_vec[index_vec.size() - 2]->size());
+                auto smallest_index = static_cast<double>(index_vec[index_vec.size() - 1]->size());
+                auto second_smallest_index = static_cast<double>(index_vec[index_vec.size() - 2]->size());
 
-                if(!ignore_ratio && lhs_size / rhs_size <= this->_config.compaction_size_ratio)
+                if(!ignore_ratio && smallest_index / second_smallest_index <= this->_config.target_compaction_size_ratio)
                 {
                     wg.decr();
                     continue;
@@ -363,45 +395,63 @@ namespace hedge::db
 
                 stability_reached = false;
 
-                // todo: if only two sorted indices are left to compact, the merge_config.filter_deleted_keys should be true
+                // TODO: If only two sorted indices are left to compact, the merge_config.filter_deleted_keys should be true
+                // Otherwise, if
+                // - filter_delete_keys is `true`
+                // - A key is in more than two sorted indices and is deleted in one of them
+                // The key would appear again, because we lost track of it after merging the first two indices
                 executor->submit_io_task(make_compaction_sub_task(index_vec));
             }
 
+            // Barrier waiting for this round of compaction sub-tasks to complete
+            // TODO: This could be improved since we can the sorted indices belonging
+            // to each partition can be compacted independently
             bool done = wg.wait_for(this->_config.compaction_timeout);
 
             if(!done)
                 return hedge::error("compaction timeout.");
 
+            // TODO: In case there are errors occurred at mid-term during compaction,
+            // We won't loose the old sorted indices, but we might end up in stale state.
+            // This is due to not tracking which merges succeeded and which failed.
+            // So it will be hard or even impossible to reload the database correctly
+            // because on file system there will be a mix of old and new sorted indices.
+            // This should be solved by having a manifest file
             if(!errors.empty())
             {
                 for(auto& error : errors)
-                    std::cerr << "compaction sub-task error: " + error.to_string() << std::endl;
+                    this->_logger.log("Compaction error: ", error.to_string());
 
-                return hedge::error("compaction error.");
+                return hedge::error("Some errors occurred during compaction. Check the logs for details.");
             }
         }
 
-        // finalize compaction: replace the database's indices
+        // Finalize compaction: replace the database's sorted indices with the compacted ones
+        // (so far, we have only worked on local copies)
         {
             std::lock_guard lk(this->_sorted_index_mutex);
 
-            for(auto& [prefix, new_sorted_index_vec] : indices_local_copy) // remember that new_sorted_index_vecs holds the compacted sorted indices
+            for(auto& [prefix, new_sorted_index_vec] : indices_local_copy)
             {
                 auto& db_sorted_indices_vec = this->_sorted_indices[prefix];
 
                 auto range_start = db_sorted_indices_vec.begin();
-                auto range_end = range_start + initial_vec_sizes[prefix];
+                auto range_end = range_start + initial_vec_sizes[prefix]; // In case new indices were pushed back while we were busy with compaction here
 
                 std::for_each(range_start, range_end, [](const std::shared_ptr<sorted_index>& sorted_index)
-                              { sorted_index->set_delete_on_obj_destruction(true); });
+                              { sorted_index->set_delete_on_obj_destruction(true); }); // Mark old indices for deletion
+                                                                                       // At any time, there might be some coroutine owning the sorted_index shared_ptr,
+                                                                                       // so actual deletion will happen when the last shared_ptr goes completely out of scope
 
-                db_sorted_indices_vec.erase(range_start, range_end); // we cannot clear the entire vector because we could accidentally delete some table that was added in the mean while
+                // Again: we cannot clear the entire vector because we could accidentally delete some table that was added in the mean while
+                db_sorted_indices_vec.erase(range_start, range_end);
 
                 db_sorted_indices_vec.insert(db_sorted_indices_vec.end(),
                                              std::move_iterator(new_sorted_index_vec.begin()),
                                              std::move_iterator(new_sorted_index_vec.end()));
 
-                // because the indices in '[range_start, range_end]' might intersect with 'new_sorted_index_vec'
+                // This is needed when the `new_sorted_index_vec` still contains some of the original sorted indices shared_ptrs.
+                // Otherwise, we would accidentally delete them.
                 std::ranges::for_each(db_sorted_indices_vec, [](const std::shared_ptr<sorted_index>& sorted_index)
                                       { sorted_index->set_delete_on_obj_destruction(false); });
             }
@@ -416,18 +466,19 @@ namespace hedge::db
         std::future<hedge::status> compaction_future = compaction_promise_ptr->get_future();
 
         this->compaction_worker.submit(
-            [weak_db = this->weak_from_this(), promise = std::move(compaction_promise_ptr), executor, ignore_ratio]()
+            [weak_db = this->weak_from_this(), promise = std::move(compaction_promise_ptr), executor, ignore_ratio]() mutable // Make mutable for promise move
             {
                 auto db = weak_db.lock();
                 if(!db)
                 {
-                    std::cerr << "Cannot start compaction job. DB not available. returning." << std::endl;
+                    promise->set_value(hedge::error("Database instance destroyed before compaction could run."));
+                    db->_logger.log("Compaction job aborted: DB instance weak_ptr expired.");
                     return;
                 }
 
-                auto status = db->_compaction_job(ignore_ratio, executor);
+                hedge::status status = db->_compaction_job(ignore_ratio, executor);
                 if(!status)
-                    std::cerr << status.error().to_string() << std::endl;
+                    db->_logger.log("Compaction job failed: ", status.error().to_string());
 
                 promise->set_value(std::move(status));
             });
@@ -435,13 +486,16 @@ namespace hedge::db
         return compaction_future;
     }
 
-    [[nodiscard]] double database::load_factor()
+    [[nodiscard]] double database::read_amplification_factor()
     {
         std::lock_guard lk(this->_sorted_index_mutex);
         double total_read_amplification = 0.0;
 
         for(const auto& [prefix, indices] : this->_sorted_indices)
             total_read_amplification += indices.size();
+
+        if(this->_sorted_indices.empty())
+            return 0.0;
 
         return total_read_amplification / this->_sorted_indices.size();
     }
@@ -524,7 +578,13 @@ namespace hedge::db
         auto partitioned_sorted_indices = index_ops::flush_mem_index(this->_indices_path, std::move(vec_memtable), this->_config.num_partition_exponent, this->_flush_iteration++);
 
         if(!partitioned_sorted_indices)
-            co_return hedge::error("An error occurred while flushing the mem index: " + partitioned_sorted_indices.error().to_string());
+        {
+            // If flushing index updates fails, this is a critical error. The database state is inconsistent.
+            // TODO: How to handle this? Rollback? Mark DB as corrupted?
+            // For now, return the error. The old table is gone from the map, the new one is present, but indices are outdated.
+            this->_logger.log("GC: CRITICAL ERROR - Failed to flush updated index after GC for table ", table->path(), ". DB state inconsistent.");
+            co_return hedge::error("GC: Failed to flush updated index pointers: " + partitioned_sorted_indices.error().to_string());
+        }
 
         {
             std::lock_guard lk(this->_sorted_index_mutex);
@@ -602,6 +662,7 @@ namespace hedge::db
         if(auto status = this->_flush_mem_index(); !status)
             return hedge::error("An error occurred while flushing the mem_index: " + status.error().to_string());
 
+        this->_logger.log("Manual flush completed successfully.");
         return hedge::ok();
     }
 

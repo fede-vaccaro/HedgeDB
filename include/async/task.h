@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cassert>
 #include <coroutine>
 #include <cstdint>
@@ -9,12 +10,17 @@
 
 static int counter = 0;
 
+/*
+    task<T> Implementation
+
+    Based on the cppcoro (https://github.com/lewissbaker/cppcoro) task implementation with some modifications.
+*/
 namespace hedge::async
 {
     template <typename PROMISE>
     struct awaitable_final_suspend
     {
-        bool await_ready() const noexcept { return false; }
+        [[nodiscard]] bool await_ready() const noexcept { return false; }
         std::coroutine_handle<> await_suspend(std::coroutine_handle<PROMISE> h) noexcept
         {
             if(auto c = h.promise()._continuation)
@@ -30,7 +36,7 @@ namespace hedge::async
     {
         using handle_t = std::coroutine_handle<task_promise<TASK, RETURN_VALUE>>;
 
-        uint8_t _data[sizeof(RETURN_VALUE)];
+        std::array<uint8_t, sizeof(RETURN_VALUE)> _data;
         RETURN_VALUE* _value;
         std::coroutine_handle<> _continuation;
 
@@ -109,7 +115,7 @@ namespace hedge::async
 
     public:
         using promise_type = promise_t;
-        task(task&& r) : _handle{std::exchange(r._handle, {})} {}
+        task(task&& r) noexcept : _handle{std::exchange(r._handle, {})} {}
         ~task()
         {
             if(this->_handle)
@@ -119,7 +125,7 @@ namespace hedge::async
         task(const task&) = delete;
         task& operator=(const task&) = delete;
 
-        task& operator=(task&& r)
+        task& operator=(task&& r) noexcept
         {
             if(this != &r)
             {

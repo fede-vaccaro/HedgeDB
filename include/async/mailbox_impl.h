@@ -49,9 +49,9 @@ namespace hedge::async
         auto resume()
         {
             /*
-            todo:
-            use an std::atomic_bool for signaling that the response has been set
-            this is needed for allowing:
+            TODO:
+            Use an std::atomic_bool for signaling that the response has been set.
+            This is needed for allowing:
 
                 awaitable_mailbox<read_response> future = co_await executor.submit_request(read_request{...});
 
@@ -59,9 +59,9 @@ namespace hedge::async
 
                 auto read_response = co_await future;
 
-            right now, this won't work and will make the program to crash because the io_executor will try to resume it later
-            but the continuation is set only within awaitable_mailbox::await_suspend, which is called only on 'co_await future'
-            i'm not sure an atomic_bool is needed, since this is a single-threaded executor
+                At the time being, this won't work and will make the program to crash because the io_executor will try to resume it later
+                but the continuation is set only within awaitable_mailbox::await_suspend, which is called only on 'co_await future'
+                i'm not sure an atomic_bool is needed, since so far the executor is single-threaded
             */
 
             if(this->continuation.done())
@@ -84,7 +84,7 @@ namespace hedge::async
         struct {op}_request
         {
             using response_t = {op}_response;
-            using mailbox_t = {op}_malbox;
+            using mailbox_t = {op}_mailbox;
 
             // request members
         };
@@ -106,6 +106,7 @@ namespace hedge::async
 
     */
 
+    // NOLINTBEGIN (*-readability-convert-member-functions-to-static)
     struct read_response;
     struct read_mailbox;
 
@@ -129,7 +130,7 @@ namespace hedge::async
     struct read_mailbox : mailbox_base<read_mailbox>
     {
         read_mailbox(read_request req)
-            : request(std::move(req)) {}
+            : request(req) {}
 
         read_request request;
         read_response response;
@@ -171,7 +172,7 @@ namespace hedge::async
     struct unaligned_read_mailbox : mailbox_base<unaligned_read_mailbox>
     {
         unaligned_read_mailbox(unaligned_read_request req)
-            : request(std::move(req)) {}
+            : request(req) {}
 
         unaligned_read_request request;
         unaligned_read_response response;
@@ -214,7 +215,7 @@ namespace hedge::async
     struct write_mailbox : mailbox_base<write_mailbox>
     {
         write_mailbox(write_request req)
-            : request(std::move(req)) {}
+            : request(req) {}
 
         write_request request;
         write_response response;
@@ -339,7 +340,7 @@ namespace hedge::async
     struct fallocate_mailbox : mailbox_base<fallocate_mailbox>
     {
         fallocate_mailbox(fallocate_request req)
-            : request(std::move(req)) {}
+            : request(req) {}
 
         fallocate_request request;
         fallocate_response response;
@@ -378,7 +379,7 @@ namespace hedge::async
     struct close_mailbox : mailbox_base<close_mailbox>
     {
         close_mailbox(close_request req)
-            : request(std::move(req)) {}
+            : request(req) {}
 
         close_request request;
         close_response response;
@@ -463,7 +464,7 @@ namespace hedge::async
     struct fsync_mailbox : mailbox_base<fsync_mailbox>
     {
         fsync_mailbox(fsync_request req)
-            : request(std::move(req)) {}
+            : request(req) {}
 
         fsync_request request;
         fsync_response response;
@@ -481,6 +482,7 @@ namespace hedge::async
             return &response;
         }
     };
+    // NOLINTEND (*-readability-convert-member-functions-to-static)
 
     using mailbox_impls =
         std::variant<
