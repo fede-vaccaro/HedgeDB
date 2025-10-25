@@ -8,10 +8,9 @@
 
 #include <error.hpp>
 
-#include "types.h"
-#include "utils.h"
 #include "async/io_executor.h"
 #include "fs/fs.hpp"
+#include "types.h"
 
 namespace hedge::db
 {
@@ -20,76 +19,6 @@ namespace hedge::db
 
     struct sorted_index_footer;
     struct meta_index_entry;
-
-    struct index_ops
-    {
-        static std::vector<index_entry_t> merge_memtables_in_mem(std::vector<mem_index>&& indices);
-        static hedge::expected<sorted_index> load_sorted_index(const std::filesystem::path& path, bool load_index = false);
-        static hedge::expected<sorted_index> save_as_sorted_index(const std::filesystem::path& path, std::vector<index_entry_t>&& sorted_keys, size_t upper_bound, bool merge_with_existent = false);
-        static hedge::expected<std::vector<sorted_index>> flush_mem_index(const std::filesystem::path& base_path, std::vector<mem_index>&& indices, size_t num_partition_exponent, size_t flush_iteration);
-
-        struct merge_config
-        {
-            size_t read_ahead_size{};
-            size_t new_index_id{};
-            std::filesystem::path base_path{};
-            bool discard_deleted_keys{false};
-        };
-
-        static async::task<hedge::expected<sorted_index>> two_way_merge_async(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
-        static hedge::expected<sorted_index> two_way_merge(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
-    };
-
-    class mem_index
-    {
-        using index_t = std::unordered_map<key_t, value_ptr_t>;
-
-        friend struct index_ops;
-
-        index_t _index;
-
-    public:
-        mem_index() = default;
-
-        mem_index(mem_index&& other) noexcept = default;
-        mem_index& operator=(mem_index&& other) noexcept = default;
-
-        mem_index(const mem_index&) = delete;
-        mem_index& operator=(const mem_index&) = delete;
-
-        void clear()
-        {
-            this->_index.clear();
-        }
-
-        void reserve(size_t size)
-        {
-            this->_index.reserve(size);
-        }
-
-        bool put(const key_t& key, const value_ptr_t& value)
-        {
-            auto [it, inserted] = this->_index.emplace(key, value);
-
-            if(!inserted)
-                it->second = value;
-
-            return true;
-        }
-
-        std::optional<value_ptr_t> get(const key_t& key) const
-        {
-            auto it = _index.find(key);
-            if(it != _index.end())
-                return it->second;
-            return std::nullopt; // Key not found
-        }
-
-        size_t size() const
-        {
-            return this->_index.size();
-        };
-    };
 
     struct sorted_index_footer
     {
