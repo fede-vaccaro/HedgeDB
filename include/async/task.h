@@ -60,7 +60,7 @@ namespace hedge::async
 
         void return_value(RETURN_VALUE&& value)
         {
-            this->_value = new(this->_data) RETURN_VALUE{std::move(value)};
+            this->_value = new(this->_data.data()) RETURN_VALUE{std::move(value)};
         }
 
         void unhandled_exception()

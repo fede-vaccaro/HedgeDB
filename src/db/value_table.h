@@ -92,7 +92,8 @@ namespace hedge::db
         /** @brief Default constructor (private). Use factory methods. */
         value_table() = default;
         /** @brief Private constructor used by factory methods. */
-        value_table(uint32_t unique_id, size_t current_offset, fs::file file_descriptor, fs::mmap_view mmap);
+        value_table(uint32_t unique_id, size_t current_offset, fs::file file_descriptor, fs::mmap_view mmap)
+            : fs::file(std::move(file_descriptor)), _unique_id(unique_id), _current_offset(current_offset), _mmap(std::move(mmap)) {}
 
     public:
         /** @brief File extension used for value table files. */

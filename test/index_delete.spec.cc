@@ -2,6 +2,7 @@
 #include <chrono>
 #include <random>
 #include <ranges>
+#include <unordered_set>
 
 #include <gtest/gtest.h>
 #include <uuid.h>

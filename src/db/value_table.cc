@@ -9,7 +9,7 @@
 #include "fs/fs.hpp"
 #include "types.h"
 #include "utils.h"
-#include "value_table.h"
+#include "db/value_table.h"
 
 namespace hedge::db
 {
