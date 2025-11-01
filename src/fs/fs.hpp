@@ -15,6 +15,11 @@
 #include "async/mailbox_impl.h"
 #include "async/task.h"
 
+/*
+    HedgeFS File Abstraction
+
+    Provides a simple file abstraction over POSIX file descriptors with support for asynchronous operations via io_uring.
+*/
 namespace hedge::fs
 {
 
@@ -374,7 +379,7 @@ namespace hedge::fs
         size_t size;
     };
 
-    class non_owning_mmap
+    class mmap_view
     {
     private:
         int32_t _fd{-1};
@@ -383,7 +388,7 @@ namespace hedge::fs
         std::optional<range> _range;
 
     public:
-        static hedge::expected<non_owning_mmap> from_fd_wrapper(const file& fd_w, std::optional<range> range = std::nullopt)
+        static hedge::expected<mmap_view> from_file(const file& fd_w, std::optional<range> range = std::nullopt)
         {
             if(fd_w.get_fd() == -1)
                 return hedge::error("Cannot map an invalid file descriptor.");
@@ -399,7 +404,7 @@ namespace hedge::fs
                 return hedge::error("Failed to mmap file: " + err_msg);
             }
 
-            non_owning_mmap wrapper;
+            mmap_view wrapper;
             wrapper._fd = fd_w.get_fd();
             wrapper._mapped_ptr = mapped_ptr;
             wrapper._mapped_size = range ? range->size : fd_w.file_size();
@@ -408,9 +413,9 @@ namespace hedge::fs
             return wrapper;
         }
 
-        non_owning_mmap() = default;
+        mmap_view() = default;
 
-        non_owning_mmap(non_owning_mmap&& other) noexcept
+        mmap_view(mmap_view&& other) noexcept
             : _fd(std::exchange(other._fd, -1)),
               _mapped_ptr(std::exchange(other._mapped_ptr, nullptr)),
               _mapped_size(std::exchange(other._mapped_size, 0)),
@@ -418,7 +423,7 @@ namespace hedge::fs
         {
         }
 
-        non_owning_mmap& operator=(non_owning_mmap&& other) noexcept
+        mmap_view& operator=(mmap_view&& other) noexcept
         {
             if(this != &other)
             {
@@ -430,10 +435,10 @@ namespace hedge::fs
             return *this;
         }
 
-        non_owning_mmap(const non_owning_mmap&) = delete;
-        non_owning_mmap& operator=(const non_owning_mmap&) = delete;
+        mmap_view(const mmap_view&) = delete;
+        mmap_view& operator=(const mmap_view&) = delete;
 
-        ~non_owning_mmap()
+        ~mmap_view()
         {
             if(_mapped_ptr != nullptr && _mapped_ptr != MAP_FAILED)
             {

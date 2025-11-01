@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <cstddef>
 #include <filesystem>
-#include <gtest/gtest.h>
 #include <random>
+#include <unordered_set>
+
+#include <gtest/gtest.h>
 
 #include "async/io_executor.h"
 #include "async/working_group.h"
@@ -65,10 +67,10 @@ namespace hedge::db
         }
 
         // test parameters
-        size_t N_KEYS{};                 // number of keys per run
-        size_t PAYLOAD_SIZE{};           // payload size in bytes
-        size_t MEMTABLE_CAPACITY{};      // memtable capacity
-        bool TEST_DELETION{true};        // whether to test deletion or not
+        size_t N_KEYS{};                // number of keys per run
+        size_t PAYLOAD_SIZE{};          // payload size in bytes
+        size_t MEMTABLE_CAPACITY{};     // memtable capacity
+        bool TEST_DELETION{true};       // whether to test deletion or not
         double DELETE_PROBABILITY{0.0}; // if deletion test is enabled, how many keys of total should be removed
 
         // runtime
@@ -138,6 +140,7 @@ namespace hedge::db
         std::cout << "Total duration for insertion: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
         std::cout << "Average duration per insertion: " << (double)duration.count() / this->N_KEYS << " us" << std::endl;
         std::cout << "Insertion bandwidth: " << (double)this->N_KEYS * (this->PAYLOAD_SIZE / 1024.0) / (duration.count() / 1000.0) << " MB/s" << std::endl;
+        std::cout << "Insertion throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000) << " items/s" << std::endl;
         std::cout << "Deleted keys: " << this->_deleted_keys.size() << std::endl;
 
         // compaction
@@ -146,9 +149,9 @@ namespace hedge::db
         ASSERT_TRUE(compaction_status_future.get()) << "An error occurred during compaction: " << compaction_status_future.get().error().to_string();
         t1 = std::chrono::high_resolution_clock::now();
         duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-        std::cout << "Total duration for compaction: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
+        std::cout << "Total duration for a full compaction: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
 
-        EXPECT_DOUBLE_EQ(db->load_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
+        EXPECT_DOUBLE_EQ(db->read_amplification_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
 
         async::working_group read_wg;
         read_wg.set(this->N_KEYS);
@@ -160,17 +163,17 @@ namespace hedge::db
             auto key = this->_uuids[i];
             auto maybe_value = co_await db->get_async(key, this->_executor);
 
-            // if(!maybe_value.has_value() && maybe_value.error().code() == errc::DELETED)
-            // {
-            //     if(!this->_deleted_keys.contains(key))
-            //     {
-            //         number_of_errors++;
-            //         std::cerr << "Key should be between the deleteds: " << key << std::endl;
-            //     }
+            if(!maybe_value.has_value() && maybe_value.error().code() == errc::DELETED)
+            {
+                if(!this->_deleted_keys.contains(key))
+                {
+                    number_of_errors++;
+                    std::cerr << "Key should be between the deleteds: " << key << std::endl;
+                }
 
-            //     read_wg.decr();
-            //     co_return;
-            // }
+                read_wg.decr();
+                co_return;
+            }
 
             if(!maybe_value)
             {
@@ -182,12 +185,12 @@ namespace hedge::db
 
             [[maybe_unused]] auto& value = maybe_value.value();
 
-            // auto expected_value = database_test::make_random_vec_seeded(this->PAYLOAD_SIZE, i);
-            // if(value != expected_value)
-            // {
-            //     std::cerr << "Retrieved value does not match expected value for item nr.  " << i << std::endl;
-            //     number_of_errors++;
-            // }
+            auto expected_value = database_test::make_random_vec_seeded(this->PAYLOAD_SIZE, i);
+            if(value != expected_value)
+            {
+                std::cerr << "Retrieved value does not match expected value for item nr.  " << i << std::endl;
+                number_of_errors++;
+            }
 
             read_wg.decr();
         };
@@ -208,7 +211,7 @@ namespace hedge::db
         duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         std::cout << "Total duration for retrieval: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
         std::cout << "Average duration per retrieval: " << (double)duration.count() / this->N_KEYS << " us" << std::endl;
-        std::cout << "Retrieval throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000)  << " items/s" << std::endl;
+        std::cout << "Retrieval throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000) << " items/s" << std::endl;
         std::cout << "Retrieval bandwidth: " << (double)this->N_KEYS * (this->PAYLOAD_SIZE / 1024.0) / (duration.count() / 1000.0) << " MB/s" << std::endl;
     }
 
@@ -217,8 +220,8 @@ namespace hedge::db
         database_test,
         testing::Combine(
             testing::Values(30'000'000), // n keys
-            testing::Values(100),      // payload size
-            testing::Values(10'000'000)  // memtable capacity
+            testing::Values(100),        // payload size
+            testing::Values(1'000'000)  // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)
         {

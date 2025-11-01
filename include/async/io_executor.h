@@ -13,7 +13,6 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
-#include <unordered_set>
 
 #include <logger.h>
 
@@ -22,6 +21,53 @@
 
 namespace hedge::async
 {
+
+    /*
+
+        The Async I/O Layer (io_uring integration)
+
+        ┌────────────────────────────────────┐
+        │      executor_context              │
+        │                                    │
+        │  ┌──────────────────┐              │
+        │  │  _pending_queue  │  (tasks)     │
+        │  └────────┬─────────┘              │
+        │           ▼                        │
+        │  ┌──────────────────┐              │
+        │  │ _waiting_for_io  │  (mailboxes) │
+        │  └────────┬─────────┘              │
+        │           ▼                        │
+        │  ┌──────────────────┐              │
+        │  │   io_uring SQE   │  (submit)    │
+        │  └────────┬─────────┘              │
+        │           ▼                        │
+        │  ┌──────────────────┐              │
+        │  │ in_flight_reqs   │  (pending)   │
+        │  └────────┬─────────┘              │
+        │           ▼                        │
+        │  ┌──────────────────┐              │
+        │  │   io_uring CQE   │  (complete)  │
+        │  └────────┬─────────┘              │
+        │           ▼                        │
+        │  ┌──────────────────┐              │
+        │  │  _io_ready_queue │  (resume)    │
+        │  └────────┬─────────┘              │
+        │           ▼                        │
+        │      [coroutine.resume()]          │
+        └────────────────────────────────────┘
+
+        co_await executor.submit_request(read_request{fd, offset, size})
+        ↓
+        1. Wrap request in mailbox (type-erased)
+        2. Store coroutine handle in mailbox
+        3. Convert to io_uring SQE(s)
+        4. Submit to kernel
+        ↓ (later, when I/O completes)
+        5. CQE arrives → find mailbox by request_id
+        6. mailbox.handle_cqe() → populate response
+        7. mailbox.resume() → coroutine continues
+    */
+
     class executor_context
     {
         size_t _queue_depth;

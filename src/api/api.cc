@@ -177,9 +177,9 @@ namespace hedge
         return this->_db_impl->db()->compact_sorted_indices(ignore_ratio, this->_db_impl->executor());
     }
 
-    double api::load_factor()
+    double api::read_amplification_factor()
     {
-        return this->_db_impl->db()->load_factor();
+        return this->_db_impl->db()->read_amplification_factor();
     }
 
     hedge::status api::flush()
