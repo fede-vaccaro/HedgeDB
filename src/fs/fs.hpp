@@ -76,7 +76,7 @@ namespace hedge::fs
             return this->_mode;
         }
 
-        [[nodiscard]] bool use_direct() const
+        [[nodiscard]] bool uses_direct_access() const
         {
             return this->_use_direct;
         }

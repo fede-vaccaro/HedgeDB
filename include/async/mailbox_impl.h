@@ -482,6 +482,47 @@ namespace hedge::async
             return &response;
         }
     };
+
+    struct ftruncate_request;
+    struct ftruncate_response;
+    struct ftruncate_mailbox;
+
+    struct ftruncate_request
+    {
+        using response_t = ftruncate_response;
+        using mailbox_t = ftruncate_mailbox;
+
+        int32_t fd;
+        size_t length;
+    };
+
+    struct ftruncate_response
+    {
+        int32_t error_code{};
+    };
+
+    struct ftruncate_mailbox : mailbox_base<ftruncate_mailbox>
+    {
+        ftruncate_mailbox(ftruncate_request req)
+            : request(req) {}
+
+        ftruncate_request request;
+        ftruncate_response response;
+
+        void prepare_sqes(std::span<io_uring_sqe*> sqes);
+        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
+
+        uint32_t needed_sqes()
+        {
+            return 1;
+        }
+
+        void* get_response()
+        {
+            return &response;
+        }
+    };
+
     // NOLINTEND (*-readability-convert-member-functions-to-static)
 
     using mailbox_impls =

@@ -224,7 +224,11 @@ namespace hedge::db
         return index_sorted;
     }
 
-    hedge::expected<std::vector<sorted_index>> index_ops::flush_mem_index(const std::filesystem::path& base_path, std::vector<mem_index>&& indices, size_t num_partition_exponent, size_t flush_iteration)
+    hedge::expected<std::vector<sorted_index>> index_ops::flush_mem_index(const std::filesystem::path& base_path,
+                                                                          std::vector<mem_index>&& indices,
+                                                                          size_t num_partition_exponent,
+                                                                          size_t flush_iteration,
+                                                                          bool use_odirect)
     {
         if(num_partition_exponent > 16)
             return hedge::error("Number of partitions exponent must be less than or equal to 16");
@@ -271,7 +275,8 @@ namespace hedge::db
                 OUTCOME_TRY(auto sorted_index, index_ops::save_as_sorted_index(
                                                    path,
                                                    std::exchange(current_partition_entries, std::vector<index_entry_t>{}),
-                                                   current_partition_id));
+                                                   current_partition_id,
+                                                   use_odirect));
 
                 resulting_indices.push_back(std::move(sorted_index));
 
@@ -285,7 +290,7 @@ namespace hedge::db
         return resulting_indices;
     }
 
-    hedge::expected<sorted_index> index_ops::save_as_sorted_index(const std::filesystem::path& path, std::vector<index_entry_t>&& sorted_keys, size_t upper_bound)
+    hedge::expected<sorted_index> index_ops::save_as_sorted_index(const std::filesystem::path& path, std::vector<index_entry_t>&& sorted_keys, size_t upper_bound, bool use_odirect)
     {
         // Step 1: Generate the meta-index from the sorted keys.
         auto meta_index = create_meta_index(sorted_keys);
@@ -318,7 +323,7 @@ namespace hedge::db
         }
 
         // Step 3: Create the sorted_index object to represent the file.
-        OUTCOME_TRY(auto fd, fs::file::from_path(path, fs::file::open_mode::read_only, false));
+        OUTCOME_TRY(auto fd, fs::file::from_path(path, fs::file::open_mode::read_only, use_odirect));
         OUTCOME_TRY(auto footer, builder.build());
 
         // Create the final object, moving the key and meta-index data into it.
@@ -379,7 +384,11 @@ namespace hedge::db
     // i.e. `rolling_buffer` and `entry_deduplicator` since they are heavily used here.
     //
     // NOLINTNEXTLINE(readability-function-cognitive-complexity) - Acknowledging complexity inherent in external merge. TODO: consider refactoring later.
-    async::task<hedge::expected<sorted_index>> index_ops::two_way_merge_async(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor)
+    async::task<hedge::expected<sorted_index>> index_ops::two_way_merge_async(
+        const merge_config& config,
+        const sorted_index& left,
+        const sorted_index& right,
+        const std::shared_ptr<async::executor_context>& executor)
     {
         std::unique_lock lk_left(*left._compaction_mutex);
         std::unique_lock lk_right(*right._compaction_mutex);
@@ -426,12 +435,15 @@ namespace hedge::db
         auto [dir, file_name] = format_prefix(left.upper_bound());
         auto new_path = config.base_path / dir / with_extension(file_name, std::format(".{}", config.new_index_id));
 
-        auto fd_maybe = co_await fs::file::from_path_async(new_path, fs::file::open_mode::write_new, executor, false);
+        auto fd_maybe = co_await fs::file::from_path_async(new_path,
+                                                           fs::file::open_mode::write_new,
+                                                           executor,
+                                                           false);
 
         if(!fd_maybe.has_value())
             co_return hedge::error("Failed to create file descriptor for merged index at " + new_path.string() + ": " + fd_maybe.error().to_string());
 
-        auto fd = std::move(fd_maybe.value());
+        auto output_fd = std::move(fd_maybe.value());
 
         // Create rolling buffers for both readers
         // Those will maintain a sliding window over the data read from disk
@@ -494,6 +506,7 @@ namespace hedge::db
         */
         while(true)
         {
+            [[maybe_unused]] size_t iteration_count{0};
             std::vector<uint8_t> merged_keys(config.read_ahead_size * 2);
             auto merged_keys_span = view_as<index_entry_t>(merged_keys);
             auto merged_keys_it = merged_keys_span.begin();
@@ -545,15 +558,15 @@ namespace hedge::db
             // just before writing it to disk; however, this might lead to a subtle bug: a entry duplicate
             // might just be in the of the two forecoming chunks
             auto res = co_await executor->submit_request(async::write_request{
-                .fd = fd.get_fd(),
+                .fd = output_fd.get_fd(),
                 .data = merged_keys.data(),
                 .size = merged_keys.size(),
                 .offset = bytes_written});
 
-            bytes_written += res.bytes_written;
-
             if(res.error_code != 0)
-                co_return hedge::error("Failed to write merged keys to file: " + std::string(strerror(res.error_code)));
+                co_return hedge::error("Failed to write merged keys to file: " + std::string(strerror(-res.error_code)));
+
+            bytes_written += res.bytes_written;
 
             auto status = co_await refresh_buffers();
             if(!status)
@@ -562,6 +575,8 @@ namespace hedge::db
             // One of the two data stream has been consumed
             if(lhs.eof() || rhs.eof())
                 break;
+
+            iteration_count++;
         }
 
         /*
@@ -644,7 +659,7 @@ namespace hedge::db
             if(!remaining_keys.empty())
             {
                 auto res = co_await executor->submit_request(async::write_request{
-                    .fd = fd.get_fd(),
+                    .fd = output_fd.get_fd(),
                     .data = reinterpret_cast<uint8_t*>(remaining_keys.data()),
                     .size = remaining_keys.size() * sizeof(index_entry_t),
                     .offset = bytes_written});
@@ -683,7 +698,7 @@ namespace hedge::db
         {
             auto padding = std::vector<uint8_t>(padding_size, 0);
             auto res = co_await executor->submit_request(async::write_request{
-                .fd = fd.get_fd(),
+                .fd = output_fd.get_fd(),
                 .data = padding.data(),
                 .size = padding.size(),
                 .offset = bytes_written});
@@ -700,7 +715,7 @@ namespace hedge::db
         // Write meta-index
         {
             auto res = co_await executor->submit_request(async::write_request{
-                .fd = fd.get_fd(),
+                .fd = output_fd.get_fd(),
                 .data = reinterpret_cast<uint8_t*>(merged_meta_index.data()),
                 .size = merged_meta_index.size() * sizeof(meta_index_entry),
                 .offset = bytes_written});
@@ -719,7 +734,7 @@ namespace hedge::db
         {
             auto padding = std::vector<uint8_t>(meta_index_padding_size, 0);
             auto res = co_await executor->submit_request(async::write_request{
-                .fd = fd.get_fd(),
+                .fd = output_fd.get_fd(),
                 .data = padding.data(),
                 .size = meta_index_padding_size,
                 .offset = bytes_written});
@@ -741,7 +756,7 @@ namespace hedge::db
         // Write footer
         {
             auto res = co_await executor->submit_request(async::write_request{
-                .fd = fd.get_fd(),
+                .fd = output_fd.get_fd(),
                 .data = reinterpret_cast<uint8_t*>(&footer),
                 .size = sizeof(footer),
                 .offset = bytes_written});
@@ -755,7 +770,12 @@ namespace hedge::db
         /*
         -- Step 5: Create sorted_index object for the merged file and return it --
         */
-        auto read_fd = fs::file::from_path(fd.path(), fs::file::open_mode::read_only, false, bytes_written);
+        auto read_fd = fs::file::from_path(
+            output_fd.path(),
+            fs::file::open_mode::read_only,
+            config.create_new_with_odirect,
+            bytes_written);
+
         if(!read_fd.has_value())
             co_return hedge::error("Failed to open merged index file for reading: " + read_fd.error().to_string());
 

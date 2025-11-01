@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <liburing.h>
 #include <liburing/io_uring.h>
+#include <stdexcept>
 #include <stdlib.h>
 
 #include <logger.h>
@@ -192,6 +193,19 @@ namespace hedge::async
     }
 
     bool fsync_mailbox::handle_cqe(io_uring_cqe* cqe, uint8_t /* sub_request_idx */)
+    {
+        if(cqe->res < 0)
+            this->response.error_code = cqe->res;
+
+        return true;
+    }
+
+    void ftruncate_mailbox::prepare_sqes(std::span<io_uring_sqe*>)
+    {
+        throw std::runtime_error("ftruncate is not supported in this iouring version");
+    }
+
+    bool ftruncate_mailbox::handle_cqe(io_uring_cqe* cqe, uint8_t /* sub_request_idx */)
     {
         if(cqe->res < 0)
             this->response.error_code = cqe->res;
