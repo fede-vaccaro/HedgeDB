@@ -140,7 +140,7 @@ namespace hedge::db
         duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         std::cout << "Total duration for compaction: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
 
-        EXPECT_DOUBLE_EQ(db->load_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
+        EXPECT_DOUBLE_EQ(db->read_amplification_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
 
         async::working_group read_wg;
         read_wg.set(this->N_KEYS);

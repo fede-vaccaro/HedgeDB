@@ -11,7 +11,6 @@ namespace hedge::fs
     {
     }
 
-    // todo: implement async pre-fetch
     async::task<expected<std::vector<uint8_t>>> file_reader::next(size_t num_bytes_to_read, bool clamp_at_end)
     {
         if(this->_fd.use_direct() && (num_bytes_to_read % PAGE_SIZE_IN_BYTES != 0))

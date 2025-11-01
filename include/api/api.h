@@ -34,8 +34,9 @@ namespace hedge
         static expected<std::shared_ptr<api>> open_database(const std::string& path);
         static expected<std::shared_ptr<api>> create_database(const std::string& path, const config& config);
 
-        // async callback api
+        // Async callback api
         // WARNING: do not call the callback from within the executor context or it will deadlock!
+        // TODO: but this should be addressed
         using get_callback_t = std::function<void(expected<std::vector<uint8_t>>)>;
         using put_callback_t = std::function<void(hedge::status)>;
         using remove_callback_t = std::function<void(hedge::status)>;
@@ -44,7 +45,7 @@ namespace hedge
         void remove(key_t key, remove_callback_t callback);
         void put(key_t key, std::vector<uint8_t> value, put_callback_t callback);
 
-        // async coro api
+        // Async coro api
         using transaction_callback_t = std::function<void(hedge::status)>;
         async::task<expected<std::vector<uint8_t>>> get(key_t key);
         async::task<hedge::status> put(key_t key, std::vector<uint8_t> value);
@@ -54,7 +55,7 @@ namespace hedge
 
         std::future<hedge::status> compact_sorted_indices(bool ignore_ratio);
 
-        double load_factor();
+        double read_amplification_factor();
         hedge::status flush();
     };
 

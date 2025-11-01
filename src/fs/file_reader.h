@@ -7,6 +7,11 @@
 #include "async/io_executor.h"
 #include "fs.hpp"
 
+/*
+    HedgeFS File Reader
+
+    Provides an asynchronous file reader abstraction for streaming chunks of data from files using HedgeFS's async I/O executor.
+*/
 namespace hedge::fs
 {
     struct file_reader_config
