@@ -97,8 +97,6 @@ namespace hedge::db
         // --- Background Workers ---
         /// Worker thread dedicated to handling index compaction jobs.
         async::worker compaction_worker;
-        /// Worker thread dedicated to handling value table garbage collection jobs (TODO).
-        async::worker gc_worker;
 
         // --- Utilities ---
         logger _logger{"database"}; ///< Logger instance for database-related messages.
@@ -212,15 +210,6 @@ namespace hedge::db
         hedge::status flush();
 
         /**
-         * @brief Submits a garbage collection job for value tables to the background GC worker.
-         * NOT EVEN TESTED YET. Will likely reimplement later with mmap.
-         * TODO: Implement GC logic: iterate tables, copy live data, update indices, delete old tables.
-         * @param executor The I/O executor context used *within* the GC job.
-         * @return A future resolving to the status of the GC job upon completion.
-         */
-        std::future<hedge::status> garbage_collect_tables(const std::shared_ptr<async::executor_context>& executor);
-
-        /**
          * @brief Calculates the average read amplification factor.
          * Represents the average number of sorted_index files checked per partition during a lookup.
          * Lower is better (1.0 is ideal after full compaction).
@@ -261,15 +250,6 @@ namespace hedge::db
          * @return Status indicating the overall success or failure of the compaction job.
          */
         hedge::status _compaction_job(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor);
-        /**
-         * @brief The core logic for garbage collecting a single value table, run by the `gc_worker`. (Not implemented yet).
-         * TODO: Implement the process of reading a table, copying live data to a new table, updating indices, and deleting the old table.
-         * @param table The value table to garbage collect.
-         * @param id The target ID for the new, compacted value table.
-         * @param executor The I/O executor for disk operations during GC.
-         * @return An async task resolving to a status indicating success or failure.
-         */
-        async::task<hedge::status> _garbage_collect_table(std::shared_ptr<value_table> table, size_t id, const std::shared_ptr<async::executor_context>& executor);
         /**
          * @brief Internal helper to find the most recent `value_ptr_t` and the corresponding `value_table` for a key.
          * Searches memtable, then relevant sorted_indices. Handles deleted entries.
