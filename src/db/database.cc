@@ -10,7 +10,7 @@
 
 #include <error.hpp>
 
-#include "async/working_group.h"
+#include "async/wait_group.h"
 #include "database.h"
 #include "index_ops.h"
 #include "sorted_index.h"
@@ -273,7 +273,10 @@ namespace hedge::db
         std::vector<mem_index> vec_memtable;
         vec_memtable.emplace_back(std::move(this->_mem_index));
 
-        auto partitioned_sorted_indices = index_ops::flush_mem_index(this->_indices_path, std::move(vec_memtable), this->_config.num_partition_exponent, this->_flush_iteration++);
+        auto partitioned_sorted_indices = index_ops::flush_mem_index(this->_indices_path,
+                                                                     std::move(vec_memtable),
+                                                                     this->_config.num_partition_exponent,
+                                                                     this->_flush_iteration.fetch_add(1, std::memory_order_relaxed));
 
         if(!partitioned_sorted_indices)
             return hedge::error("An error occurred while flushing the mem index: " + partitioned_sorted_indices.error().to_string());
@@ -325,13 +328,17 @@ namespace hedge::db
             stability_reached = true;
 
             std::vector<hedge::error> errors;
-            async::working_group wg;
+            async::wait_group wg;
 
             wg.set(indices_local_copy.size()); // One task per partition
 
-            auto make_compaction_sub_task = [this, &wg, &executor, &errors, this_iteration_id = this->_flush_iteration++](std::vector<sorted_index_ptr_t>& index_vec) -> async::task<void>
+            auto make_compaction_sub_task = [this,
+                                             &wg,
+                                             &executor,
+                                             &errors,
+                                             this_iteration_id  = this->_flush_iteration.fetch_add(1)](std::vector<sorted_index_ptr_t>& ordered_indices_vec) -> async::task<void>
             {
-                auto smallest_index_it = index_vec.begin() + (index_vec.size() - 1);
+                auto smallest_index_it = ordered_indices_vec.begin() + (ordered_indices_vec.size() - 1);
                 auto second_smallest_index_it = smallest_index_it - 1;
 
                 auto merge_config = hedge::db::index_ops::merge_config{
@@ -356,19 +363,23 @@ namespace hedge::db
                 }
                 else
                 {
-                    // Replace the two merged indices with the new one
-                    index_vec.erase(smallest_index_it);
-                    index_vec.erase(second_smallest_index_it);
+                    // Remove temporary (or not) tables
+                    (*smallest_index_it)->set_delete_on_obj_destruction(true);
+                    (*second_smallest_index_it)->set_delete_on_obj_destruction(true);
 
-                    index_vec.emplace_back(std::make_shared<sorted_index>(std::move(maybe_compacted_table.value())));
+                    // Replace the two merged indices with the new one
+                    ordered_indices_vec.erase(smallest_index_it);
+                    ordered_indices_vec.erase(second_smallest_index_it);
+
+                    ordered_indices_vec.emplace_back(std::make_shared<sorted_index>(std::move(maybe_compacted_table.value())));
                 }
 
                 wg.decr();
             };
 
-            for(auto& [prefix, index_vec] : indices_local_copy)
+            for(auto& [prefix, partition_vec] : indices_local_copy)
             {
-                if(index_vec.size() <= 1) // Nothing to compact
+                if(partition_vec.size() <= 1) // Nothing to compact
                 {
                     wg.decr();
                     continue;
@@ -378,14 +389,14 @@ namespace hedge::db
                 // This minimizes the number of overall operations if we stick to the two_ways_merge strategy
                 // K-way merge could be more efficient but is more complex to implement
                 std::ranges::sort(
-                    index_vec,
+                    partition_vec,
                     [](const sorted_index_ptr_t& lhs, const sorted_index_ptr_t& rhs)
                     {
                         return lhs->size() > rhs->size();
                     });
 
-                auto smallest_index = static_cast<double>(index_vec[index_vec.size() - 1]->size());
-                auto second_smallest_index = static_cast<double>(index_vec[index_vec.size() - 2]->size());
+                auto smallest_index = static_cast<double>(partition_vec[partition_vec.size() - 1]->size());
+                auto second_smallest_index = static_cast<double>(partition_vec[partition_vec.size() - 2]->size());
 
                 if(!ignore_ratio && smallest_index / second_smallest_index <= this->_config.target_compaction_size_ratio)
                 {
@@ -400,7 +411,7 @@ namespace hedge::db
                 // - filter_delete_keys is `true`
                 // - A key is in more than two sorted indices and is deleted in one of them
                 // The key would appear again, because we lost track of it after merging the first two indices
-                executor->submit_io_task(make_compaction_sub_task(index_vec));
+                executor->submit_io_task(make_compaction_sub_task(partition_vec));
             }
 
             // Barrier waiting for this round of compaction sub-tasks to complete
@@ -431,7 +442,7 @@ namespace hedge::db
         {
             std::lock_guard lk(this->_sorted_index_mutex);
 
-            for(auto& [prefix, new_sorted_index_vec] : indices_local_copy)
+            for(auto& [prefix, new_partition_vec] : indices_local_copy)
             {
                 auto& db_sorted_indices_vec = this->_sorted_indices[prefix];
 
@@ -444,18 +455,21 @@ namespace hedge::db
                                                                                        // so actual deletion will happen when the last shared_ptr goes completely out of scope
 
                 // Again: we cannot clear the entire vector because we could accidentally delete some table that was added in the mean while
+                // Here, some indices might get out of scope and get deleted if no other shared_ptr owns them
                 db_sorted_indices_vec.erase(range_start, range_end);
 
                 db_sorted_indices_vec.insert(db_sorted_indices_vec.end(),
-                                             std::move_iterator(new_sorted_index_vec.begin()),
-                                             std::move_iterator(new_sorted_index_vec.end()));
+                                             new_partition_vec.begin(),
+                                             new_partition_vec.end());
 
                 // This is needed when the `new_sorted_index_vec` still contains some of the original sorted indices shared_ptrs.
                 // Otherwise, we would accidentally delete them.
-                std::ranges::for_each(db_sorted_indices_vec, [](const std::shared_ptr<sorted_index>& sorted_index)
+                std::ranges::for_each(new_partition_vec, [](const std::shared_ptr<sorted_index>& sorted_index)
                                       { sorted_index->set_delete_on_obj_destruction(false); });
             }
         }
+
+        this->_logger.log("Compaction job completed successfully");
 
         return hedge::ok();
     }
@@ -575,7 +589,11 @@ namespace hedge::db
         std::vector<mem_index> vec_memtable;
         vec_memtable.emplace_back(std::move(new_keys));
 
-        auto partitioned_sorted_indices = index_ops::flush_mem_index(this->_indices_path, std::move(vec_memtable), this->_config.num_partition_exponent, this->_flush_iteration++);
+        auto partitioned_sorted_indices = index_ops::flush_mem_index(
+            this->_indices_path,
+            std::move(vec_memtable),
+            this->_config.num_partition_exponent,
+            this->_flush_iteration.fetch_add(1, std::memory_order_relaxed));
 
         if(!partitioned_sorted_indices)
         {

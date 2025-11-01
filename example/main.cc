@@ -11,7 +11,7 @@
 
 #include <api/api.h>
 #include <api/config.h>
-#include <async/working_group.h>
+#include <async/wait_group.h>
 
 // Utility struct to hold necessary test variables and functions
 struct api_example_util

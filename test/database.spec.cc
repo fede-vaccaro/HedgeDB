@@ -7,7 +7,7 @@
 #include <gtest/gtest.h>
 
 #include "async/io_executor.h"
-#include "async/working_group.h"
+#include "async/wait_group.h"
 #include "db/database.h"
 
 namespace hedge::db
@@ -90,14 +90,15 @@ namespace hedge::db
     {
         this->_uuids.reserve(this->N_KEYS);
 
-        async::working_group write_wg;
+        async::wait_group write_wg;
         write_wg.set(this->N_KEYS);
 
         db_config config;
         config.auto_compaction = true;
         config.keys_in_mem_before_flush = this->MEMTABLE_CAPACITY;
-        config.compaction_read_ahead_size_bytes = 4 * 1024 * 1024;
-        config.num_partition_exponent = 0;
+        config.compaction_read_ahead_size_bytes =  16 * 1024 * 1024;
+        config.num_partition_exponent = 4;
+        config.target_compaction_size_ratio = 1.0 / 3.0;
 
         auto maybe_db = database::make_new(this->_base_path, config);
         ASSERT_TRUE(maybe_db) << "An error occurred while creating the database: " << maybe_db.error().to_string();
@@ -153,7 +154,7 @@ namespace hedge::db
 
         EXPECT_DOUBLE_EQ(db->read_amplification_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
 
-        async::working_group read_wg;
+        async::wait_group read_wg;
         read_wg.set(this->N_KEYS);
 
         size_t number_of_errors = 0;
@@ -221,7 +222,7 @@ namespace hedge::db
         testing::Combine(
             testing::Values(30'000'000), // n keys
             testing::Values(100),        // payload size
-            testing::Values(1'000'000)  // memtable capacity
+            testing::Values(2'000'000)  // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)
         {

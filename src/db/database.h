@@ -78,7 +78,7 @@ namespace hedge::db
         // - across different partitions, the key ranges are disjoint
         using sorted_indices_map_t = std::map<uint16_t, std::vector<sorted_index_ptr_t>>;
 
-        size_t _flush_iteration{0};           ///< Counter for naming flushed index files uniquely within partitions.
+        std::atomic<size_t> _flush_iteration{0};           ///< Counter for naming flushed index files uniquely within partitions.
         std::mutex _sorted_index_mutex;       ///< Protects access to the `_sorted_indices` map.
         sorted_indices_map_t _sorted_indices; ///< In-memory map representing the LSM tree levels/files.
 

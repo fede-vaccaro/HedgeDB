@@ -8,7 +8,7 @@
 #include <uuid.h>
 
 #include "async/io_executor.h"
-#include "async/working_group.h"
+#include "async/wait_group.h"
 #include "db/index_ops.h"
 #include "db/mem_index.h"
 #include "db/sorted_index.h"
@@ -199,7 +199,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
     sorted_indices_map_t unified_sorted_indices;
 
     std::vector<std::future<hedge::status>> futures;
-    hedge::async::working_group merge_wg;
+    hedge::async::wait_group merge_wg;
 
     auto merge_task_factory =
         [](
@@ -207,7 +207,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
             const hedge::db::sorted_index& right,
             std::vector<std::future<hedge::status>>& futures,
             std::map<uint16_t, hedge::db::sorted_index>& index_map,
-            hedge::async::working_group& wg,
+            hedge::async::wait_group& wg,
             auto* _this) -> hedge::async::task<void>
     {
         auto promise = std::promise<hedge::status>{};
@@ -288,7 +288,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
     std::cout << "Total duration for merging: " << total_duration_ms << " ms" << std::endl;
     std::cout << "Average duration per merge: " << (static_cast<double>(total_duration_ms) / this->_sorted_indices.size()) << " ms" << std::endl;
 
-    hedge::async::working_group query_wg;
+    hedge::async::wait_group query_wg;
 
     query_wg.set(this->_uuids.size());
 
@@ -298,7 +298,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
                                    const uuids::uuid& uuid,
                                    const hedge::db::sorted_index& index,
                                    const std::shared_ptr<hedge::async::executor_context>& executor,
-                                   hedge::async::working_group& wg) -> hedge::async::task<void>
+                                   hedge::async::wait_group& wg) -> hedge::async::task<void>
     {
         seen_uuids.insert(uuid);
 
