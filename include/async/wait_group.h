@@ -5,7 +5,7 @@
 
 namespace hedge::async
 {
-    class working_group
+    class wait_group
     {
         std::atomic_uint64_t _counter{0};
         std::atomic_bool _done{false};

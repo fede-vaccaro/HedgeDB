@@ -53,7 +53,7 @@ namespace hedge::fs
         std::filesystem::path _path;
         open_mode _mode{open_mode::undefined};
         bool _use_direct{false};
-        bool _deletion_triggered{false};
+        std::atomic_bool _deletion_triggered{false};
 
     public:
         [[nodiscard]] int get_fd() const
@@ -83,7 +83,7 @@ namespace hedge::fs
 
         void set_delete_on_obj_destruction(bool val)
         {
-            this->_deletion_triggered = val;
+            this->_deletion_triggered.store(val);
         }
 
         static hedge::expected<file> from_path(const std::filesystem::path& path, open_mode mode, bool use_direct = false, std::optional<size_t> expected_size = std::nullopt)
@@ -236,7 +236,7 @@ namespace hedge::fs
                                       _path(std::move(other._path)),
                                       _mode(std::exchange(other._mode, open_mode::undefined)),
                                       _use_direct(std::exchange(other._use_direct, false)),
-                                      _deletion_triggered(std::exchange(other._deletion_triggered, false))
+                                      _deletion_triggered(other._deletion_triggered.exchange(false))
         {
         }
 
@@ -250,7 +250,7 @@ namespace hedge::fs
             this->_path = std::move(other._path);
             this->_mode = std::exchange(other._mode, open_mode::undefined);
             this->_use_direct = std::exchange(other._use_direct, false);
-            this->_deletion_triggered = std::exchange(other._deletion_triggered, false);
+            this->_deletion_triggered = other._deletion_triggered.exchange(false);
 
             return *this;
         };
@@ -265,7 +265,7 @@ namespace hedge::fs
 
             close(this->_fd);
 
-            if(this->_deletion_triggered)
+            if(this->_deletion_triggered.load())
                 std::filesystem::remove(this->_path);
         }
     };

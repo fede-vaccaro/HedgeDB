@@ -11,7 +11,7 @@
 #include "../api/config.h"
 #include "../api/api.h"
 
-#include "async/working_group.h"
+#include "async/wait_group.h"
 
 namespace hedge::db
 {
@@ -90,7 +90,7 @@ namespace hedge::db
     {
         this->_uuids.reserve(this->N_KEYS);
 
-        async::working_group write_wg;
+        async::wait_group write_wg;
         write_wg.set(this->N_KEYS);
 
         config config;
@@ -142,7 +142,7 @@ namespace hedge::db
 
         EXPECT_DOUBLE_EQ(db->read_amplification_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
 
-        async::working_group read_wg;
+        async::wait_group read_wg;
         read_wg.set(this->N_KEYS);
 
         size_t number_of_errors = 0;
