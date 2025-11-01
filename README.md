@@ -6,7 +6,7 @@
 
 HedgeDB is a prototype of a larger-than-memory, persisted and embeddable key-value storage, inspired by [BadgerDB](https://github.com/hypermodeinc/badger) and [RocksDB](https://github.com/facebook/rocksdb), optimized for modern high throughput SSDs. It aims to be performance oriented with low memory footprint.
 
-**Disclaimer**: as you might expect from a prototype it was not extensively tested, nor the code can be considered production ready. _Also, the code itself might have gotten a bit messy. Hopefully, I'll take care of this in a second time._
+**Disclaimer**: as you might expect from a prototype it was not extensively tested, nor the code can be considered production ready.
 
 So far it is only Linux compatible as it heavily leverage [liburing](https://github.com/axboe/liburing), amongst other Linux syscalls.
 
@@ -30,11 +30,13 @@ So far it is only Linux compatible as it heavily leverage [liburing](https://git
 
 - [ ] **Multi-threaded executor**: the fiber executor runs every operation on a single thread, but one thread is not enough to fully stress a modern NVME.
 
-- [ ] **Write-ahead log & crash recovery**: if any fault occur during write, there might be some data loss and/or the database will end up in an undefined state. This feature is fundamental for a production-ready storage.
+- [ ] **Write-ahead Log (WAL) & crash recovery**: if any fault occur during write, there might be some data loss and/or the database will end up in an undefined state. This feature is fundamental for a production-ready storage.
 
 - [x] **General purpose API**: currently the `database` class API is only usable within a `async::task<void>` (which can be spawned on the `executor`); a callback-based API would improve the database usability.
 
-- [ ] **Add arguments to the example**: just for exploring
+- [ ] **Add arguments to the example**: just for sandboxing
+
+- [ ] Optional **Bloom filters** in front of each `sorted_index`: by using such filters, we can reduce write amplification (by accepting more tables in the same group with minor compaction pressure) and keeping a low read amplification, by trading-off some memory.
 
 ## Compile & install
 
