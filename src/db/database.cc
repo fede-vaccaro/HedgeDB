@@ -276,7 +276,8 @@ namespace hedge::db
         auto partitioned_sorted_indices = index_ops::flush_mem_index(this->_indices_path,
                                                                      std::move(vec_memtable),
                                                                      this->_config.num_partition_exponent,
-                                                                     this->_flush_iteration.fetch_add(1, std::memory_order_relaxed));
+                                                                     this->_flush_iteration.fetch_add(1, std::memory_order_relaxed),
+                                                                     this->_config.use_odirect_for_indices);
 
         if(!partitioned_sorted_indices)
             return hedge::error("An error occurred while flushing the mem index: " + partitioned_sorted_indices.error().to_string());
@@ -345,6 +346,8 @@ namespace hedge::db
                     .read_ahead_size = this->_config.compaction_read_ahead_size_bytes,
                     .new_index_id = this_iteration_id,
                     .base_path = this->_indices_path,
+                    .discard_deleted_keys = false,
+                    .create_new_with_odirect = this->_config.use_odirect_for_indices,
                 };
 
                 auto maybe_compacted_table = co_await index_ops::two_way_merge_async(
@@ -476,11 +479,12 @@ namespace hedge::db
 
     std::future<hedge::status> database::compact_sorted_indices(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor)
     {
+        auto t0 = std::chrono::high_resolution_clock::now();
         auto compaction_promise_ptr = std::make_shared<std::promise<hedge::status>>();
         std::future<hedge::status> compaction_future = compaction_promise_ptr->get_future();
 
         this->compaction_worker.submit(
-            [weak_db = this->weak_from_this(), promise = std::move(compaction_promise_ptr), executor, ignore_ratio]() mutable // Make mutable for promise move
+            [t0, weak_db = this->weak_from_this(), promise = std::move(compaction_promise_ptr), executor, ignore_ratio]() mutable // Make mutable for promise move
             {
                 auto db = weak_db.lock();
                 if(!db)
@@ -494,6 +498,9 @@ namespace hedge::db
                 if(!status)
                     db->_logger.log("Compaction job failed: ", status.error().to_string());
 
+                auto t1 = std::chrono::high_resolution_clock::now();
+                auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+                db->_logger.log("Total duration for compaction: ", (double)duration.count() / 1000.0, " ms");
                 promise->set_value(std::move(status));
             });
 

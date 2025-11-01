@@ -14,5 +14,6 @@ namespace hedge
         std::chrono::milliseconds compaction_timeout{120000}; // stop waiting if this timeout is due
         bool auto_compaction = true;                          // compaction is automatically triggered when the memtable reaches its limit
         size_t max_pending_compactions = 16;                  // maximum number of pending compactions before the database stops accepting new writes: TODO: implement this
+        bool use_odirect_for_indices = false;                 // if true, use O_DIRECT flag for sorted_index file I/O to bypass
     };
-}
+} // namespace hedge

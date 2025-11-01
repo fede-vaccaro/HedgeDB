@@ -51,6 +51,8 @@ namespace hedge::db
         bool auto_compaction = true;
         /// Maximum number of concurrent compaction tasks allowed. Will block execution of insertions if exceeded.
         size_t max_pending_compactions = 16;
+        /// If true, use O_DIRECT flag for sorted_index file I/O to bypass
+        bool use_odirect_for_indices = false;
     };
 
     /**
@@ -78,9 +80,9 @@ namespace hedge::db
         // - across different partitions, the key ranges are disjoint
         using sorted_indices_map_t = std::map<uint16_t, std::vector<sorted_index_ptr_t>>;
 
-        std::atomic<size_t> _flush_iteration{0};           ///< Counter for naming flushed index files uniquely within partitions.
-        std::mutex _sorted_index_mutex;       ///< Protects access to the `_sorted_indices` map.
-        sorted_indices_map_t _sorted_indices; ///< In-memory map representing the LSM tree levels/files.
+        std::atomic<size_t> _flush_iteration{0}; ///< Counter for naming flushed index files uniquely within partitions.
+        std::mutex _sorted_index_mutex;          ///< Protects access to the `_sorted_indices` map.
+        sorted_indices_map_t _sorted_indices;    ///< In-memory map representing the LSM tree levels/files.
 
         size_t _last_table_id{0};       ///< ID counter for the next value_table file to be created.
         std::mutex _value_tables_mutex; ///< Protects access to the `_value_tables` map.

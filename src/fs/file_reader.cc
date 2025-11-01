@@ -13,7 +13,7 @@ namespace hedge::fs
 
     async::task<expected<std::vector<uint8_t>>> file_reader::next(size_t num_bytes_to_read, bool clamp_at_end)
     {
-        if(this->_fd.use_direct() && (num_bytes_to_read % PAGE_SIZE_IN_BYTES != 0))
+        if(this->_fd.uses_direct_access() && (num_bytes_to_read % PAGE_SIZE_IN_BYTES != 0))
             co_return hedge::error(std::format("Requested bytes to read ({}) from O_DIRECT file is not page aligned (page size: {}).", num_bytes_to_read, PAGE_SIZE_IN_BYTES));
 
         if(this->_current_offset >= this->_config.end_offset)
@@ -30,7 +30,7 @@ namespace hedge::fs
         // round to page size if using direct I/O
         auto actual_num_bytes_to_read = num_bytes_to_read;
 
-        if(this->_fd.use_direct() && num_bytes_to_read % PAGE_SIZE_IN_BYTES != 0)
+        if(this->_fd.uses_direct_access() && num_bytes_to_read % PAGE_SIZE_IN_BYTES != 0)
             num_bytes_to_read += PAGE_SIZE_IN_BYTES - (num_bytes_to_read % PAGE_SIZE_IN_BYTES);
 
         auto response = co_await this->_executor->submit_request(async::read_request{.fd = this->_fd.get_fd(), .offset = this->_current_offset, .size = num_bytes_to_read});
