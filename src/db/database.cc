@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <future>
 #include <iterator>
 #include <limits>
@@ -51,7 +52,7 @@ namespace hedge::db
         if(!new_value_table)
             return hedge::error("Failed to create initial value table: " + new_value_table.error().to_string());
 
-        db->_current_value_table = std::make_shared<value_table>(std::move(new_value_table.value()));
+        db->_current_value_table = std::move(new_value_table.value());
         db->_last_table_id = 0;
 
         return db;
@@ -72,26 +73,33 @@ namespace hedge::db
     async::task<hedge::status> database::put_async(key_t key, const byte_buffer_t& value, const std::shared_ptr<async::executor_context>& executor)
     {
         // Check if the memtable has reached its capacity limit.
-        if(this->_mem_index.size() >= this->_config.keys_in_mem_before_flush)
         {
-            if(auto status = this->_flush_mem_index(); !status)
-                co_return hedge::error("An error occurred while flushing the mem_index: " + status.error().to_string());
+            std::lock_guard lk(this->_mem_index_mutex);
+            if(this->_mem_index.size() >= this->_config.keys_in_mem_before_flush)
+            {
+                if(auto status = this->_flush_mem_index(); !status)
+                    co_return hedge::error("An error occurred while flushing the mem_index: " + status.error().to_string());
 
-            // Trigger compaction
-            if(this->_config.auto_compaction)
-                (void)this->compact_sorted_indices(false, executor);
+                // Trigger compaction
+                if(this->_config.auto_compaction)
+                    (void)this->compact_sorted_indices(false);
+            }
         }
 
         // --- Write value to Value Table ---
-        std::shared_ptr<value_table> value_table_local = this->_current_value_table;
+        std::shared_ptr<value_table> value_table_local = this->_current_value_table.load();
         expected<value_table::write_reservation> reservation = value_table_local->get_write_reservation(value.size());
 
-        if(!reservation && reservation.error().code() == hedge::errc::VALUE_TABLE_NOT_ENOUGH_SPACE)
+        constexpr size_t MAX_RETRIES = 10;
+        size_t retry_it = 0;
+
+        // Running even more than 1 retry should be extremely rare
+        while(!reservation && reservation.error().code() == hedge::errc::VALUE_TABLE_NOT_ENOUGH_SPACE && retry_it++ < MAX_RETRIES)
         {
-            if(auto status = this->_rotate_value_table(); !status)
+            if(auto status = this->_rotate_value_table(value_table_local); !status)
                 co_return hedge::error("Failed to rotate value table: " + status.error().to_string());
 
-            value_table_local = this->_current_value_table; // acquire ownership of the new value table
+            value_table_local = this->_current_value_table.load();
             reservation = value_table_local->get_write_reservation(value.size());
         }
 
@@ -103,21 +111,30 @@ namespace hedge::db
         if(!write_response)
             co_return hedge::error("Failed to write value to value table: " + write_response.error().to_string());
 
-        // --- Update Memtable ---
-        this->_mem_index.put(key, write_response.value());
+        // --- Update Memtable 7---
+        {
+            std::lock_guard lk(this->_mem_index_mutex);
+            this->_mem_index.put(key, write_response.value());
+        }
 
         co_return hedge::ok();
     }
 
-    async::task<hedge::status> database::put_async(key_t key, byte_buffer_t&& value, const std::shared_ptr<async::executor_context>& executor)
-    {
-        co_return co_await this->put_async(key, value, executor);
-    }
+    // async::task<hedge::status> database::put_async(key_t key, byte_buffer_t&& value, const std::shared_ptr<async::executor_context>& executor)
+    // {
+    //     co_return co_await this->put_async(key, value, executor);
+    // }
+
+    auto CHRONO_NOW() { return std::chrono::high_resolution_clock::now(); }
 
     async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> database::_find_value_ptr_and_value_table(key_t key, const std::shared_ptr<async::executor_context>& executor)
     {
         // Step 1: Check the memtable first (contains the most recent data).
-        std::optional<value_ptr_t> value_ptr_opt = this->_mem_index.get(key);
+        std::optional<value_ptr_t> value_ptr_opt;
+        {
+            std::lock_guard lk(this->_mem_index_mutex);
+            value_ptr_opt = this->_mem_index.get(key);
+        }
 
         // Step 2: If not found in memtable, search the relevant sorted index files.
         if(!value_ptr_opt.has_value())
@@ -162,7 +179,7 @@ namespace hedge::db
         // Step 4: Find the corresponding value table based on the table ID in the value pointer.
         auto table_finder = [this](uint32_t id) -> std::shared_ptr<value_table>
         {
-            if(this->_current_value_table->id() == id)
+            if(this->_current_value_table.load()->id() == id)
                 return this->_current_value_table;
 
             {
@@ -235,33 +252,41 @@ namespace hedge::db
 
         // TODO: As written above, we might want to allow deleting non-existing keys
         // Hence, we might want to always run this step
-        this->_mem_index.put(
-            key,
-            value_ptr_t::apply_delete(value_ptr));
-
+        {
+            std::lock_guard lk(this->_mem_index_mutex);
+            this->_mem_index.put(key, value_ptr_t::apply_delete(value_ptr));
+        }
         co_return hedge::ok();
     }
 
-    hedge::status database::_rotate_value_table()
+    hedge::status database::_rotate_value_table(const std::shared_ptr<value_table>& rotating)
     {
+        std::lock_guard lk(this->_value_tables_mutex);
+
+        // This check is needed in case more thread try rotating the value table at the same time
+        // In this case, they will try executing this function with the same `rotating` object (identified from the
+        // underlying pointer).
+        // Only the first thread will rotate the table because `rotating == current`
+        // For the others, `rotation != current` is true, so they know it's been already rotated
+        if(auto current = this->_current_value_table.load(); rotating != current)
+            return hedge::ok();
+
         this->_logger.log("Rotating value table");
 
-        auto new_value_table = value_table::make_new(this->_values_path, ++this->_last_table_id);
+        auto new_value_table = value_table::make_new(this->_values_path, 1 + this->_last_table_id.fetch_add(1, std::memory_order_relaxed));
         if(!new_value_table)
             return hedge::error("Failed to create new value table: " + new_value_table.error().to_string());
 
-        {
-            std::lock_guard lk(this->_value_tables_mutex);
-            this->_value_tables[this->_current_value_table->id()] = std::move(this->_current_value_table);
-        }
+        auto old_vt = this->_current_value_table.exchange(std::move(new_value_table.value()));
 
-        this->_current_value_table = std::make_shared<value_table>(std::move(new_value_table.value()));
+        this->_value_tables[old_vt->id()] = std::move(old_vt);
 
         return hedge::ok();
     }
 
     hedge::status database::_flush_mem_index()
     {
+        auto t0 = std::chrono::high_resolution_clock::now();
         if(this->_mem_index.size() == 0)
         {
             this->_logger.log("Skipping mem index flush: Memtable is empty.");
@@ -298,10 +323,14 @@ namespace hedge::db
         this->_mem_index = mem_index{};
         this->_mem_index.reserve(this->_config.keys_in_mem_before_flush);
 
+        auto t1 = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+        this->_logger.log("Mem index flushed in ", (double)duration.count() / 1000.0, " ms");
+
         return hedge::ok();
     }
 
-    hedge::status database::_compaction_job(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor)
+    hedge::status database::_compaction_job(bool ignore_ratio)
     {
         this->_logger.log("Starting compaction job");
 
@@ -335,9 +364,8 @@ namespace hedge::db
 
             auto make_compaction_sub_task = [this,
                                              &wg,
-                                             &executor,
                                              &errors,
-                                             this_iteration_id = this->_flush_iteration.fetch_add(1)](std::vector<sorted_index_ptr_t>& ordered_indices_vec) -> async::task<void>
+                                             this_iteration_id = this->_flush_iteration.fetch_add(1)](std::vector<sorted_index_ptr_t>& ordered_indices_vec, const auto& executor) -> async::task<void>
             {
                 auto smallest_index_it = ordered_indices_vec.begin() + (ordered_indices_vec.size() - 1);
                 auto second_smallest_index_it = smallest_index_it - 1;
@@ -414,7 +442,8 @@ namespace hedge::db
                 // - filter_delete_keys is `true`
                 // - A key is in more than two sorted indices and is deleted in one of them
                 // The key would appear again, because we lost track of it after merging the first two indices
-                executor->submit_io_task(make_compaction_sub_task(partition_vec));
+                const auto& executor = async::executor_from_static_pool();
+                executor->submit_io_task(make_compaction_sub_task(partition_vec, executor));
             }
 
             // Barrier waiting for this round of compaction sub-tasks to complete
@@ -477,14 +506,14 @@ namespace hedge::db
         return hedge::ok();
     }
 
-    std::future<hedge::status> database::compact_sorted_indices(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor)
+    std::future<hedge::status> database::compact_sorted_indices(bool ignore_ratio)
     {
         auto t0 = std::chrono::high_resolution_clock::now();
         auto compaction_promise_ptr = std::make_shared<std::promise<hedge::status>>();
         std::future<hedge::status> compaction_future = compaction_promise_ptr->get_future();
 
         this->compaction_worker.submit(
-            [t0, weak_db = this->weak_from_this(), promise = std::move(compaction_promise_ptr), executor, ignore_ratio]() mutable // Make mutable for promise move
+            [t0, weak_db = this->weak_from_this(), promise = std::move(compaction_promise_ptr), ignore_ratio]() mutable // Make mutable for promise move
             {
                 auto db = weak_db.lock();
                 if(!db)
@@ -494,7 +523,7 @@ namespace hedge::db
                     return;
                 }
 
-                hedge::status status = db->_compaction_job(ignore_ratio, executor);
+                hedge::status status = db->_compaction_job(ignore_ratio);
                 if(!status)
                     db->_logger.log("Compaction job failed: ", status.error().to_string());
 
@@ -523,6 +552,7 @@ namespace hedge::db
 
     hedge::status database::flush()
     {
+        std::lock_guard lk(this->_mem_index_mutex);
         if(auto status = this->_flush_mem_index(); !status)
             return hedge::error("An error occurred while flushing the mem_index: " + status.error().to_string());
 

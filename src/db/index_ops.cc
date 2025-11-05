@@ -558,7 +558,7 @@ namespace hedge::db
             // just before writing it to disk; however, this might lead to a subtle bug: a entry duplicate
             // might just be in the of the two forecoming chunks
             auto res = co_await executor->submit_request(async::write_request{
-                .fd = output_fd.get_fd(),
+                .fd = output_fd.fd(),
                 .data = merged_keys.data(),
                 .size = merged_keys.size(),
                 .offset = bytes_written});
@@ -659,7 +659,7 @@ namespace hedge::db
             if(!remaining_keys.empty())
             {
                 auto res = co_await executor->submit_request(async::write_request{
-                    .fd = output_fd.get_fd(),
+                    .fd = output_fd.fd(),
                     .data = reinterpret_cast<uint8_t*>(remaining_keys.data()),
                     .size = remaining_keys.size() * sizeof(index_entry_t),
                     .offset = bytes_written});
@@ -698,7 +698,7 @@ namespace hedge::db
         {
             auto padding = std::vector<uint8_t>(padding_size, 0);
             auto res = co_await executor->submit_request(async::write_request{
-                .fd = output_fd.get_fd(),
+                .fd = output_fd.fd(),
                 .data = padding.data(),
                 .size = padding.size(),
                 .offset = bytes_written});
@@ -715,7 +715,7 @@ namespace hedge::db
         // Write meta-index
         {
             auto res = co_await executor->submit_request(async::write_request{
-                .fd = output_fd.get_fd(),
+                .fd = output_fd.fd(),
                 .data = reinterpret_cast<uint8_t*>(merged_meta_index.data()),
                 .size = merged_meta_index.size() * sizeof(meta_index_entry),
                 .offset = bytes_written});
@@ -734,7 +734,7 @@ namespace hedge::db
         {
             auto padding = std::vector<uint8_t>(meta_index_padding_size, 0);
             auto res = co_await executor->submit_request(async::write_request{
-                .fd = output_fd.get_fd(),
+                .fd = output_fd.fd(),
                 .data = padding.data(),
                 .size = meta_index_padding_size,
                 .offset = bytes_written});
@@ -756,7 +756,7 @@ namespace hedge::db
         // Write footer
         {
             auto res = co_await executor->submit_request(async::write_request{
-                .fd = output_fd.get_fd(),
+                .fd = output_fd.fd(),
                 .data = reinterpret_cast<uint8_t*>(&footer),
                 .size = sizeof(footer),
                 .offset = bytes_written});

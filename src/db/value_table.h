@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -51,14 +52,14 @@ namespace hedge::db
      */
     struct value_table_info
     {
-        size_t current_offset{}; ///< The offset where the next write will begin.
+        std::size_t current_offset{}; ///< The offset where the next write will begin.
 
         // Garbage-collector related info (Currently tracked but GC not implemented)
-        size_t items_count{};    ///< Total number of items (including deleted) written.
-        size_t occupied_space{}; ///< Total bytes occupied by headers and non-deleted values.
+        std::size_t items_count{};    ///< Total number of items (including deleted) written.
+        std::size_t occupied_space{}; ///< Total bytes occupied by headers and non-deleted values.
 
-        size_t deleted_count{}; ///< Number of items marked as deleted.
-        size_t freed_space{};   ///< Total bytes occupied by headers and values of deleted items.
+        std::size_t deleted_count{}; ///< Number of items marked as deleted.
+        std::size_t freed_space{};   ///< Total bytes occupied by headers and values of deleted items.
 
         uint8_t padding[8]; // NOLINT ///< Padding to ensure struct size and alignment.
 
@@ -84,10 +85,11 @@ namespace hedge::db
      */
     class value_table : public fs::file
     {
-        uint32_t _unique_id;                                                       ///< Unique identifier for this value table file.
-        size_t _current_offset{0};                                                 ///< Current write offset within the file.
-        fs::mmap_view _mmap{};                                                     ///< Memory map of the last part of the file containing `value_table_info`.
-        std::unique_ptr<std::mutex> _delete_mutex{std::make_unique<std::mutex>()}; ///< Mutex to protect delete operations (potentially during GC).
+        uint32_t _unique_id;                   ///< Unique identifier for this value table file.
+        std::atomic_size_t _current_offset{0}; ///< Current write offset within the file.
+        fs::mmap_view _mmap{};                 ///< Memory map of the last part of the file containing `value_table_info`.
+        std::recursive_mutex _delete_mutex{};  ///< Mutex to protect delete operations (potentially during GC).
+        std::recursive_mutex _info_mutex{};
 
         /** @brief Default constructor (private). Use factory methods. */
         value_table() = default;
@@ -107,6 +109,14 @@ namespace hedge::db
         /** @brief Maximum practical size for a single value entry (derived constraint). */
         static constexpr size_t MAX_FILE_SIZE = (((1UL << 17) - 1) * PAGE_SIZE_IN_BYTES) - sizeof(file_header); // TODO: Re-evaluate this limit's origin/necessity
 
+        /// Deleted constructor and assignment.
+        value_table(value_table&&) = delete;
+        value_table& operator=(value_table&&) = delete;
+
+        /// Deleted copy constructor and assignment.
+        value_table(const value_table&) = delete;
+        value_table& operator=(const value_table&) = delete;
+
         /**
          * @brief Gets the unique identifier of this value table.
          * @return The table ID.
@@ -114,14 +124,6 @@ namespace hedge::db
         [[nodiscard]] uint32_t id() const
         {
             return this->_unique_id;
-        }
-        /**
-         * @brief Gets the current offset for the next write operation.
-         * @return The current write offset in bytes.
-         */
-        [[nodiscard]] size_t current_offset() const
-        {
-            return this->_current_offset;
         }
 
         /**
@@ -147,9 +149,6 @@ namespace hedge::db
         {
             size_t offset{}; ///< The offset at which the write should occur.
         };
-
-        /** @brief Type alias for the pair returned by read_file_and_next_header_async, indicating the next entry's offset and total size. */
-        using next_offset_and_size_t = std::pair<size_t, size_t>;
 
         /**
          * @brief Reserves space for an upcoming write operation.
@@ -186,30 +185,6 @@ namespace hedge::db
         async::task<expected<output_file>> read_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor, bool skip_delete_check = false);
 
         /**
-         * @brief Asynchronously reads the header of the first entry in the table and acquires a lock.
-         * @details Primarily used to start iteration during garbage collection. Acquires `_delete_mutex`.
-         * TODO: Maybe the most effective solution is to implement garbage collection by just using mmap.
-         * So this might getting scrapped later.
-         * @param executor The executor context for async I/O.
-         * @return `async::task<expected<std::pair<file_header, std::unique_lock<std::mutex>>>>` resolving to the first header
-         * and the acquired lock, or an error.
-         */
-        async::task<expected<std::pair<file_header, std::unique_lock<std::mutex>>>> get_first_header_async(const std::shared_ptr<async::executor_context>& executor);
-
-        /**
-         * @brief Asynchronously reads a full entry and the header of the *next* entry.
-         * @details Used for iterating through the value table during garbage collection. Reads the entry
-         * specified by `file_offset` and `file_size`, then reads the header immediately following it
-         * to determine the offset and size of the subsequent entry, handling EOF detection.
-         * @param file_offset Starting offset of the current entry's header.
-         * @param file_size Total size (header + data) of the current entry.
-         * @param executor The executor context for async I/O.
-         * @return `async::task<expected<std::pair<output_file, next_offset_and_size_t>>>` resolving to the read `output_file`
-         * and the offset/size pair for the next entry. If the next entry is EOF, offset is `max()` and size is 0. Returns an error on failure.
-         */
-        async::task<expected<std::pair<output_file, next_offset_and_size_t>>> read_file_and_next_header_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor);
-
-        /**
          * @brief Asynchronously marks an entry as deleted (sets the tombstone flag).
          * @details Reads the header at the given offset, verifies the key, sets the `deleted_flag`,
          * updates the on-disk `value_table_info` (stats), and writes the modified header back.
@@ -227,7 +202,7 @@ namespace hedge::db
          * @param preallocate If true (default), preallocates the full `TABLE_ACTUAL_MAX_SIZE` on disk using `fallocate`.
          * @return `expected<value_table>` containing the new table object or an error.
          */
-        static hedge::expected<value_table> make_new(const std::filesystem::path& base_path, uint32_t table_id, bool preallocate = true);
+        static hedge::expected<std::shared_ptr<value_table>> make_new(const std::filesystem::path& base_path, uint32_t table_id, bool preallocate = true);
 
         /**
          * @brief Factory function to load an existing value table file.
@@ -235,7 +210,7 @@ namespace hedge::db
          * @param open_mode The mode to open the file in (e.g., read-only, read-write).
          * @return `expected<value_table>` containing the loaded table object or an error.
          */
-        static hedge::expected<value_table> load(const std::filesystem::path& path, fs::file::open_mode open_mode);
+        static hedge::expected<std::shared_ptr<value_table>> load(const std::filesystem::path& path, fs::file::open_mode open_mode);
 
     private:
         /**

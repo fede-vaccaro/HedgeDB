@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <filesystem>
+#include <mutex>
 #include <random>
+#include <sys/types.h>
 #include <unordered_set>
 
 #include <gtest/gtest.h>
@@ -22,44 +24,41 @@ namespace hedge::db
 
             if(std::filesystem::exists(this->_base_path))
                 std::filesystem::remove_all(this->_base_path);
-
-            this->_executor = std::make_shared<hedge::async::executor_context>(128);
         }
 
-        uuids::uuid generate_uuid()
+        static std::vector<uint8_t> make_random_vec_seeded(size_t payload_size, size_t seed)
         {
-            this->_uuids.emplace_back(this->gen());
-            return this->_uuids.back();
-        }
-
-        std::vector<uint8_t> make_random_vec(size_t size)
-        {
-            std::vector<uint8_t> vec(size);
-
-            static std::uniform_int_distribution<uint8_t> dist(0, 255);
-
-            std::ranges::generate(vec, [this]()
-                                  { return dist(this->_generator); });
-            return vec;
-        }
-
-        static std::vector<uint8_t> make_random_vec_seeded(size_t size, size_t seed)
-        {
+            static std::recursive_mutex m;
+            std::lock_guard lk(m);
 
             static std::unordered_map<size_t, std::vector<uint8_t>> cache;
             constexpr size_t MAX_CACHE_ITEMS_CAPACITY = 1024;
 
-            if(size_t hash = seed % MAX_CACHE_ITEMS_CAPACITY; cache.contains(hash))
+            size_t hash = seed % MAX_CACHE_ITEMS_CAPACITY;
+
+            if(cache.contains(hash))
                 return cache[hash];
 
-            std::vector<uint8_t> vec(size);
+            std::vector<uint8_t> vec(payload_size);
             std::mt19937 generator{seed};
             std::uniform_int_distribution<uint8_t> dist(0, 255);
 
             std::ranges::generate(vec, [&dist, &generator]()
                                   { return dist(generator); });
-            cache[seed] = vec;
-            return vec;
+            cache[hash] = vec;
+
+            return cache[hash];
+        }
+
+        std::pair<uuids::uuid, std::vector<uint8_t>> make_key_value(size_t value_size, size_t seed)
+        {
+            static std::recursive_mutex m;
+            std::lock_guard lk(m);
+
+            auto key = this->gen();
+            this->_key_value_seeds.emplace_back(key, seed);
+
+            return {key, this->make_random_vec_seeded(value_size, seed)};
         }
 
         void TearDown() override
@@ -70,15 +69,14 @@ namespace hedge::db
         size_t N_KEYS{};                // number of keys per run
         size_t PAYLOAD_SIZE{};          // payload size in bytes
         size_t MEMTABLE_CAPACITY{};     // memtable capacity
-        bool TEST_DELETION{true};       // whether to test deletion or not
+        bool TEST_DELETION{false};      // whether to test deletion or not
         double DELETE_PROBABILITY{0.0}; // if deletion test is enabled, how many keys of total should be removed
 
         // runtime
-        std::shared_ptr<hedge::async::executor_context> _executor;
         std::filesystem::path _base_path = "/tmp/db";
 
         // rng and seed stuff
-        std::vector<uuids::uuid> _uuids;
+        std::vector<std::pair<uuids::uuid, size_t>> _key_value_seeds;
         std::unordered_set<uuids::uuid> _deleted_keys;
         size_t seed{107279581};
         std::mt19937 _generator{seed};
@@ -88,7 +86,7 @@ namespace hedge::db
 
     TEST_P(database_test, database_comprehensive_test)
     {
-        this->_uuids.reserve(this->N_KEYS);
+        this->_key_value_seeds.reserve(this->N_KEYS);
 
         async::wait_group write_wg;
         write_wg.set(this->N_KEYS);
@@ -96,9 +94,11 @@ namespace hedge::db
         db_config config;
         config.auto_compaction = true;
         config.keys_in_mem_before_flush = this->MEMTABLE_CAPACITY;
-        config.compaction_read_ahead_size_bytes =  16 * 1024 * 1024;
+        config.compaction_read_ahead_size_bytes = 32 * 1024 * 1024;
         config.num_partition_exponent = 4;
         config.target_compaction_size_ratio = 1.0 / 3.0;
+        config.use_odirect_for_indices = false;
+        config.auto_compaction = true;
 
         auto maybe_db = database::make_new(this->_base_path, config);
         ASSERT_TRUE(maybe_db) << "An error occurred while creating the database: " << maybe_db.error().to_string();
@@ -107,19 +107,27 @@ namespace hedge::db
 
         std::uniform_real_distribution<double> dist(0.0, 1.0);
 
-        auto make_put_task = [this, &db, &write_wg, &dist](size_t i) -> async::task<void>
-        {
-            auto key = this->generate_uuid();
-            auto value = database_test::make_random_vec_seeded(this->PAYLOAD_SIZE, i);
+        // auto format_value_hex = [](const std::vector<uint8_t>& value) -> std::string
+        // {
+        //     std::ostringstream oss;
+        //     oss << std::hex;
+        //     for(const auto& byte : value)
+        //         oss << static_cast<int>(byte);
+        //     return oss.str();
+        // };
 
-            auto status = co_await db->put_async(key, std::move(value), this->_executor);
+        auto make_put_task = [this, &db, &write_wg, &dist](size_t i, const auto& executor) -> async::task<void>
+        {
+            auto [key, value] = database_test::make_key_value(this->PAYLOAD_SIZE, i);
+
+            auto status = co_await db->put_async(key, value, executor);
 
             if(!status)
                 std::cerr << "An error occurred during insertion: " << status.error().to_string() << std::endl;
 
             if(this->TEST_DELETION && dist(this->_generator) < this->DELETE_PROBABILITY)
             {
-                auto status = co_await db->remove_async(key, this->_executor);
+                auto status = co_await db->remove_async(key, executor);
 
                 if(!status)
                     std::cerr << "An error occurred during deletion: " << status.error().to_string() << std::endl;
@@ -132,8 +140,10 @@ namespace hedge::db
 
         auto t0 = std::chrono::high_resolution_clock::now();
         for(size_t i = 0; i < this->N_KEYS; ++i)
-            this->_executor->submit_io_task(make_put_task(i));
-
+        {
+            const auto& executor = async::executor_from_static_pool();
+            executor->submit_io_task(make_put_task(i, executor));
+        }
         write_wg.wait();
         auto t1 = std::chrono::high_resolution_clock::now();
 
@@ -146,7 +156,7 @@ namespace hedge::db
 
         // compaction
         t0 = std::chrono::high_resolution_clock::now();
-        auto compaction_status_future = db->compact_sorted_indices(true, this->_executor);
+        auto compaction_status_future = db->compact_sorted_indices(true);
         ASSERT_TRUE(compaction_status_future.get()) << "An error occurred during compaction: " << compaction_status_future.get().error().to_string();
         t1 = std::chrono::high_resolution_clock::now();
         duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
@@ -157,12 +167,13 @@ namespace hedge::db
         async::wait_group read_wg;
         read_wg.set(this->N_KEYS);
 
-        size_t number_of_errors = 0;
+        std::atomic_size_t number_of_errors = 0;
 
-        auto make_get_task = [this, &db, &read_wg, &number_of_errors](size_t i) -> async::task<void>
+        auto make_get_task = [this, &db, &read_wg, &number_of_errors](size_t i, const auto& executor) -> async::task<void>
         {
-            auto key = this->_uuids[i];
-            auto maybe_value = co_await db->get_async(key, this->_executor);
+            auto [key, seed] = this->_key_value_seeds[i];
+
+            auto maybe_value = co_await db->get_async(key, executor);
 
             if(!maybe_value.has_value() && maybe_value.error().code() == errc::DELETED)
             {
@@ -186,19 +197,26 @@ namespace hedge::db
 
             [[maybe_unused]] auto& value = maybe_value.value();
 
-            auto expected_value = database_test::make_random_vec_seeded(this->PAYLOAD_SIZE, i);
+            auto expected_value = database_test::make_random_vec_seeded(this->PAYLOAD_SIZE, seed);
+
             if(value != expected_value)
             {
-                std::cerr << "Retrieved value does not match expected value for item nr.  " << i << std::endl;
+                // std::cerr << "Retrieved value does not match expected value for item nr.  " << i << std::endl;
                 number_of_errors++;
             }
 
             read_wg.decr();
         };
 
+        // shuffle keys before reading
+        std::shuffle(this->_key_value_seeds.begin(), this->_key_value_seeds.end(), this->_generator);
+
         t0 = std::chrono::high_resolution_clock::now();
         for(size_t i = 0; i < this->N_KEYS; ++i)
-            this->_executor->submit_io_task(make_get_task(i));
+        {
+            const auto& executor = async::executor_from_static_pool();
+            executor->submit_io_task(make_get_task(i, executor));
+        }
 
         read_wg.wait();
         t1 = std::chrono::high_resolution_clock::now();
@@ -220,9 +238,9 @@ namespace hedge::db
         test_suite,
         database_test,
         testing::Combine(
-            testing::Values(30'000'000), // n keys
-            testing::Values(100),        // payload size
-            testing::Values(2'000'000)  // memtable capacity
+            testing::Values(50'000'000), // n keys
+            testing::Values(1024),      // payload size
+            testing::Values(2'000'000)   // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)
         {
