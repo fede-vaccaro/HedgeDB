@@ -33,12 +33,12 @@ namespace hedge::fs
         if(this->_fd.uses_direct_access() && num_bytes_to_read % PAGE_SIZE_IN_BYTES != 0)
             num_bytes_to_read += PAGE_SIZE_IN_BYTES - (num_bytes_to_read % PAGE_SIZE_IN_BYTES);
 
-        auto response = co_await this->_executor->submit_request(async::read_request{.fd = this->_fd.get_fd(), .offset = this->_current_offset, .size = num_bytes_to_read});
+        auto response = co_await this->_executor->submit_request(async::read_request{.fd = this->_fd.fd(), .offset = this->_current_offset, .size = num_bytes_to_read});
 
         this->_current_offset += num_bytes_to_read;
 
         if(response.error_code != 0)
-            co_return hedge::error(std::format("An error occurred with request fd: {}, current_offset: {}, size: {}. Error: {}", this->_fd.get_fd(), this->_current_offset, num_bytes_to_read, strerror(-response.error_code)));
+            co_return hedge::error(std::format("An error occurred with request fd: {}, current_offset: {}, size: {}. Error: {}", this->_fd.fd(), this->_current_offset, num_bytes_to_read, strerror(-response.error_code)));
 
         if(response.bytes_read != num_bytes_to_read)
             co_return hedge::error(std::format("Unexpected bytes read: {}. Expected: {}", response.bytes_read, num_bytes_to_read));

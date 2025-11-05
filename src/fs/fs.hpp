@@ -56,7 +56,7 @@ namespace hedge::fs
         std::atomic_bool _deletion_triggered{false};
 
     public:
-        [[nodiscard]] int get_fd() const
+        [[nodiscard]] int fd() const
         {
             return this->_fd;
         }
@@ -280,7 +280,7 @@ namespace hedge::fs
     public:
         static hedge::expected<mmap_owning> from_fd_wrapper(file&& fd_w)
         {
-            if(fd_w.get_fd() == -1)
+            if(fd_w.fd() == -1)
             {
                 return hedge::error("Cannot map an invalid file descriptor.");
             }
@@ -288,7 +288,7 @@ namespace hedge::fs
             {
             }
 
-            void* mapped_ptr = mmap(nullptr, fd_w.file_size(), PROT_READ, MAP_PRIVATE, fd_w.get_fd(), 0);
+            void* mapped_ptr = mmap(nullptr, fd_w.file_size(), PROT_READ, MAP_PRIVATE, fd_w.fd(), 0);
 
             if(mapped_ptr == MAP_FAILED)
             {
@@ -369,7 +369,7 @@ namespace hedge::fs
 
         [[nodiscard]] int get_fd() const
         {
-            return _fd_wrapper.get_fd();
+            return _fd_wrapper.fd();
         }
     };
 
@@ -390,13 +390,13 @@ namespace hedge::fs
     public:
         static hedge::expected<mmap_view> from_file(const file& fd_w, std::optional<range> range = std::nullopt)
         {
-            if(fd_w.get_fd() == -1)
+            if(fd_w.fd() == -1)
                 return hedge::error("Cannot map an invalid file descriptor.");
 
             if(fd_w.file_size() == 0)
                 return hedge::error("Cannot mmap an empty file.");
 
-            void* mapped_ptr = mmap(nullptr, range ? range->size : fd_w.file_size(), PROT_READ | PROT_WRITE, MAP_PRIVATE, fd_w.get_fd(), range ? range->start : 0);
+            void* mapped_ptr = mmap(nullptr, range ? range->size : fd_w.file_size(), PROT_READ | PROT_WRITE, MAP_PRIVATE, fd_w.fd(), range ? range->start : 0);
 
             if(mapped_ptr == MAP_FAILED)
             {
@@ -405,7 +405,7 @@ namespace hedge::fs
             }
 
             mmap_view wrapper;
-            wrapper._fd = fd_w.get_fd();
+            wrapper._fd = fd_w.fd();
             wrapper._mapped_ptr = mapped_ptr;
             wrapper._mapped_size = range ? range->size : fd_w.file_size();
             wrapper._range = range;
@@ -440,7 +440,7 @@ namespace hedge::fs
 
         ~mmap_view()
         {
-            if(_mapped_ptr != nullptr && _mapped_ptr != MAP_FAILED)
+            if(this->_mapped_ptr != nullptr && this->_mapped_ptr != MAP_FAILED)
             {
                 if(munmap(_mapped_ptr, _mapped_size) == -1)
                     perror("Error munmapping file in mmap_wrapper destructor");

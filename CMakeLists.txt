@@ -96,18 +96,18 @@ target_link_libraries(worker_test uring gtest gtest_main)
 add_executable(database_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/database.spec.cc)
 target_link_libraries(database_test uring gtest gtest_main)
 
-# library
-add_library(hedgedb STATIC ${IO_EXECUTOR_SRCS} ${DB_SOURCES} src/api/api.cc)
-target_link_libraries(hedgedb PRIVATE uring)
-target_include_directories(hedgedb PUBLIC $<INSTALL_INTERFACE:${PUBLIC_INCLUDES}> $<BUILD_INTERFACE:${PUBLIC_INCLUDES}>)
+# # library
+# add_library(hedgedb STATIC ${IO_EXECUTOR_SRCS} ${DB_SOURCES} src/api/api.cc)
+# target_link_libraries(hedgedb PRIVATE uring)
+# target_include_directories(hedgedb PUBLIC $<INSTALL_INTERFACE:${PUBLIC_INCLUDES}> $<BUILD_INTERFACE:${PUBLIC_INCLUDES}>)
 
-# db api tests
-add_executable(db_api_test test/api.spec.cc)
-target_link_libraries(db_api_test PUBLIC hedgedb gtest gtest_main)
+# # db api tests
+# add_executable(db_api_test test/api.spec.cc)
+# target_link_libraries(db_api_test PUBLIC hedgedb gtest gtest_main)
 
-# installation rules
-install(TARGETS hedgedb
-    ARCHIVE 
-    DESTINATION lib
-)
-install(DIRECTORY include/ DESTINATION include)
+# # installation rules
+# install(TARGETS hedgedb
+#     ARCHIVE 
+#     DESTINATION lib
+# )
+# install(DIRECTORY include/ DESTINATION include)

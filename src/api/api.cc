@@ -136,7 +136,6 @@ namespace hedge
         this->_db_impl->executor()->submit_io_task(
             task_instantiator(
                 this->_db_impl->db(),
-                this->_db_impl->executor(),
                 key, std::move(callback)));
     }
 
@@ -174,7 +173,7 @@ namespace hedge
 
     std::future<hedge::status> api::compact_sorted_indices(bool ignore_ratio)
     {
-        return this->_db_impl->db()->compact_sorted_indices(ignore_ratio, this->_db_impl->executor());
+        return this->_db_impl->db()->compact_sorted_indices(ignore_ratio);
     }
 
     double api::read_amplification_factor()

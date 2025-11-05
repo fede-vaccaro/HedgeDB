@@ -59,6 +59,8 @@ namespace hedge::async
 
         this->_worker = std::thread([this]()
                                     { this->_event_loop(); });
+
+        pthread_setname_np(this->_worker.native_handle(), "io-executor");
     }
 
     executor_context::~executor_context()
@@ -329,6 +331,26 @@ namespace hedge::async
             log_always("Failed to register file descriptor ", fd, ": ", strerror(-result));
             throw std::runtime_error("Failed to register file descriptor: " + std::string(strerror(-result)));
         }
+    }
+
+    const std::shared_ptr<executor_context>& executor_from_static_pool()
+    {
+        constexpr size_t POOL_SIZE = 4;
+
+        using executor_pool = std::array<std::shared_ptr<executor_context>, POOL_SIZE>;
+
+        static std::atomic_uint64_t current_head{0};
+        static executor_pool pool = []()
+        {
+            executor_pool _pool;
+
+            for(auto& pool_ptr : _pool)
+                pool_ptr = std::make_shared<executor_context>(128);
+
+            return _pool;
+        }();
+
+        return pool[current_head.fetch_add(1, std::memory_order_relaxed) % pool.size()];
     }
 
 } // namespace hedge::async

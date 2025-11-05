@@ -147,4 +147,6 @@ namespace hedge::async
         static std::pair<uint64_t, uint8_t> parse_request_key(uint64_t key);
     };
 
+    const std::shared_ptr<executor_context>& executor_from_static_pool();
+
 } // namespace hedge::async

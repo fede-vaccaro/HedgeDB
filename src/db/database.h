@@ -80,19 +80,22 @@ namespace hedge::db
         // - across different partitions, the key ranges are disjoint
         using sorted_indices_map_t = std::map<uint16_t, std::vector<sorted_index_ptr_t>>;
 
-        std::atomic<size_t> _flush_iteration{0}; ///< Counter for naming flushed index files uniquely within partitions.
-        std::mutex _sorted_index_mutex;          ///< Protects access to the `_sorted_indices` map.
-        sorted_indices_map_t _sorted_indices;    ///< In-memory map representing the LSM tree levels/files.
+        std::atomic_size_t _flush_iteration{0};   ///< Counter for naming flushed index files uniquely within partitions.
+        std::recursive_mutex _sorted_index_mutex; ///< Protects access to the `_sorted_indices` map.
+        sorted_indices_map_t _sorted_indices;     ///< In-memory map representing the LSM tree levels/files.
 
-        size_t _last_table_id{0};       ///< ID counter for the next value_table file to be created.
-        std::mutex _value_tables_mutex; ///< Protects access to the `_value_tables` map.
+        std::atomic_size_t _last_table_id{0};     ///< Atomic ID counter for the next value_table file to be created.
+        std::recursive_mutex _value_tables_mutex; ///< Protects access to the `_value_tables` map.
 
         /// Map storing shared pointers to older, non-current value_table files, keyed by their ID.
         std::unordered_map<uint32_t, std::shared_ptr<value_table>> _value_tables;
 
         // --- Current/Mutable State ---
         /// Shared pointer to the currently active value_table file where new values are written.
-        std::shared_ptr<value_table> _current_value_table;
+        std::atomic<std::shared_ptr<value_table>> _current_value_table;
+
+        /// Mutex protecting access to the mem_index (memtable).
+        std::recursive_mutex _mem_index_mutex;
         /// The active in-memory index (memtable) for recent writes.
         mem_index _mem_index;
 
@@ -126,15 +129,6 @@ namespace hedge::db
          * @return An async task resolving to a status indicating success or failure.
          */
         async::task<hedge::status> put_async(key_t key, const byte_buffer_t& value, const std::shared_ptr<async::executor_context>& executor);
-        /**
-         * @brief Asynchronously inserts or updates a key-value pair (by moving value).
-         * Optimized version of put_async that moves the value data.
-         * @param key The key to insert/update.
-         * @param value The value data (moved).
-         * @param executor The I/O executor context.
-         * @return An async task resolving to a status indicating success or failure.
-         */
-        async::task<hedge::status> put_async(key_t key, byte_buffer_t&& value, const std::shared_ptr<async::executor_context>& executor);
 
         /**
          * @brief Asynchronously marks a key as deleted.
@@ -186,7 +180,7 @@ namespace hedge::db
          * @param executor The I/O executor context used *within* the compaction job for disk I/O.
          * @return A future that resolves to the status of the submitted compaction job upon completion.
          */
-        std::future<hedge::status> compact_sorted_indices(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor);
+        std::future<hedge::status> compact_sorted_indices(bool ignore_ratio);
 
         /**
          * @brief Factory function to create a new database instance at the specified path.
@@ -235,9 +229,11 @@ namespace hedge::db
         /**
          * @brief Closes the current value table, moves it to the map of older tables, and creates a new active value table.
          * Called when the current value table is full.
+         * @param rotating Which table pointer we need to rotate. It will be compared with this->_current_value_table in case
+         *                 another thread had already rotate it.
          * @return Status indicating success or failure.
          */
-        hedge::status _rotate_value_table();
+        hedge::status _rotate_value_table(const std::shared_ptr<value_table>& rotating);
         /**
          * @brief Flushes the contents of the `_mem_index` to new `sorted_index` file(s) on disk.
          * Clears the `_mem_index` afterwards. Manages partitioning and file naming.
@@ -251,7 +247,7 @@ namespace hedge::db
          * @param executor The I/O executor for disk operations during merging.
          * @return Status indicating the overall success or failure of the compaction job.
          */
-        hedge::status _compaction_job(bool ignore_ratio, const std::shared_ptr<async::executor_context>& executor);
+        hedge::status _compaction_job(bool ignore_ratio);
         /**
          * @brief Internal helper to find the most recent `value_ptr_t` and the corresponding `value_table` for a key.
          * Searches memtable, then relevant sorted_indices. Handles deleted entries.

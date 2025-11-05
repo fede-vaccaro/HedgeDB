@@ -136,7 +136,7 @@ namespace hedge::db
         // `read_request` implies page-aligned memory will be allocated by the mailbox.
         auto response = co_await executor->submit_request(
             async::read_request{
-                .fd = this->get_fd(),
+                .fd = this->fd(),
                 .offset = offset,
                 .size = PAGE_SIZE_IN_BYTES});
 
@@ -198,7 +198,7 @@ namespace hedge::db
 
         // Submit the asynchronous write request.
         auto write_response = co_await executor->submit_request(async::write_request{
-            .fd = this->get_fd(),                         // Use the file descriptor of this sorted_index
+            .fd = this->fd(),                         // Use the file descriptor of this sorted_index
             .data = const_cast<uint8_t*>(entry_byte_ptr), // Pointer to the data to write
             .size = sizeof(index_entry_t),                // Size of the data to write
             .offset = total_file_offset,                  // Exact byte offset in the file

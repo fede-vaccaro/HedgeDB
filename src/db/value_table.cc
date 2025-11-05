@@ -1,3 +1,4 @@
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <error.hpp>
@@ -6,13 +7,14 @@
 #include "async/io_executor.h"
 #include "async/mailbox_impl.h"
 
+#include "db/value_table.h"
 #include "fs/fs.hpp"
 #include "types.h"
 #include "utils.h"
-#include "db/value_table.h"
 
 namespace hedge::db
 {
+
     expected<value_table::write_reservation> value_table::get_write_reservation(size_t file_size)
     {
         if(file_size > value_table::MAX_FILE_SIZE)
@@ -20,27 +22,68 @@ namespace hedge::db
 
         auto file_w_header_size = file_size + sizeof(file_header);
 
-        if(this->_current_offset + file_w_header_size > value_table::TABLE_MAX_SIZE_BYTES)
+        size_t offset = this->_current_offset.load(std::memory_order::relaxed);
+
+        auto max_needed_pages_for_file = hedge::ceil(file_w_header_size, PAGE_SIZE_IN_BYTES);
+
+        size_t padding = 0;
+        size_t next_offset;
+
+        do
         {
-            return hedge::error(
-                std::format("Adding this file (of size: {}) to this table will exceed maximum table size ({} > {})",
-                            file_w_header_size,
-                            this->_current_offset + file_w_header_size,
-                            value_table::TABLE_MAX_SIZE_BYTES),
-                errc::VALUE_TABLE_NOT_ENOUGH_SPACE); // This error code signals that the caller needs to create a new table.
-        }
+            // Check if padding is needed
+            next_offset = offset + file_w_header_size;
+            size_t offset_page = offset / PAGE_SIZE_IN_BYTES;
+            size_t next_offset_page = next_offset / PAGE_SIZE_IN_BYTES;
+            padding = 0;
 
-        auto ret_offset = this->_current_offset;
+            if(next_offset_page - offset_page >= max_needed_pages_for_file)
+            {
+                // Align the current offset (where the file is being written) to the following page
+                padding = PAGE_SIZE_IN_BYTES - (offset % PAGE_SIZE_IN_BYTES);
+                next_offset += padding;
+            }
 
-        this->_current_offset += file_w_header_size;
+            /*
+                Example of padding computing:
+                file_size_w_header = 1200;
+                max_needed_pages_for_file = 1;
+                offset = 3600
+
+                next_offset = 4800
+                next_offset_page = 1
+                offset_page = 0
+                padding = 0
+
+                if(1 - 0 >= 1) 
+                {
+                    padding = 4096 - (3600) = 496
+                    next_offset = 4800 + 496 = 5296
+                }
+
+                ...
+
+                reservation.offset = 3600 + 496 = 4096 (right at the beginn of page 2)
+            */
+
+            if(next_offset > value_table::TABLE_MAX_SIZE_BYTES)
+            {
+                return hedge::error(
+                    std::format("Adding this file (of size: {}) to this table will exceed maximum table size ({} > {})",
+                                file_w_header_size,
+                                offset + file_w_header_size,
+                                value_table::TABLE_MAX_SIZE_BYTES),
+                    errc::VALUE_TABLE_NOT_ENOUGH_SPACE); // This error code signals that the caller needs to create a new table.
+            }
+        } while(!this->_current_offset.compare_exchange_strong(offset, next_offset));
 
         // Update the table's metadata (persisted via mmap) with the new offset.
-        // TODO: check if it is necessary to update the current offset
-        // Might just be inferred from EOF marker position on load.
-        auto& info = this->_info();
-        info.current_offset = this->_current_offset;
+        // TODO 1: check if it is actually necessary to store the current offset within the infos
+        // It might be cached and - as a fallback mechanism - inferred from EOF marker position on load.
+        // auto& info = this->_info();
+        // std::atomic_ref<size_t>(info.current_offset).fetch_add(file_w_header_size);
 
-        return value_table::write_reservation{ret_offset};
+        return value_table::write_reservation{offset + padding};
     }
 
     async::task<expected<hedge::value_ptr_t>> value_table::write_async(key_t key, const std::vector<uint8_t>& value, const value_table::write_reservation& reservation, const std::shared_ptr<async::executor_context>& executor)
@@ -55,14 +98,14 @@ namespace hedge::db
         // or ensure the current single write is efficient enough.
 
         std::vector<uint8_t> value_with_header;
-        value_with_header.reserve(value.size() + sizeof(file_header) + sizeof(EOF_MARKER));
+        value_with_header.reserve(value.size() + sizeof(file_header));
 
         value_with_header.insert(value_with_header.end(), reinterpret_cast<uint8_t*>(&header), reinterpret_cast<uint8_t*>(&header) + sizeof(file_header));
         value_with_header.insert(value_with_header.end(), value.begin(), value.end());
-        value_with_header.insert(value_with_header.end(), EOF_MARKER.begin(), EOF_MARKER.end());
+        // value_with_header.insert(value_with_header.end(), EOF_MARKER.begin(), EOF_MARKER.end());
 
         auto write_value_response = co_await executor->submit_request(async::write_request{
-            .fd = this->get_fd(),
+            .fd = this->fd(),
             .data = const_cast<uint8_t*>(value_with_header.data()),
             .size = value_with_header.size(),
             .offset = reservation.offset,
@@ -75,9 +118,12 @@ namespace hedge::db
             co_return hedge::error(std::format("Failed to write value to value table (path: {}): expected {}, got {}", this->path().string(), value_with_header.size(), write_value_response.bytes_written));
 
         // Update the table's persistent metadata (item count, occupied space).
-        auto& info = this->_info();
-        info.items_count++;
-        info.occupied_space += value.size() + sizeof(file_header);
+        {
+            std::lock_guard lk(this->_info_mutex);
+            auto& info = this->_info();
+            info.items_count++;
+            info.occupied_space += value.size() + sizeof(file_header);
+        }
 
         // this value_ptr will flow first to the mem_index and then - on flush - to the sorted_index.
         co_return hedge::value_ptr_t(
@@ -93,11 +139,11 @@ namespace hedge::db
             co_return hedge::error(std::format("Requested file offset ({}) + size ({}) exceeds current table offset ({})",
                                                file_offset,
                                                file_size,
-                                               this->_current_offset));
+                                               this->_current_offset.load(std::memory_order_relaxed)));
         }
 
         auto read_response = co_await executor->submit_request(async::unaligned_read_request{
-            .fd = this->get_fd(),
+            .fd = this->fd(),
             .offset = file_offset,
             .size = file_size,
         });
@@ -153,7 +199,7 @@ namespace hedge::db
         };
     }
 
-    hedge::expected<value_table> value_table::make_new(const std::filesystem::path& base_path, uint32_t id, bool preallocate)
+    hedge::expected<std::shared_ptr<value_table>> value_table::make_new(const std::filesystem::path& base_path, uint32_t id, bool preallocate)
     {
         auto file_path = base_path / std::to_string(id);
         file_path = with_extension(file_path, TABLE_FILE_EXTENSION);
@@ -182,15 +228,14 @@ namespace hedge::db
         // memcpy is safer than direct assignment via reference for potentially uninitialized memory.
         std::memcpy(&value_table::_get_info_from_mmap(tmp_mmap.value()), &initial_info, sizeof(value_table_info));
 
-        // Construct and return the value_table object.
-        return value_table{
+        return std::shared_ptr<value_table>(new value_table{
             id,
-            0,                            // Initial offset is 0.
-            std::move(file_desc.value()), // Transfer ownership of the file descriptor.
-            std::move(tmp_mmap.value())}; // Transfer ownership of the mmap.
+            0,
+            std::move(file_desc.value()),
+            std::move(tmp_mmap.value())});
     }
 
-    hedge::expected<value_table> value_table::load(const std::filesystem::path& path, fs::file::open_mode open_mode)
+    hedge::expected<std::shared_ptr<value_table>> value_table::load(const std::filesystem::path& path, fs::file::open_mode open_mode)
     {
         if(!std::filesystem::exists(path))
             return hedge::error("File does not exist: " + path.string());
@@ -214,11 +259,11 @@ namespace hedge::db
         // although the non_owning_mmap should live as long as the value_table.
         value_table_info info = value_table::_get_info_from_mmap(non_owning_mmap.value());
 
-        return value_table{
+        return std::shared_ptr<value_table>(new value_table{
             static_cast<uint32_t>(table_id),
             info.current_offset,
             std::move(file_descriptor.value()),
-            std::move(non_owning_mmap.value())};
+            std::move(non_owning_mmap.value())});
     }
 
     async::task<status> value_table::delete_async(key_t key, size_t offset, const std::shared_ptr<async::executor_context>& executor)
@@ -246,10 +291,10 @@ namespace hedge::db
             co_return hedge::error(std::format("Requested file offset ({}) + size ({}) exceeds current table offset ({})",
                                                offset,
                                                sizeof(file_header),
-                                               this->_current_offset));
+                                               this->_current_offset.load(std::memory_order_relaxed)));
 
         auto read_response = co_await executor->submit_request(async::unaligned_read_request{
-            .fd = this->get_fd(),
+            .fd = this->fd(),
             .offset = offset,
             .size = sizeof(file_header),
         });
@@ -293,7 +338,7 @@ namespace hedge::db
         header.deleted_flag = true;
 
         auto write_response = co_await executor->submit_request(async::write_request{
-            .fd = this->get_fd(),
+            .fd = this->fd(),
             .data = reinterpret_cast<uint8_t*>(&header),
             .size = sizeof(file_header),
             .offset = offset,
@@ -315,6 +360,7 @@ namespace hedge::db
         }
 
         // Update the table's persistent metadata (delete count, freed space).
+        std::lock_guard lk(this->_info_mutex);
         auto& info = this->_info();
         info.deleted_count++;
         info.freed_space += sizeof(file_header) + header.file_size;
@@ -349,117 +395,6 @@ namespace hedge::db
         // The info struct is positioned just before the end pointer.
         auto* info_ptr = reinterpret_cast<value_table_info*>(ptr_end - sizeof(value_table_info));
         return *info_ptr;
-    }
-
-    async::task<expected<std::pair<output_file, value_table::next_offset_and_size_t>>> value_table::read_file_and_next_header_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor)
-    {
-        // Might scrap this later and opt for a mmap based implementation
-
-        auto read_result = co_await this->read_async(file_offset, file_size, executor, true);
-
-        // Propagate errors from the read operation.
-        if(!read_result) // Use !expected for error check
-            co_return read_result.error();
-
-        // Calculate the offset where the *next* potential header should begin.
-        // This is immediately after the current entry (header + value).
-        auto next_header_offset = file_offset + file_size;
-
-        // Check if the calculated next offset reaches or exceeds the current known end of the table.
-        // This is the primary way to detect the end of iteration.
-        if(next_header_offset >= this->_current_offset)
-        {
-            // Return the successfully read current entry and signal EOF for the next entry.
-            co_return std::pair(
-                std::move(read_result.value()),
-                value_table::next_offset_and_size_t{std::numeric_limits<size_t>::max(), 0}); // Use max() as EOF signal
-        }
-
-        // Attempt to read just the header of the *next* entry.
-        auto get_next_header = co_await executor->submit_request(async::unaligned_read_request{
-            .fd = this->get_fd(),
-            .offset = next_header_offset,
-            .size = sizeof(file_header),
-        });
-
-        if(get_next_header.error_code != 0)
-        {
-            co_return hedge::error(std::format("Failed to read next file header from value table (path: {}): {}",
-                                               this->path().string(),
-                                               strerror(-get_next_header.error_code)));
-        }
-
-        if(get_next_header.bytes_read != sizeof(file_header))
-        {
-            co_return hedge::error(std::format("Failed to read next file header from value table (path: {}): expected {}, got {}",
-                                               this->path().string(),
-                                               sizeof(file_header),
-                                               get_next_header.bytes_read));
-        }
-
-        // Deserialize the next header. Initialize to ensure no garbage values.
-        file_header next_header = {};
-        std::copy(get_next_header.data.data(), get_next_header.data.data() + sizeof(file_header), reinterpret_cast<uint8_t*>(&next_header));
-
-        // Check if the next block starts with the explicit EOF marker.
-        // This is a secondary check, primarily for tables written with the explicit marker logic.
-        if(next_header.separator == EOF_MARKER) // Compare separator bytes.
-        {
-            // If it's the EOF marker, return the current entry and signal EOF.
-            co_return std::pair(
-                std::move(read_result.value()),
-                value_table::next_offset_and_size_t{std::numeric_limits<size_t>::max(), 0});
-        }
-
-        // Validate the separator of the *next* header. If it's not the standard FILE_SEPARATOR,
-        // it indicates potential data corruption between entries.
-        if(next_header.separator != FILE_SEPARATOR)
-        {
-            co_return hedge::error(std::format("Invalid next file header separator found in value table (path: {}) at offset {}",
-                                               this->path().string(),
-                                               next_header_offset));
-        }
-
-        co_return std::pair(
-            std::move(read_result.value()),
-            value_table::next_offset_and_size_t{
-                next_header_offset,
-                next_header.file_size + sizeof(file_header)});
-    }
-
-    async::task<expected<std::pair<file_header, std::unique_lock<std::mutex>>>> value_table::get_first_header_async(const std::shared_ptr<async::executor_context>& executor)
-    {
-        // Acquire lock (important if GC might run concurrently with other operations modifying the table).
-        auto lk = std::unique_lock<std::mutex>{*this->_delete_mutex};
-
-        // Check if the table is too small to even contain a header.
-        if(this->_current_offset < sizeof(file_header))
-        {
-            co_return hedge::error(std::format("Value table (path: {}) is too small ({}) to contain a header.",
-                                               this->path().string(), this->_current_offset),
-                                   errc::KEY_NOT_FOUND); // Or a more specific "empty table" error code.
-        }
-
-        // Submit a read request for the first header at offset 0.
-        auto get_first_header = co_await executor->submit_request(async::unaligned_read_request{
-            .fd = this->get_fd(),
-            .offset = 0,
-            .size = sizeof(file_header),
-        });
-
-        if(get_first_header.error_code != 0)
-        {
-            co_return hedge::error(std::format("Failed to read next file header from value table (path: {}): {}",
-                                               this->path().string(),
-                                               strerror(-get_first_header.error_code)));
-        }
-
-        file_header header;
-        std::copy(get_first_header.data.data(),
-                  get_first_header.data.data() + sizeof(file_header),
-                  reinterpret_cast<uint8_t*>(&get_first_header));
-
-        co_return {header, std::move(lk)};
     }
 
 } // namespace hedge::db

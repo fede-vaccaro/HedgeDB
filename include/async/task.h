@@ -8,8 +8,6 @@
 
 #include <logger.h>
 
-static int counter = 0;
-
 /*
     task<T> Implementation
 
@@ -39,8 +37,6 @@ namespace hedge::async
         std::array<uint8_t, sizeof(RETURN_VALUE)> _data;
         RETURN_VALUE* _value;
         std::coroutine_handle<> _continuation;
-
-        int id = counter++;
 
         TASK get_return_object()
         {
@@ -75,7 +71,6 @@ namespace hedge::async
         using handle_t = std::coroutine_handle<task_promise<TASK, void>>;
 
         std::coroutine_handle<> _continuation;
-        int id = counter++;
 
         TASK get_return_object()
         {

@@ -1,4 +1,5 @@
 #include <functional>
+#include <pthread.h>
 
 #include "worker.h"
 
@@ -17,6 +18,8 @@ namespace hedge::async
     {
         this->_worker = std::thread([this]()
                                     { this->_run(); });
+
+        pthread_setname_np(this->_worker.native_handle(), "db-worker");
     }
 
     worker::~worker()
@@ -86,4 +89,4 @@ namespace hedge::async
         }
     }
 
-} // namespace hedge::db
+} // namespace hedge::async
