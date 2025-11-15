@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <future>
@@ -10,6 +11,7 @@
 
 #include <error.hpp>
 #include <logger.h>
+#include <shared_mutex>
 #include <sys/types.h> // POSIX types, consider if needed or include specific headers like <fcntl.h> if used
 
 #include "async/io_executor.h"
@@ -80,12 +82,12 @@ namespace hedge::db
         // - across different partitions, the key ranges are disjoint
         using sorted_indices_map_t = std::map<uint16_t, std::vector<sorted_index_ptr_t>>;
 
-        std::atomic_size_t _flush_iteration{0};   ///< Counter for naming flushed index files uniquely within partitions.
-        std::recursive_mutex _sorted_index_mutex; ///< Protects access to the `_sorted_indices` map.
-        sorted_indices_map_t _sorted_indices;     ///< In-memory map representing the LSM tree levels/files.
+        std::atomic_size_t _flush_iteration{0}; ///< Counter for naming flushed index files uniquely within partitions.
+        std::shared_mutex _sorted_index_mutex;  ///< Protects access to the `_sorted_indices` map.
+        sorted_indices_map_t _sorted_indices;   ///< In-memory map representing the LSM tree levels/files.
 
-        std::atomic_size_t _last_table_id{0};     ///< Atomic ID counter for the next value_table file to be created.
-        std::recursive_mutex _value_tables_mutex; ///< Protects access to the `_value_tables` map.
+        std::atomic_size_t _last_table_id{0};  ///< Atomic ID counter for the next value_table file to be created.
+        std::shared_mutex _value_tables_mutex; ///< Protects access to the `_value_tables` map.
 
         /// Map storing shared pointers to older, non-current value_table files, keyed by their ID.
         std::unordered_map<uint32_t, std::shared_ptr<value_table>> _value_tables;
@@ -95,13 +97,12 @@ namespace hedge::db
         std::atomic<std::shared_ptr<value_table>> _current_value_table;
 
         /// Mutex protecting access to the mem_index (memtable).
-        std::recursive_mutex _mem_index_mutex;
-        /// The active in-memory index (memtable) for recent writes.
+        std::shared_mutex _mem_index_mutex;
         mem_index _mem_index;
 
         // --- Background Workers ---
         /// Worker thread dedicated to handling index compaction jobs.
-        async::worker compaction_worker;
+        async::worker _compaction_worker;
 
         // --- Utilities ---
         logger _logger{"database"}; ///< Logger instance for database-related messages.
@@ -239,7 +240,7 @@ namespace hedge::db
          * Clears the `_mem_index` afterwards. Manages partitioning and file naming.
          * @return Status indicating success or failure.
          */
-        hedge::status _flush_mem_index();
+        hedge::status _flush_mem_index(mem_index&& memtable_to_flush);
         /**
          * @brief The core logic for performing index compaction, run by the `compaction_worker`.
          * Updates the main `_sorted_indices` map upon completion.

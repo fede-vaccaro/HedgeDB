@@ -22,7 +22,7 @@ endif()
 
 if (CMAKE_BUILD_TYPE MATCHES "Debug")
     message (STATUS "Building in Debug mode")
-    set(CMAKE_CXX_FLAGS "-g -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Werror")
+    set(CMAKE_CXX_FLAGS "-O1 -g -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Werror")
 elseif (CMAKE_BUILD_TYPE MATCHES "Release")
     message (STATUS "Building in Release mode")
     set(CMAKE_CXX_FLAGS "-O3")
@@ -65,7 +65,7 @@ set(IO_EXECUTOR_SRCS
 
 # executor_read_test.cc
 add_executable(executor_read_test ${IO_EXECUTOR_SRCS} src/executor_read_test.cc)
-target_link_libraries(executor_read_test uring)
+target_link_libraries(executor_read_test uring tcmalloc)
 
 # executor tests
 add_executable(executor_test ${IO_EXECUTOR_SRCS} test/io_executor.spec.cc)
@@ -94,7 +94,7 @@ target_link_libraries(worker_test uring gtest gtest_main)
 
 # database tests
 add_executable(database_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/database.spec.cc)
-target_link_libraries(database_test uring gtest gtest_main)
+target_link_libraries(database_test uring gtest gtest_main tcmalloc)
 
 # # library
 # add_library(hedgedb STATIC ${IO_EXECUTOR_SRCS} ${DB_SOURCES} src/api/api.cc)

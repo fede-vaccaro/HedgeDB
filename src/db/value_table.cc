@@ -1,8 +1,11 @@
 #include <atomic>
+#include <bits/types/struct_iovec.h>
 #include <cstdint>
 #include <cstring>
 #include <error.hpp>
+#include <fcntl.h>
 #include <filesystem>
+#include <sys/mman.h>
 
 #include "async/io_executor.h"
 #include "async/mailbox_impl.h"
@@ -55,7 +58,7 @@ namespace hedge::db
                 offset_page = 0
                 padding = 0
 
-                if(1 - 0 >= 1) 
+                if(1 - 0 >= 1)
                 {
                     padding = 4096 - (3600) = 496
                     next_offset = 4800 + 496 = 5296
@@ -86,49 +89,77 @@ namespace hedge::db
         return value_table::write_reservation{offset + padding};
     }
 
+    hedge::expected<std::shared_ptr<value_table>> value_table::reload(value_table&& other, fs::file::open_mode open_mode, bool use_direct)
+    {
+        //     fsync(other.fd());
+
+        auto new_file = fs::file::from_path(
+            other.path(),
+            open_mode,
+            use_direct);
+
+        if(!new_file)
+            return hedge::error("Failed to reopen file descriptor: " + new_file.error().to_string());
+
+        return std::shared_ptr<value_table>(new value_table{
+            other._unique_id,
+            other._current_offset.load(std::memory_order::relaxed),
+            std::move(new_file.value()),
+        });
+    }
+
     async::task<expected<hedge::value_ptr_t>> value_table::write_async(key_t key, const std::vector<uint8_t>& value, const value_table::write_reservation& reservation, const std::shared_ptr<async::executor_context>& executor)
     {
         auto header = file_header{
             .separator = FILE_SEPARATOR,
             .key = key,
-            .file_size = value.size(),
+            .file_size = static_cast<uint32_t>(value.size()),
             .deleted_flag = false};
 
         // TODO: Optimize by writing header and value in separate io_uring requests if beneficial,
         // or ensure the current single write is efficient enough.
+        // TODO: test with mmapped buffers.
 
-        std::vector<uint8_t> value_with_header;
-        value_with_header.reserve(value.size() + sizeof(file_header));
+        if(this->_mmap.has_value())
+        {
+            auto* ptr = reinterpret_cast<uint8_t*>(this->_mmap->get_ptr());
+            std::memcpy(ptr + reservation.offset, &header, sizeof(file_header));
+            std::memcpy(ptr + reservation.offset + sizeof(file_header), value.data(), value.size());
 
-        value_with_header.insert(value_with_header.end(), reinterpret_cast<uint8_t*>(&header), reinterpret_cast<uint8_t*>(&header) + sizeof(file_header));
-        value_with_header.insert(value_with_header.end(), value.begin(), value.end());
+            msync(ptr + reservation.offset, value.size() + sizeof(file_header), MS_ASYNC);
+
+            co_return hedge::value_ptr_t(
+                reservation.offset,
+                static_cast<uint32_t>(value.size() + sizeof(file_header)),
+                this->_unique_id);
+        }
+
         // value_with_header.insert(value_with_header.end(), EOF_MARKER.begin(), EOF_MARKER.end());
 
-        auto write_value_response = co_await executor->submit_request(async::write_request{
+        std::array<iovec, 2> iovecs = {
+            iovec{
+                .iov_base = reinterpret_cast<void*>(&header),
+                .iov_len = sizeof(file_header)},
+            iovec{
+                .iov_base = const_cast<uint8_t*>(value.data()),
+                .iov_len = value.size()}};
+
+        auto write_value_response = co_await executor->submit_request(async::writev_request{
             .fd = this->fd(),
-            .data = const_cast<uint8_t*>(value_with_header.data()),
-            .size = value_with_header.size(),
+            .iovecs = iovecs.data(),
+            .iovecs_count = iovecs.size(),
             .offset = reservation.offset,
         });
 
         if(write_value_response.error_code != 0)
             co_return hedge::error(std::format("Failed to write value to value table (path: {}): {}", this->path().string(), strerror(-write_value_response.error_code)));
 
-        if(write_value_response.bytes_written != value_with_header.size())
-            co_return hedge::error(std::format("Failed to write value to value table (path: {}): expected {}, got {}", this->path().string(), value_with_header.size(), write_value_response.bytes_written));
+        if(write_value_response.bytes_written != sizeof(file_header) + value.size())
+            co_return hedge::error(std::format("Failed to write value to value table (path: {}): expected {}, got {}", this->path().string(), sizeof(file_header) + value.size(), write_value_response.bytes_written));
 
-        // Update the table's persistent metadata (item count, occupied space).
-        {
-            std::lock_guard lk(this->_info_mutex);
-            auto& info = this->_info();
-            info.items_count++;
-            info.occupied_space += value.size() + sizeof(file_header);
-        }
-
-        // this value_ptr will flow first to the mem_index and then - on flush - to the sorted_index.
         co_return hedge::value_ptr_t(
             reservation.offset,
-            static_cast<uint32_t>(value.size() + sizeof(file_header)),
+            static_cast<uint32_t>(sizeof(file_header) + value.size()),
             this->_unique_id);
     }
 
@@ -142,29 +173,81 @@ namespace hedge::db
                                                this->_current_offset.load(std::memory_order_relaxed)));
         }
 
-        auto read_response = co_await executor->submit_request(async::unaligned_read_request{
-            .fd = this->fd(),
-            .offset = file_offset,
-            .size = file_size,
-        });
-
-        if(read_response.error_code != 0)
-        {
-            co_return hedge::error(std::format("Failed to read file from value table (path: {}): {}",
-                                               this->path().string(),
-                                               strerror(-read_response.error_code)));
-        }
-
-        if(read_response.bytes_read != file_size)
-        {
-            co_return hedge::error(std::format("Failed to read file from value table (path: {}): expected {}, got {}",
-                                               this->path().string(),
-                                               file_size,
-                                               read_response.bytes_read));
-        }
-
+        std::vector<uint8_t> value_data;
         file_header header;
-        std::copy(read_response.data.data(), read_response.data.data() + sizeof(file_header), reinterpret_cast<uint8_t*>(&header));
+
+        if(this->has_direct_access())
+        {
+            // normalize offset and size to read full pages
+
+            size_t page_aligned_offset = file_offset;
+            size_t remainder = file_offset % 4096;
+
+            if(remainder != 0)
+                page_aligned_offset = file_offset - remainder;
+
+            size_t page_aligned_file_size = file_size + remainder;
+            size_t page_aligned_size = hedge::ceil(page_aligned_file_size, PAGE_SIZE_IN_BYTES) * PAGE_SIZE_IN_BYTES;
+
+            auto read_response = co_await executor->submit_request(async::read_request{
+                .fd = this->fd(),
+                .offset = page_aligned_offset,
+                .size = page_aligned_size,
+            });
+
+            if(read_response.error_code != 0)
+            {
+                co_return hedge::error(std::format("Failed to read file from value table (path: {}): {}",
+                                                   this->path().string(),
+                                                   strerror(-read_response.error_code)));
+            }
+
+            if(read_response.bytes_read != page_aligned_size)
+            {
+                co_return hedge::error(std::format("Failed to read file from value table (path: {}): expected {}, got {}",
+                                                   this->path().string(),
+                                                   file_size,
+                                                   read_response.bytes_read));
+            }
+
+            std::copy(read_response.data.get() + remainder, read_response.data.get() + remainder + sizeof(file_header), reinterpret_cast<uint8_t*>(&header));
+            value_data.assign(read_response.data.get() + remainder + sizeof(file_header), read_response.data.get() + page_aligned_file_size);
+        }
+        else
+        {
+            size_t actual_file_size = file_size - sizeof(file_header);
+            value_data = std::vector<uint8_t>(actual_file_size);
+
+            std::array<iovec, 2> iovecs = {
+                iovec{
+                    .iov_base = reinterpret_cast<uint8_t*>(&header),
+                    .iov_len = sizeof(file_header)},
+                iovec{
+                    .iov_base = value_data.data(),
+                    .iov_len = actual_file_size}};
+
+            auto read_response = co_await executor->submit_request(async::unaligned_readv_request{
+                .fd = this->fd(),
+                .iovecs = iovecs.data(),
+                .iovecs_count = iovecs.size(),
+                .offset = file_offset,
+            });
+
+            if(read_response.error_code != 0)
+            {
+                co_return hedge::error(std::format("Failed to read file from value table (path: {}): {}",
+                                                   this->path().string(),
+                                                   strerror(-read_response.error_code)));
+            }
+
+            if(read_response.bytes_read != file_size)
+            {
+                co_return hedge::error(std::format("Failed to read file from value table (path: {}): expected {}, got {}",
+                                                   this->path().string(),
+                                                   file_size,
+                                                   read_response.bytes_read));
+            }
+        }
 
         if(!skip_delete_check && header.deleted_flag)
         {
@@ -191,11 +274,10 @@ namespace hedge::db
         }
 
         // Remove the header bytes from the data vector
-        read_response.data.erase(read_response.data.begin(), read_response.data.begin() + sizeof(file_header));
 
         co_return output_file{
             .header = header,
-            .binaries = std::move(read_response.data),
+            .binaries = std::move(value_data),
         };
     }
 
@@ -215,24 +297,20 @@ namespace hedge::db
         if(!file_desc)
             return hedge::error("Failed to create file descriptor: " + file_desc.error().to_string());
 
-        auto tmp_mmap = fs::mmap_view::from_file(
-            file_desc.value(),
-            value_table::_page_align_for_mmap()); // Map only the region needed for info.
+        posix_fadvise(file_desc.value().fd(), 0, 0, POSIX_FADV_RANDOM);
 
-        if(!tmp_mmap)
-            return hedge::error("Failed to create temporary mmap: " + tmp_mmap.error().to_string());
-
-        // Initialize the info struct in the mapped memory to zeros.
-        // This ensures clean initial state, especially if not preallocating (where OS might not zero).
-        value_table_info initial_info = {};
-        // memcpy is safer than direct assignment via reference for potentially uninitialized memory.
-        std::memcpy(&value_table::_get_info_from_mmap(tmp_mmap.value()), &initial_info, sizeof(value_table_info));
-
-        return std::shared_ptr<value_table>(new value_table{
+        auto vt = std::shared_ptr<value_table>(new value_table{
             id,
             0,
-            std::move(file_desc.value()),
-            std::move(tmp_mmap.value())});
+            std::move(file_desc.value())});
+
+        auto maybe_mmap_view = fs::mmap_view::from_file(*vt);
+        // if(!maybe_mmap_view)
+        // return hedge::error("Failed to mmap value table file: " + maybe_mmap_view.error().to_string());
+
+        // vt->_mmap = std::move(maybe_mmap_view.value());
+
+        return vt;
     }
 
     hedge::expected<std::shared_ptr<value_table>> value_table::load(const std::filesystem::path& path, fs::file::open_mode open_mode)
@@ -247,23 +325,10 @@ namespace hedge::db
 
         auto table_id = std::stoul(path.stem().string());
 
-        auto non_owning_mmap = fs::mmap_view::from_file(
-            file_descriptor.value(),
-            value_table::_page_align_for_mmap());
-
-        if(!non_owning_mmap)
-            return hedge::error("Failed to create mmap for loading info: " + non_owning_mmap.error().to_string());
-
-        // Read the current state (offset, counts, etc.) from the info struct via the mmap.
-        // Make a copy to avoid potential issues if the mmap becomes invalid later,
-        // although the non_owning_mmap should live as long as the value_table.
-        value_table_info info = value_table::_get_info_from_mmap(non_owning_mmap.value());
-
         return std::shared_ptr<value_table>(new value_table{
             static_cast<uint32_t>(table_id),
-            info.current_offset,
-            std::move(file_descriptor.value()),
-            std::move(non_owning_mmap.value())});
+            0,
+            std::move(file_descriptor.value())});
     }
 
     async::task<status> value_table::delete_async(key_t key, size_t offset, const std::shared_ptr<async::executor_context>& executor)
@@ -359,42 +424,8 @@ namespace hedge::db
                                                write_response.bytes_written));
         }
 
-        // Update the table's persistent metadata (delete count, freed space).
-        std::lock_guard lk(this->_info_mutex);
-        auto& info = this->_info();
-        info.deleted_count++;
-        info.freed_space += sizeof(file_header) + header.file_size;
-        // Note: The modification to `info` directly changes the mapped memory.
-        // Fsync might be needed later if immediate persistence of metadata is required.
-
         // Deletion successful.
         co_return hedge::ok();
-    }
-
-    value_table_info& value_table::_info()
-    {
-        return value_table::_get_info_from_mmap(this->_mmap);
-    }
-
-    value_table_info value_table::info() const
-    {
-        // Note: This reads directly from the mmap, which might not be instantly updated
-        // if writes are buffered by the OS. Fsync might be needed for strong consistency guarantees,
-        // but for typical stats reading, this is usually acceptable.
-        // Returns a copy, ensuring the caller doesn't accidentally modify the mapped memory.
-        return value_table::_get_info_from_mmap(this->_mmap);
-    }
-
-    // Static helper to get a reference to the info struct within a given mmap region.
-    value_table_info& value_table::_get_info_from_mmap(const fs::mmap_view& mmap)
-    {
-        // Calculate the starting address of the info struct within the mapped region.
-        // It's located at the very end of the mapped range.
-        auto* ptr_start = static_cast<uint8_t*>(mmap.get_ptr());
-        auto* ptr_end = ptr_start + mmap.size();
-        // The info struct is positioned just before the end pointer.
-        auto* info_ptr = reinterpret_cast<value_table_info*>(ptr_end - sizeof(value_table_info));
-        return *info_ptr;
     }
 
 } // namespace hedge::db

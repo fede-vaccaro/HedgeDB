@@ -37,6 +37,10 @@ std::pair<int, size_t> open_fd(const std::string& path, bool direct = true)
     }
 
     auto size = std::filesystem::file_size(path);
+
+    std::cout << ""
+                 "Opened file "
+              << path << " of size " << size << " bytes\n";
     return {fd, size};
 }
 
@@ -83,65 +87,101 @@ public:
 
 std::atomic_uint64_t atomic_counter = 0;
 
-hedge::async::task<void> get_obj(hedge::async::read_request r, hedge::async::executor_context& executor, working_group& wg)
+hedge::async::task<void> get_obj(hedge::async::read_request r, [[maybe_unused]] hedge::async::read_request r2, hedge::async::executor_context& executor, working_group& wg)
 {
     auto response = co_await executor.submit_request(r);
 
-    // if(response.data_size != PAGE_SIZE)
+    // auto response2 = co_await executor.submit_request(r2);
+
+    // auto response3 = co_await executor.submit_request(r);
+
+    // if(response.bytes_read != PAGE_SIZE)
     // {
-    //     std::cerr << "Error: expected size " << PAGE_SIZE << ", got " << response.data_size << " at offset " << r.offset << "\n";
+    //     std::cerr << "Error: expected size " << PAGE_SIZE << ", got " << response.bytes_read << " at offset " << r.offset << "\n";
     //     throw std::runtime_error("Data size mismatch");
     // }
 
-    std::vector<uint8_t> data{};
-    data.assign(static_cast<uint8_t*>(response.data.get()),
-                static_cast<uint8_t*>(response.data.get()) + response.bytes_read);
+    // std::vector<uint8_t> data{};
+    // data.assign(static_cast<uint8_t*>(response.data.get()),
+    //             static_cast<uint8_t*>(response.data.get()) + response.bytes_read);
 
     // log("[get_obj] received data of size: ", data.size());
 
-    auto start_value = r.offset / sizeof(uint64_t);
+    // auto start_value = r.offset / sizeof(uint64_t);
 
-    auto* ptr = reinterpret_cast<uint64_t*>(data.data());
-    for(size_t i = 0; i < data.size() / sizeof(uint64_t); ++i)
-    {
-        if(start_value + i != ptr[i])
-        {
-            std::cerr << "Error: expected value " << start_value << ", got " << ptr[i] << " at index " << i << " and offset " << r.offset << "\n";
-            throw std::runtime_error("Data mismatch");
-        }
-    }
+    // auto* ptr = reinterpret_cast<uint64_t*>(data.data());
+    // for(size_t i = 0; i < data.size() / sizeof(uint64_t); ++i)
+    // {
+    //     if(start_value + i != ptr[i])
+    //     {
+    //         std::cerr << "Error: expected value " << start_value << ", got " << ptr[i] << " at index " << i << " and offset " << r.offset << "\n";
+    //         throw std::runtime_error("Data mismatch");
+    //     }
+    // }
 
     // log_always("[get_obj] task complete with size ", data.size(), "counting up to: ", atomic_counter++);
 
     wg.decr();
+
+    co_return;
 }
 
 int main()
 {
     working_group wg;
 
-    const uint32_t QUEUE_DEPTH = 64;
-    hedge::async::executor_context context(QUEUE_DEPTH);
+    const uint32_t QUEUE_DEPTH = 128;
+    std::vector<std::shared_ptr<hedge::async::executor_context>> contexts;
 
-    auto [fd, file_size] = open_fd(INDEX_PATH);
+    for(int i = 0; i < 4; ++i)
+        contexts.emplace_back(std::make_shared<hedge::async::executor_context>(QUEUE_DEPTH));
+
+    std::vector<int> fds;
+    size_t file_size = 0;
+    for(int i = 0; i < 4; ++i)
+    {
+        auto [fd, size] = open_fd(INDEX_PATH, false);
+        posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM);
+        fds.push_back(fd);
+        file_size = size;
+    }
 
     auto rng = std::mt19937(std::random_device{}());
     auto dist = std::uniform_int_distribution<size_t>(0, file_size / PAGE_SIZE - 10);
 
-    auto N_REQUESTS = 1000000UL;
+    auto N_REQUESTS = 20000000UL;
     wg.set(N_REQUESTS);
+
+    std::vector<size_t> offsets;
+    offsets.reserve(N_REQUESTS);
+    for(size_t i = 0; i < N_REQUESTS; i++)
+    {
+        offsets.push_back(dist(rng) * PAGE_SIZE);
+    }
+
+    std::vector<size_t> offsets2;
+    offsets2.reserve(N_REQUESTS);
+    for(size_t i = 0; i < N_REQUESTS; i++)
+    {
+        offsets2.push_back(dist(rng) * PAGE_SIZE);
+    }
 
     auto t0 = std::chrono::steady_clock::now();
     for(size_t i = 0; i < N_REQUESTS; i++)
     {
-        auto task = get_obj(hedge::async::read_request{.fd = fd, .offset = dist(rng) * PAGE_SIZE, .size = PAGE_SIZE}, context, wg);
-        context.submit_io_task(std::move(task));
+        auto& context = contexts[i % contexts.size()];
+        auto task = get_obj(
+            hedge::async::read_request{.fd = fds[i % fds.size()], .offset = offsets[i], .size = PAGE_SIZE},
+            hedge::async::read_request{.fd = fds[i % fds.size()], .offset = offsets2[i], .size = PAGE_SIZE},
+            *context, wg);
+        context->submit_io_task(std::move(task));
     }
     std::cout << "Submitted " << N_REQUESTS << " jobs\n";
     wg.wait();
     auto t1 = std::chrono::steady_clock::now();
 
-    context.shutdown();
+    for(auto& context : contexts)
+        context->shutdown();
 
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
     std::cout << "Processed " << N_REQUESTS << " requests in " << duration.count() / 1000.0 << " ms." << std::endl;

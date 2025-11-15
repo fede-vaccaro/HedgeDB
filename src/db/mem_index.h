@@ -20,6 +20,7 @@ namespace hedge::db
          * `std::unordered_map` provides fast average-case lookups and insertions.
          */
         using index_t = std::unordered_map<key_t, value_ptr_t>;
+        using index_buffer_t = std::vector<index_entry_t>;
 
         /**
          * @brief Grants `index_ops` access to the private `_index` member.
@@ -29,7 +30,8 @@ namespace hedge::db
          */
         friend struct index_ops;
 
-        index_t _index; ///< The hash map storing the key -> value_ptr_t mappings.
+        index_t _index;         ///< The hash map storing the key -> value_ptr_t mappings.
+        index_buffer_t _buffer; ///< Key values are buffered here before flush to avoid iterating over the map
 
     public:
         /**
@@ -53,12 +55,25 @@ namespace hedge::db
         mem_index(const mem_index&) = delete;
         mem_index& operator=(const mem_index&) = delete;
 
+        [[nodiscard]] index_t index() &&
+        {
+            return this->_index;
+        }
+
+        static mem_index from_index(index_t&& index)
+        {
+            mem_index mem_idx{};
+            mem_idx._index = std::move(index);
+            return mem_idx;
+        }
+
         /**
          * @brief Removes all entries from the mem_index.
          */
         void clear()
         {
             this->_index.clear();
+            this->_buffer.clear();
         }
 
         /**
@@ -70,7 +85,11 @@ namespace hedge::db
          */
         void reserve(size_t size)
         {
-            this->_index.reserve(size);
+            constexpr auto SLACK = 0.05;
+
+            const auto size_w_slack = static_cast<size_t>(size * (1.0 + SLACK));
+            this->_index.reserve(size_w_slack);
+            this->_buffer.reserve(size_w_slack);
         }
 
         /**
@@ -86,6 +105,7 @@ namespace hedge::db
         bool put(const key_t& key, const value_ptr_t& value)
         {
             auto [it, inserted] = this->_index.emplace(key, value);
+            this->_buffer.emplace_back(key, value);
 
             if(!inserted)
                 it->second = value;

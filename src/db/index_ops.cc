@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -95,61 +96,6 @@ namespace hedge::db
         return complement;
     }
 
-    /** @brief A static zero-filled buffer used for writing alignment padding efficiently. */
-    static std::vector<uint8_t> PADDING_BUFFER(PAGE_SIZE_IN_BYTES, 0);
-
-    /**
-     * @brief Writes a single data object to an output stream, optionally adding alignment padding.
-     * @tparam T Type of the data object.
-     * @param ofs Output file stream.
-     * @param data The data object to write.
-     * @param align If true, adds padding bytes after the object to reach the next page boundary.
-     * @return Pair: {offset after data, offset after padding (if any)}.
-     */
-    template <typename T>
-    std::pair<size_t, size_t> write_to(std::ofstream& ofs, const T& data, bool align)
-    {
-        ofs.write(reinterpret_cast<const char*>(&data), sizeof(T));
-        size_t end_data_pos = ofs.tellp();
-
-        if(align)
-        {
-            size_t padding_size = compute_alignment_padding<T>(1);
-            if(padding_size > 0)
-                ofs.write(reinterpret_cast<const char*>(PADDING_BUFFER.data()), padding_size);
-        }
-        return {end_data_pos, ofs.tellp()};
-    }
-
-    /**
-     * @brief Writes a vector of data objects to an output stream, optionally adding alignment padding.
-     * @tparam T Type of the data elements in the vector.
-     * @param ofs Output file stream.
-     * @param data The vector of data objects to write.
-     * @param align If true, adds padding bytes after the vector data to reach the next page boundary.
-     * @return Pair: {offset after data, offset after padding (if any)}.
-     */
-    template <typename T>
-    std::pair<size_t, size_t> write_to(std::ofstream& ofs, const std::vector<T>& data, bool align)
-    {
-        if(data.empty())
-        { // Handle empty vector case explicitly
-            size_t current_pos = ofs.tellp();
-            return {current_pos, current_pos};
-        }
-        ofs.write(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(T));
-        size_t end_data_pos = ofs.tellp();
-
-        if(align)
-        {
-            size_t padding_size = compute_alignment_padding<T>(data.size());
-            if(padding_size > 0)
-                ofs.write(reinterpret_cast<const char*>(PADDING_BUFFER.data()), padding_size);
-        }
-
-        return {end_data_pos, ofs.tellp()};
-    }
-
     /**
      * @brief Reads a single data object from an input stream.
      * @tparam T Type of the data object.
@@ -205,23 +151,26 @@ namespace hedge::db
 
     std::vector<index_entry_t> index_ops::merge_memtables_in_mem(std::vector<mem_index>&& indices)
     {
-        auto total_size = std::accumulate(indices.begin(), indices.end(), 0, [](size_t acc, const mem_index& idx)
-                                          { return acc + idx._index.size(); });
+        // TODO: Update the interface to accept only one index
+        // Or implement some multi-vector iterator
+        auto buffer = std::move(indices[0]._buffer);
 
-        std::vector<index_entry_t> index_sorted;
-        index_sorted.reserve(total_size);
+        std::sort(buffer.begin(), buffer.end(),
+                  [](const index_entry_t& lhs, const index_entry_t& rhs)
+                  {
+                      if(lhs.key < rhs.key)
+                          return true;
 
-        for(auto& idx : indices)
-        {
-            for(const auto& [key, value] : idx._index)
-                index_sorted.push_back({key, value});
+                      if(rhs.key < lhs.key)
+                          return false;
 
-            idx._index = mem_index::index_t{};
-        }
+                      return lhs.value_ptr < rhs.value_ptr;
+                  });
 
-        std::sort(index_sorted.begin(), index_sorted.end());
+        auto it = std::unique(buffer.begin(), buffer.end());
+        buffer.erase(it, buffer.end());
 
-        return index_sorted;
+        return buffer;
     }
 
     hedge::expected<std::vector<sorted_index>> index_ops::flush_mem_index(const std::filesystem::path& base_path,
@@ -290,41 +239,88 @@ namespace hedge::db
         return resulting_indices;
     }
 
-    hedge::expected<sorted_index> index_ops::save_as_sorted_index(const std::filesystem::path& path, std::vector<index_entry_t>&& sorted_keys, size_t upper_bound, bool use_odirect)
+    constexpr std::array<uint8_t, PAGE_SIZE_IN_BYTES> PADDING_PAGE = []()
+    {
+        std::array<uint8_t, PAGE_SIZE_IN_BYTES> arr{};
+        arr.fill(0);
+        return arr;
+    }();
+
+    hedge::expected<sorted_index>
+    index_ops::save_as_sorted_index(const std::filesystem::path& path, std::vector<index_entry_t>&& sorted_keys, size_t upper_bound, bool use_odirect)
     {
         // Step 1: Generate the meta-index from the sorted keys.
         auto meta_index = create_meta_index(sorted_keys);
 
         footer_builder builder;
+
         {
             // Step 2: Write data sections [index, meta-index, footer] sequentially.
-            std::ofstream ofs_sorted_index(path, std::ios::binary);
-            if(!ofs_sorted_index.good())
-                return hedge::error("Failed to open sorted index file for writing: " + path.string());
+            size_t index_size_bytes = sizeof(index_entry_t) * sorted_keys.size();
+            size_t index_padding_bytes = compute_alignment_padding<index_entry_t>(sorted_keys.size());
+            size_t meta_index_size_bytes = sizeof(meta_index_entry) * sorted_keys.size();
+            size_t meta_index_padding_bytes = compute_alignment_padding<meta_index_entry>(meta_index.size());
 
-            builder.index_start_offset = 0; // Index always starts at the beginning.
-            auto [end_of_index, end_of_index_padding] = write_to(ofs_sorted_index, sorted_keys, true);
-            builder.index_end_offset = end_of_index;
-
-            builder.meta_index_start_offset = end_of_index_padding;
-            auto [end_of_meta_index, end_of_meta_index_padding] = write_to(ofs_sorted_index, meta_index, true);
-            builder.meta_index_end_offset = end_of_meta_index;
-
-            builder.footer_start_offset = end_of_meta_index_padding;
             builder.upper_bound = upper_bound;
             builder.indexed_keys = sorted_keys.size();
             builder.meta_index_entries = meta_index.size();
+            builder.index_start_offset = 0;
+            builder.index_end_offset = index_size_bytes;
+            builder.meta_index_start_offset = index_size_bytes + index_padding_bytes;
+            builder.meta_index_end_offset = index_size_bytes + index_padding_bytes + meta_index_size_bytes;
+            builder.footer_start_offset = index_size_bytes + index_padding_bytes + meta_index_size_bytes + meta_index_padding_bytes;
+
             OUTCOME_TRY(auto footer, builder.build());
 
-            // Write the footer at the end.
-            write_to(ofs_sorted_index, footer, false); // No padding after footer.
-            if(!ofs_sorted_index.good())
-                return hedge::error("Failed to write sorted index file: " + path.string());
+            size_t estimated_size =
+                index_size_bytes +
+                index_padding_bytes +
+                meta_index_size_bytes +
+                meta_index_padding_bytes +
+                sizeof(sorted_index_footer);
+
+            auto maybe_ofs_sorted_index = fs::file::from_path(path, fs::file::open_mode::write_new, false, estimated_size);
+            if(!maybe_ofs_sorted_index)
+                return hedge::error("Failed to create sorted index file: " + maybe_ofs_sorted_index.error().to_string());
+
+            auto fd = maybe_ofs_sorted_index.value().fd();
+
+            std::array<iovec, 3> iovecs{
+                iovec{
+                    .iov_base = reinterpret_cast<uint8_t*>(sorted_keys.data()),
+                    .iov_len = index_size_bytes},
+                iovec{
+                    .iov_base = reinterpret_cast<uint8_t*>(meta_index.data()),
+                    .iov_len = meta_index_size_bytes},
+                iovec{
+                    .iov_base = reinterpret_cast<uint8_t*>(&footer),
+                    .iov_len = sizeof(sorted_index_footer)}};
+
+            size_t res = pwritev(fd, iovecs.data(), iovecs.size(), 0);
+
+            if(res < 0)
+                return hedge::error("Failed to write sorted index file: " + path.string() +
+                                    " : " + std::string(strerror(errno)));
+
+            size_t estimated_bytes_written =
+                index_size_bytes +
+                meta_index_size_bytes +
+                sizeof(sorted_index_footer);
+            if(res != estimated_bytes_written)
+                return hedge::error("Failed to write sorted index file: " + path.string() +
+                                    " : expected " + std::to_string(estimated_bytes_written) +
+                                    ", got " + std::to_string(res) +
+                                    "strerror: " + std::string(strerror(errno)));
+
+            // Sync to disk
+            if(use_odirect)
+                fsync(fd);
         }
 
         // Step 3: Create the sorted_index object to represent the file.
         OUTCOME_TRY(auto fd, fs::file::from_path(path, fs::file::open_mode::read_only, use_odirect));
         OUTCOME_TRY(auto footer, builder.build());
+        posix_fadvise(fd.fd(), 0, 0, POSIX_FADV_RANDOM);
 
         // Create the final object, moving the key and meta-index data into it.
         auto ss = sorted_index(std::move(fd), std::move(sorted_keys), std::move(meta_index), footer);
@@ -435,10 +431,25 @@ namespace hedge::db
         auto [dir, file_name] = format_prefix(left.upper_bound());
         auto new_path = config.base_path / dir / with_extension(file_name, std::format(".{}", config.new_index_id));
 
-        auto fd_maybe = co_await fs::file::from_path_async(new_path,
-                                                           fs::file::open_mode::write_new,
-                                                           executor,
-                                                           false);
+        size_t max_new_index_keys = left.size() + right.size();
+        size_t max_new_meta_index_entries = hedge::ceil(max_new_index_keys, INDEX_PAGE_NUM_ENTRIES);
+        size_t estimated_size =
+            (max_new_index_keys * sizeof(index_entry_t)) +
+            compute_alignment_padding<index_entry_t>(max_new_index_keys) +
+            (max_new_meta_index_entries * sizeof(meta_index_entry)) +
+            compute_alignment_padding<meta_index_entry>(max_new_meta_index_entries) +
+            sizeof(sorted_index_footer);
+
+        // auto fd_maybe = co_await fs::file::from_path_async(new_path,
+        //    fs::file::open_mode::write_new,
+        //    executor,
+        //    false,
+        //    estimated_size);
+
+        auto fd_maybe = fs::file::from_path(new_path,
+                                            fs::file::open_mode::write_new,
+                                            false,
+                                            estimated_size);
 
         if(!fd_maybe.has_value())
             co_return hedge::error("Failed to create file descriptor for merged index at " + new_path.string() + ": " + fd_maybe.error().to_string());
@@ -767,6 +778,22 @@ namespace hedge::db
             bytes_written += res.bytes_written;
         }
 
+        // Sync to disk
+        // auto fsync_status = co_await executor->submit_request(async::fsync_request{
+        // .fd = output_fd.fd()});
+
+        // if(fsync_status.error_code != 0)
+        // co_return hedge::error("Failed to fsync merged index file: " + std::string(strerror(-fsync_status.error_code)));
+
+        if(config.create_new_with_odirect)
+        {
+            auto fsync_res = co_await executor->submit_request(async::fsync_request{
+                .fd = output_fd.fd()});
+
+            if(fsync_res.error_code != 0)
+                co_return hedge::error("Failed to fsync merged index file: " + std::string(strerror(-fsync_res.error_code)));
+        }
+
         /*
         -- Step 5: Create sorted_index object for the merged file and return it --
         */
@@ -778,6 +805,8 @@ namespace hedge::db
 
         if(!read_fd.has_value())
             co_return hedge::error("Failed to open merged index file for reading: " + read_fd.error().to_string());
+
+        posix_fadvise(read_fd.value().fd(), 0, 0, POSIX_FADV_RANDOM);
 
         sorted_index result{
             std::move(read_fd.value()),
