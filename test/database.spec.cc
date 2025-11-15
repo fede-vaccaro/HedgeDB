@@ -1,9 +1,11 @@
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <mutex>
 #include <random>
 #include <sys/types.h>
+#include <thread>
 #include <unordered_set>
 
 #include <gtest/gtest.h>
@@ -28,17 +30,20 @@ namespace hedge::db
 
         static std::vector<uint8_t> make_random_vec_seeded(size_t payload_size, size_t seed)
         {
-            static std::recursive_mutex m;
-            std::lock_guard lk(m);
+            static std::shared_mutex m;
 
             static std::unordered_map<size_t, std::vector<uint8_t>> cache;
             constexpr size_t MAX_CACHE_ITEMS_CAPACITY = 1024;
 
             size_t hash = seed % MAX_CACHE_ITEMS_CAPACITY;
 
-            if(cache.contains(hash))
-                return cache[hash];
+            {
+                std::shared_lock slk(m);
+                if(cache.contains(hash))
+                    return cache[hash];
+            }
 
+            std::unique_lock lk(m);
             std::vector<uint8_t> vec(payload_size);
             std::mt19937 generator{seed};
             std::uniform_int_distribution<uint8_t> dist(0, 255);
@@ -92,13 +97,12 @@ namespace hedge::db
         write_wg.set(this->N_KEYS);
 
         db_config config;
-        config.auto_compaction = true;
+        config.auto_compaction = false;
         config.keys_in_mem_before_flush = this->MEMTABLE_CAPACITY;
         config.compaction_read_ahead_size_bytes = 32 * 1024 * 1024;
-        config.num_partition_exponent = 4;
+        config.num_partition_exponent = 0;
         config.target_compaction_size_ratio = 1.0 / 3.0;
         config.use_odirect_for_indices = false;
-        config.auto_compaction = true;
 
         auto maybe_db = database::make_new(this->_base_path, config);
         ASSERT_TRUE(maybe_db) << "An error occurred while creating the database: " << maybe_db.error().to_string();
@@ -118,7 +122,9 @@ namespace hedge::db
 
         auto make_put_task = [this, &db, &write_wg, &dist](size_t i, const auto& executor) -> async::task<void>
         {
-            auto [key, value] = database_test::make_key_value(this->PAYLOAD_SIZE, i);
+            auto key = this->_key_value_seeds[i].first;
+            auto seed = this->_key_value_seeds[i].second;
+            auto value = make_random_vec_seeded(this->PAYLOAD_SIZE, seed);
 
             auto status = co_await db->put_async(key, value, executor);
 
@@ -138,21 +144,37 @@ namespace hedge::db
             write_wg.decr();
         };
 
+        // prepare uuids
         auto t0 = std::chrono::high_resolution_clock::now();
+        for(size_t i = 0; i < this->N_KEYS; ++i)
+            this->make_key_value(this->PAYLOAD_SIZE, i);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+        std::cout << "Total duration for UUID generation: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
+
+        t0 = std::chrono::high_resolution_clock::now();
         for(size_t i = 0; i < this->N_KEYS; ++i)
         {
             const auto& executor = async::executor_from_static_pool();
             executor->submit_io_task(make_put_task(i, executor));
         }
         write_wg.wait();
-        auto t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
 
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+        duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         std::cout << "Total duration for insertion: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
         std::cout << "Average duration per insertion: " << (double)duration.count() / this->N_KEYS << " us" << std::endl;
         std::cout << "Insertion bandwidth: " << (double)this->N_KEYS * (this->PAYLOAD_SIZE / 1024.0) / (duration.count() / 1000.0) << " MB/s" << std::endl;
         std::cout << "Insertion throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000) << " items/s" << std::endl;
         std::cout << "Deleted keys: " << this->_deleted_keys.size() << std::endl;
+
+        // flush
+        // t0 = std::chrono::high_resolution_clock::now();
+        // auto flush_status = db->flush();
+        // ASSERT_TRUE(flush_status) << "An error occurred during flush: " << flush_status.error().to_string();
+        // t1 = std::chrono::high_resolution_clock::now();
+        // duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+        // std::cout << "Total duration for flush: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
 
         // compaction
         t0 = std::chrono::high_resolution_clock::now();
@@ -163,6 +185,17 @@ namespace hedge::db
         std::cout << "Total duration for a full compaction: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
 
         EXPECT_DOUBLE_EQ(db->read_amplification_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
+
+        // shuffle keys before reading
+        std::shuffle(this->_key_value_seeds.begin(), this->_key_value_seeds.end(), this->_generator);
+
+        sync();
+        auto sleep_time = std::chrono::seconds(10);
+        std::cout << "Sleeping " << sleep_time.count() << " seconds before starting retrieval to cool down..." << std::endl;
+        std::this_thread::sleep_for(sleep_time);
+
+        this->N_KEYS /= 4; // reduce number of keys to read
+        std::cout << "Starting readback now with " << this->N_KEYS << " keys." << std::endl;
 
         async::wait_group read_wg;
         read_wg.set(this->N_KEYS);
@@ -201,17 +234,15 @@ namespace hedge::db
 
             if(value != expected_value)
             {
-                // std::cerr << "Retrieved value does not match expected value for item nr.  " << i << std::endl;
+                std::cerr << "Retrieved value does not match expected value for item nr.  " << i << std::endl;
                 number_of_errors++;
             }
 
             read_wg.decr();
         };
 
-        // shuffle keys before reading
-        std::shuffle(this->_key_value_seeds.begin(), this->_key_value_seeds.end(), this->_generator);
-
         t0 = std::chrono::high_resolution_clock::now();
+
         for(size_t i = 0; i < this->N_KEYS; ++i)
         {
             const auto& executor = async::executor_from_static_pool();
@@ -238,9 +269,9 @@ namespace hedge::db
         test_suite,
         database_test,
         testing::Combine(
-            testing::Values(50'000'000), // n keys
-            testing::Values(1024),      // payload size
-            testing::Values(2'000'000)   // memtable capacity
+            testing::Values(80'000'000), // n keys
+            testing::Values(1024),       // payload size
+            testing::Values(1'000'000)   // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)
         {

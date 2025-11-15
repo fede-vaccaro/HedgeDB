@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bits/types/struct_iovec.h>
 #include <cassert>
 #include <coroutine>
 #include <cstddef>
@@ -191,6 +192,48 @@ namespace hedge::async
         }
     };
 
+    struct unaligned_readv_response;
+    struct unaligned_readv_mailbox;
+
+    struct unaligned_readv_request
+    {
+        using response_t = unaligned_readv_response;
+        using mailbox_t = unaligned_readv_mailbox;
+
+        int32_t fd{-1};
+        iovec* iovecs{nullptr};
+        size_t iovecs_count{0};
+        size_t offset{0};
+    };
+
+    struct unaligned_readv_response
+    {
+        size_t bytes_read{0};
+        int32_t error_code{0};
+    };
+
+    struct unaligned_readv_mailbox : mailbox_base<unaligned_readv_mailbox>
+    {
+        unaligned_readv_mailbox(unaligned_readv_request req)
+            : request(req) {}
+
+        unaligned_readv_request request;
+        unaligned_readv_response response;
+
+        void prepare_sqes(std::span<io_uring_sqe*> sqes);
+        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
+
+        uint32_t needed_sqes()
+        {
+            return 1;
+        }
+
+        void* get_response()
+        {
+            return &response;
+        }
+    };
+
     struct write_request;
     struct write_response;
     struct write_mailbox;
@@ -219,6 +262,49 @@ namespace hedge::async
 
         write_request request;
         write_response response;
+
+        void prepare_sqes(std::span<io_uring_sqe*> sqes);
+        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
+
+        uint32_t needed_sqes()
+        {
+            return 1;
+        }
+
+        void* get_response()
+        {
+            return &response;
+        }
+    };
+
+    struct writev_request;
+    struct writev_response;
+    struct writev_mailbox;
+
+    struct writev_request
+    {
+        using response_t = writev_response;
+        using mailbox_t = writev_mailbox;
+
+        int fd;
+        iovec* iovecs;
+        size_t iovecs_count;
+        size_t offset;
+    };
+
+    struct writev_response
+    {
+        size_t bytes_written{0};
+        int32_t error_code{0};
+    };
+
+    struct writev_mailbox : mailbox_base<writev_mailbox>
+    {
+        writev_mailbox(writev_request req)
+            : request(req) {}
+
+        writev_request request;
+        writev_response response;
 
         void prepare_sqes(std::span<io_uring_sqe*> sqes);
         bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
@@ -529,7 +615,9 @@ namespace hedge::async
         std::variant<
             read_mailbox,
             unaligned_read_mailbox,
+            unaligned_readv_mailbox,
             write_mailbox,
+            writev_mailbox,
             multi_read_mailbox,
             open_mailbox,
             fallocate_mailbox,

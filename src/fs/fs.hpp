@@ -76,7 +76,7 @@ namespace hedge::fs
             return this->_mode;
         }
 
-        [[nodiscard]] bool uses_direct_access() const
+        [[nodiscard]] bool has_direct_access() const
         {
             return this->_use_direct;
         }
@@ -396,7 +396,7 @@ namespace hedge::fs
             if(fd_w.file_size() == 0)
                 return hedge::error("Cannot mmap an empty file.");
 
-            void* mapped_ptr = mmap(nullptr, range ? range->size : fd_w.file_size(), PROT_READ | PROT_WRITE, MAP_PRIVATE, fd_w.fd(), range ? range->start : 0);
+            void* mapped_ptr = mmap(nullptr, range ? range->size : fd_w.file_size(), PROT_READ | PROT_WRITE, MAP_SHARED, fd_w.fd(), range ? range->start : 0);
 
             if(mapped_ptr == MAP_FAILED)
             {

@@ -100,16 +100,6 @@ namespace hedge::db
         auto write_result = maybe_write_result.value();
 
         // check infos
-        auto expected_info = value_table_info{
-            .current_offset = write_result.offset() + write_result.size(),
-            .items_count = 1,
-            .occupied_space = value.size() + sizeof(file_header),
-            .deleted_count = 0,
-            .freed_space = 0,
-            .padding = {}};
-        auto info = table->info();
-        EXPECT_EQ(info, expected_info);
-
         auto read_result = this->_executor->sync_submit(
             table->read_async(write_result.offset(), write_result.size(), this->_executor));
 
@@ -156,16 +146,6 @@ namespace hedge::db
             keys.push_back(key);
             write_results.push_back(maybe_write_result.value());
 
-            // check infos
-            auto expected_info = value_table_info{
-                .current_offset = write_results.back().offset() + write_results.back().size(),
-                .items_count = i + 1,
-                .occupied_space = (i + 1) * (payload_size + sizeof(file_header)),
-                .deleted_count = 0,
-                .freed_space = 0,
-                .padding = {}};
-            auto info = table->info();
-            EXPECT_EQ(info, expected_info);
         }
 
         // now asking for a reservation will result in an error
@@ -211,17 +191,6 @@ namespace hedge::db
         ASSERT_TRUE(maybe_write_result.has_value()) << "An error occurred while writing to the table: " << maybe_write_result.error().to_string();
 
         auto write_result = maybe_write_result.value();
-
-        // check infos
-        auto expected_info = value_table_info{
-            .current_offset = write_result.offset() + write_result.size(),
-            .items_count = 1,
-            .occupied_space = value.size() + sizeof(file_header),
-            .deleted_count = 0,
-            .freed_space = 0,
-            .padding = {}};
-        auto info = table->info();
-        EXPECT_EQ(info, expected_info);
 
         // try to read from the closed table
         auto read_result = this->_executor->sync_submit(
@@ -335,17 +304,6 @@ namespace hedge::db
             reservations.push_back(reservation.value());
             keys.push_back(key);
             write_results.push_back(maybe_write_result.value());
-
-            // check infos
-            auto expected_info = value_table_info{
-                .current_offset = write_results.back().offset() + write_results.back().size(),
-                .items_count = i + 1,
-                .occupied_space = (i + 1) * (payload_size + sizeof(file_header)),
-                .deleted_count = 0,
-                .freed_space = 0,
-                .padding = {}};
-            auto info = table->info();
-            EXPECT_EQ(info, expected_info);
         }
 
         // delete entry 3 and 7

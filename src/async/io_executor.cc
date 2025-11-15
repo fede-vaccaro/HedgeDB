@@ -60,6 +60,8 @@ namespace hedge::async
         this->_worker = std::thread([this]()
                                     { this->_event_loop(); });
 
+        this->_in_flight_requests.reserve(this->_queue_depth * 32);
+
         pthread_setname_np(this->_worker.native_handle(), "io-executor");
     }
 
@@ -173,7 +175,10 @@ namespace hedge::async
             auto submit = io_uring_submit(&this->_ring);
 
             if(submit < 0)
+            {
+                std::cout << "io_uring_submit failed with error: " << strerror(-submit) << std::endl;
                 throw std::runtime_error("io_uring_submit: "s + strerror(-submit));
+            }
 
             // if(ready != submit) // todo might remove
             // {
@@ -277,14 +282,13 @@ namespace hedge::async
         in_progress_tasks.reserve(this->_max_buffered_requests);
 
         std::deque<task<void>> new_tasks;
-
         while(true)
         {
-            if(in_progress_tasks.size() < this->_max_buffered_requests)
+            if(in_progress_tasks.size() < this->_queue_depth)
             {
                 std::unique_lock lk(this->_pending_requests_mutex); // should have priority over submit
 
-                while(!this->_pending_requests.empty() && in_progress_tasks.size() < this->_max_buffered_requests)
+                while(!this->_pending_requests.empty() && in_progress_tasks.size() < this->_queue_depth)
                 {
                     auto task = std::move(this->_pending_requests.front());
                     this->_pending_requests.pop_front();
@@ -335,7 +339,7 @@ namespace hedge::async
 
     const std::shared_ptr<executor_context>& executor_from_static_pool()
     {
-        constexpr size_t POOL_SIZE = 4;
+        constexpr size_t POOL_SIZE = 8;
 
         using executor_pool = std::array<std::shared_ptr<executor_context>, POOL_SIZE>;
 

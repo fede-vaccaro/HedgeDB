@@ -67,6 +67,27 @@ namespace hedge::async
         return true;
     }
 
+    void unaligned_readv_mailbox::prepare_sqes(std::span<io_uring_sqe*> sqes)
+    {
+        io_uring_sqe* sqe = sqes.front();
+
+        this->response = {
+            .bytes_read = 0,
+            .error_code = 0};
+
+        io_uring_prep_readv(sqe, this->request.fd, this->request.iovecs, this->request.iovecs_count, this->request.offset);
+    }
+
+    bool unaligned_readv_mailbox::handle_cqe(io_uring_cqe* cqe, uint8_t /* sub_request_idx */)
+    {
+        if(cqe->res < 0)
+            this->response.error_code = cqe->res;
+        else
+            this->response.bytes_read = cqe->res;
+
+        return true;
+    }
+
     void write_mailbox::prepare_sqes(std::span<io_uring_sqe*> sqes)
     {
         io_uring_sqe* sqe = sqes.front();
@@ -77,6 +98,25 @@ namespace hedge::async
     }
 
     bool write_mailbox::handle_cqe(io_uring_cqe* cqe, uint8_t /* sub_request_idx */)
+    {
+        if(cqe->res < 0)
+            response.error_code = cqe->res;
+
+        this->response.bytes_written = cqe->res;
+
+        return true;
+    }
+
+    void writev_mailbox::prepare_sqes(std::span<io_uring_sqe*> sqes)
+    {
+        io_uring_sqe* sqe = sqes.front();
+
+        this->response = {};
+
+        io_uring_prep_writev(sqe, this->request.fd, request.iovecs, this->request.iovecs_count, this->request.offset);
+    }
+
+    bool writev_mailbox::handle_cqe(io_uring_cqe* cqe, uint8_t /* sub_request_idx */)
     {
         if(cqe->res < 0)
             response.error_code = cqe->res;

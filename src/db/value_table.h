@@ -32,7 +32,7 @@ namespace hedge::db
     {
         std::array<uint8_t, 16> separator{FILE_SEPARATOR}; ///< Magic bytes to identify the start of a header.
         key_t key{};                                       ///< The key associated with this value (primarily for recovery/validation).
-        size_t file_size{};                                ///< The size of the actual value data (excluding this header).
+        uint32_t file_size{};                              ///< The size of the actual value data (excluding this header).
         bool deleted_flag{false};                          ///< Flag indicating if this entry is logically deleted (tombstone).
     };
 
@@ -87,15 +87,16 @@ namespace hedge::db
     {
         uint32_t _unique_id;                   ///< Unique identifier for this value table file.
         std::atomic_size_t _current_offset{0}; ///< Current write offset within the file.
-        fs::mmap_view _mmap{};                 ///< Memory map of the last part of the file containing `value_table_info`.
         std::recursive_mutex _delete_mutex{};  ///< Mutex to protect delete operations (potentially during GC).
         std::recursive_mutex _info_mutex{};
+        std::optional<fs::mmap_view> _mmap; // mmap for write only if not direct IO
 
         /** @brief Default constructor (private). Use factory methods. */
         value_table() = default;
         /** @brief Private constructor used by factory methods. */
-        value_table(uint32_t unique_id, size_t current_offset, fs::file file_descriptor, fs::mmap_view mmap)
-            : fs::file(std::move(file_descriptor)), _unique_id(unique_id), _current_offset(current_offset), _mmap(std::move(mmap)) {}
+        value_table(uint32_t unique_id, size_t current_offset, fs::file file_descriptor)
+            : fs::file(std::move(file_descriptor)), _unique_id(unique_id), _current_offset(current_offset) {
+            }
 
     public:
         /** @brief File extension used for value table files. */
@@ -134,12 +135,6 @@ namespace hedge::db
         {
             return value_table::TABLE_MAX_SIZE_BYTES - this->_current_offset;
         }
-
-        /**
-         * @brief Gets a copy of the current metadata info struct from the end of the file.
-         * @return A `value_table_info` struct.
-         */
-        [[nodiscard]] value_table_info info() const;
 
         /**
          * @brief Represents a reserved space for writing a value.
@@ -212,36 +207,8 @@ namespace hedge::db
          */
         static hedge::expected<std::shared_ptr<value_table>> load(const std::filesystem::path& path, fs::file::open_mode open_mode);
 
+        static hedge::expected<std::shared_ptr<value_table>> reload(value_table&& other, fs::file::open_mode open_mode, bool direct);
+
     private:
-        /**
-         * @brief Calculates the range required for mmap to access the `value_table_info` at the end.
-         * @details mmap requires page-aligned offsets. This function computes the appropriate
-         * start offset and size to cover the `value_table_info` struct, ensuring alignment.
-         * Also, it is assumed here that the `value_table_info` is smaller than a full page.
-         * @return `fs::range` specifying the start offset and size for the mmap region.
-         */
-        constexpr static fs::range _page_align_for_mmap()
-        {
-            constexpr size_t last_page_size = TABLE_ACTUAL_MAX_SIZE % PAGE_SIZE_IN_BYTES;
-
-            constexpr size_t mmap_begin_range = TABLE_ACTUAL_MAX_SIZE - last_page_size - PAGE_SIZE_IN_BYTES;
-
-            constexpr size_t mmap_size = last_page_size + PAGE_SIZE_IN_BYTES;
-
-            return fs::range{.start = mmap_begin_range, .size = mmap_size};
-        }
-
-        /**
-         * @brief Gets a reference to the `value_table_info` struct via the memory map.
-         * @param mmap The non-owning memory map covering the end of the file.
-         * @return A mutable reference to the `value_table_info`.
-         */
-        static value_table_info& _get_info_from_mmap(const fs::mmap_view& mmap);
-
-        /**
-         * @brief Gets a mutable reference to the `value_table_info` for this instance.
-         * @return A mutable reference to the `value_table_info`.
-         */
-        [[nodiscard]] value_table_info& _info();
     };
 } // namespace hedge::db

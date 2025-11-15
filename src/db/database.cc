@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 
@@ -13,6 +14,7 @@
 
 #include "async/wait_group.h"
 #include "database.h"
+#include "db/mem_index.h"
 #include "index_ops.h"
 #include "sorted_index.h"
 #include "types.h"
@@ -72,17 +74,33 @@ namespace hedge::db
 
     async::task<hedge::status> database::put_async(key_t key, const byte_buffer_t& value, const std::shared_ptr<async::executor_context>& executor)
     {
-        // Check if the memtable has reached its capacity limit.
         {
-            std::lock_guard lk(this->_mem_index_mutex);
-            if(this->_mem_index.size() >= this->_config.keys_in_mem_before_flush)
+            std::unique_lock lk(this->_mem_index_mutex);
+            if(this->_mem_index.size() >= this->_config.keys_in_mem_before_flush) // Check if the memtable needs flushing
             {
-                if(auto status = this->_flush_mem_index(); !status)
-                    co_return hedge::error("An error occurred while flushing the mem_index: " + status.error().to_string());
+                auto old_mem_index = std::move(this->_mem_index);
 
-                // Trigger compaction
-                if(this->_config.auto_compaction)
-                    (void)this->compact_sorted_indices(false);
+                this->_mem_index = mem_index{};
+                this->_mem_index.reserve(this->_config.keys_in_mem_before_flush);
+
+                [this, old_mem_index_ptr = std::make_shared<mem_index>(std::move(old_mem_index))]()
+                {
+                    if(auto status = this->_flush_mem_index(std::move(*old_mem_index_ptr)); !status)
+                    {
+                        this->_logger.log("An error occurred while flushing the mem_index: " + status.error().to_string());
+                        return;
+                    }
+
+                    // Trigger compaction
+                    if(this->_config.auto_compaction)
+                    {
+                        auto t0 = std::chrono::high_resolution_clock::now();
+                        (void)this->compact_sorted_indices(false);
+                        auto t1 = std::chrono::high_resolution_clock::now();
+                        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+                        this->_logger.log("Compaction completed in ", (double)duration.count() / 1000.0, " ms");
+                    }
+                }();
             }
         }
 
@@ -113,7 +131,7 @@ namespace hedge::db
 
         // --- Update Memtable 7---
         {
-            std::lock_guard lk(this->_mem_index_mutex);
+            std::unique_lock lk(this->_mem_index_mutex);
             this->_mem_index.put(key, write_response.value());
         }
 
@@ -131,9 +149,13 @@ namespace hedge::db
     {
         // Step 1: Check the memtable first (contains the most recent data).
         std::optional<value_ptr_t> value_ptr_opt;
+
         {
-            std::lock_guard lk(this->_mem_index_mutex);
+            std::shared_lock lk(this->_mem_index_mutex);
             value_ptr_opt = this->_mem_index.get(key);
+
+            // if(this->_read_only_mem_index.has_value() && !value_ptr_opt.has_value())
+            // value_ptr_opt = this->_read_only_mem_index->first.get(key);
         }
 
         // Step 2: If not found in memtable, search the relevant sorted index files.
@@ -143,7 +165,7 @@ namespace hedge::db
             std::vector<sorted_index_ptr_t> sorted_indices_local; // Local copy for safe iteration
 
             {
-                std::lock_guard lk(this->_sorted_index_mutex);
+                std::shared_lock lk(this->_sorted_index_mutex);
                 auto sorted_indices_it = this->_sorted_indices.find(matching_partition_id);
 
                 if(sorted_indices_it == this->_sorted_indices.end())
@@ -154,7 +176,7 @@ namespace hedge::db
 
             // Need to search ALL indices in the partition and find the one with the highest priority `value_ptr_t`.
             // TODO: Add bloom filter support to skip unnecessary lookups.
-            for(auto& sorted_index_ptr : sorted_indices_local)
+            for(const auto& sorted_index_ptr : sorted_indices_local)
             {
                 auto maybe_value_ptr = co_await sorted_index_ptr->lookup_async(key, executor);
                 if(!maybe_value_ptr.has_value())
@@ -179,11 +201,11 @@ namespace hedge::db
         // Step 4: Find the corresponding value table based on the table ID in the value pointer.
         auto table_finder = [this](uint32_t id) -> std::shared_ptr<value_table>
         {
-            if(this->_current_value_table.load()->id() == id)
+            if(this->_current_value_table.load(std::memory_order::relaxed)->id() == id)
                 return this->_current_value_table;
 
             {
-                std::lock_guard lk(this->_value_tables_mutex);
+                std::shared_lock lk(this->_value_tables_mutex);
                 auto it = this->_value_tables.find(id);
                 if(it != this->_value_tables.end())
                     return it->second;
@@ -253,7 +275,7 @@ namespace hedge::db
         // TODO: As written above, we might want to allow deleting non-existing keys
         // Hence, we might want to always run this step
         {
-            std::lock_guard lk(this->_mem_index_mutex);
+            std::unique_lock lk(this->_mem_index_mutex);
             this->_mem_index.put(key, value_ptr_t::apply_delete(value_ptr));
         }
         co_return hedge::ok();
@@ -261,7 +283,8 @@ namespace hedge::db
 
     hedge::status database::_rotate_value_table(const std::shared_ptr<value_table>& rotating)
     {
-        std::lock_guard lk(this->_value_tables_mutex);
+        auto t0 = std::chrono::high_resolution_clock::now();
+        std::unique_lock lk(this->_value_tables_mutex);
 
         // This check is needed in case more thread try rotating the value table at the same time
         // In this case, they will try executing this function with the same `rotating` object (identified from the
@@ -279,24 +302,33 @@ namespace hedge::db
 
         auto old_vt = this->_current_value_table.exchange(std::move(new_value_table.value()));
 
-        this->_value_tables[old_vt->id()] = std::move(old_vt);
+        // reload old_vt with o_direct
+        auto reloaded_old_vt = value_table::reload(std::move(*old_vt), fs::file::open_mode::read_only, true);
+
+        if(!reloaded_old_vt)
+            return hedge::error("Failed to reload old value table with O_DIRECT: " + reloaded_old_vt.error().to_string());
+
+        this->_value_tables[old_vt->id()] = std::move(reloaded_old_vt.value());
+        auto t1 = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+        this->_logger.log("Value table rotated in ", (double)duration.count() / 1000.0, " ms");
 
         return hedge::ok();
     }
 
-    hedge::status database::_flush_mem_index()
+    hedge::status database::_flush_mem_index(mem_index&& memtable_to_flush)
     {
         auto t0 = std::chrono::high_resolution_clock::now();
-        if(this->_mem_index.size() == 0)
+        if(memtable_to_flush.size() == 0)
         {
             this->_logger.log("Skipping mem index flush: Memtable is empty.");
             return hedge::ok();
         }
 
-        this->_logger.log("Flushing mem index to ", this->_indices_path, " with number of items: ", this->_mem_index.size());
+        this->_logger.log("Flushing mem index to ", this->_indices_path, " with number of items: ", memtable_to_flush.size());
 
         std::vector<mem_index> vec_memtable;
-        vec_memtable.emplace_back(std::move(this->_mem_index));
+        vec_memtable.emplace_back(std::move(memtable_to_flush));
 
         auto partitioned_sorted_indices = index_ops::flush_mem_index(this->_indices_path,
                                                                      std::move(vec_memtable),
@@ -308,7 +340,7 @@ namespace hedge::db
             return hedge::error("An error occurred while flushing the mem index: " + partitioned_sorted_indices.error().to_string());
 
         {
-            std::lock_guard lk(this->_sorted_index_mutex);
+            std::unique_lock lk(this->_sorted_index_mutex);
 
             for(auto& new_sorted_index : partitioned_sorted_indices.value())
             {
@@ -320,11 +352,8 @@ namespace hedge::db
             }
         }
 
-        this->_mem_index = mem_index{};
-        this->_mem_index.reserve(this->_config.keys_in_mem_before_flush);
-
         auto t1 = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+        [[maybe_unused]] auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         this->_logger.log("Mem index flushed in ", (double)duration.count() / 1000.0, " ms");
 
         return hedge::ok();
@@ -337,7 +366,7 @@ namespace hedge::db
         sorted_indices_map_t indices_local_copy;
 
         {
-            std::lock_guard lk(this->_sorted_index_mutex);
+            std::shared_lock lk(this->_sorted_index_mutex);
 
             // Acquire shared ownership of the current sorted indices for compaction
             // Every newly added sorted index during compaction will not be considered in this job
@@ -472,7 +501,7 @@ namespace hedge::db
         // Finalize compaction: replace the database's sorted indices with the compacted ones
         // (so far, we have only worked on local copies)
         {
-            std::lock_guard lk(this->_sorted_index_mutex);
+            std::unique_lock lk(this->_sorted_index_mutex);
 
             for(auto& [prefix, new_partition_vec] : indices_local_copy)
             {
@@ -512,8 +541,8 @@ namespace hedge::db
         auto compaction_promise_ptr = std::make_shared<std::promise<hedge::status>>();
         std::future<hedge::status> compaction_future = compaction_promise_ptr->get_future();
 
-        this->compaction_worker.submit(
-            [t0, weak_db = this->weak_from_this(), promise = std::move(compaction_promise_ptr), ignore_ratio]() mutable // Make mutable for promise move
+        this->_compaction_worker.submit(
+            [t0, weak_db = this->weak_from_this(), promise = std::move(compaction_promise_ptr), ignore_ratio]()
             {
                 auto db = weak_db.lock();
                 if(!db)
@@ -530,6 +559,8 @@ namespace hedge::db
                 auto t1 = std::chrono::high_resolution_clock::now();
                 auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
                 db->_logger.log("Total duration for compaction: ", (double)duration.count() / 1000.0, " ms");
+
+                // todo: fix std::future_error No associated state if the future was already retrieved with wait_for()
                 promise->set_value(std::move(status));
             });
 
@@ -538,7 +569,7 @@ namespace hedge::db
 
     [[nodiscard]] double database::read_amplification_factor()
     {
-        std::lock_guard lk(this->_sorted_index_mutex);
+        std::shared_lock lk(this->_sorted_index_mutex);
         double total_read_amplification = 0.0;
 
         for(const auto& [prefix, indices] : this->_sorted_indices)
@@ -552,8 +583,9 @@ namespace hedge::db
 
     hedge::status database::flush()
     {
-        std::lock_guard lk(this->_mem_index_mutex);
-        if(auto status = this->_flush_mem_index(); !status)
+        auto old_mem_index = std::move(this->_mem_index);
+
+        if(auto status = this->_flush_mem_index(std::move(old_mem_index)); !status)
             return hedge::error("An error occurred while flushing the mem_index: " + status.error().to_string());
 
         this->_logger.log("Manual flush completed successfully.");

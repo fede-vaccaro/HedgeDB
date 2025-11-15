@@ -81,13 +81,13 @@ namespace hedge::db
          */
         struct merge_config
         {
-            size_t read_ahead_size{};          ///< Number of bytes to read from each input index file at a time during the merge. (e.g., 64 * 1024 for 64KB chunks).
-            size_t new_index_id{};             ///< The unique ID (iteration number) to use for the output merged index file name (e.g., ".<new_index_id>").
-            std::filesystem::path base_path{}; ///< The base directory where the output file will be created (within its partition subdirectory).
-            bool discard_deleted_keys{false};  ///< If `true`, entries marked with the delete flag (`value_ptr_t::is_deleted()`) will not be written to the output file.
-                                               ///< Set `false` if there are more indices belonging to the same partition to be merged later, to preserve delete markers until the final merge.
-                                               ///< Set `true` when this is the final merge for the partition to eliminate deleted entries from the final index.
-            bool create_new_with_odirect{false};       ///< If `true`, opens the output file with O_DIRECT flag for direct I/O access.
+            size_t read_ahead_size{};            ///< Number of bytes to read from each input index file at a time during the merge. (e.g., 64 * 1024 for 64KB chunks).
+            size_t new_index_id{};               ///< The unique ID (iteration number) to use for the output merged index file name (e.g., ".<new_index_id>").
+            std::filesystem::path base_path{};   ///< The base directory where the output file will be created (within its partition subdirectory).
+            bool discard_deleted_keys{false};    ///< If `true`, entries marked with the delete flag (`value_ptr_t::is_deleted()`) will not be written to the output file.
+                                                 ///< Set `false` if there are more indices belonging to the same partition to be merged later, to preserve delete markers until the final merge.
+                                                 ///< Set `true` when this is the final merge for the partition to eliminate deleted entries from the final index.
+            bool create_new_with_odirect{false}; ///< If `true`, opens the output file with O_DIRECT flag for direct I/O access.
         };
 
         /**
@@ -116,6 +116,8 @@ namespace hedge::db
          * or an error if the merge fails or the executor is invalid.
          */
         static hedge::expected<sorted_index> two_way_merge(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
+
+        static hedge::expected<void> two_way_merge_mmap(const merge_config& config, const sorted_index& left, const sorted_index& right);
     };
 
 } // namespace hedge::db
