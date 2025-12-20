@@ -246,6 +246,26 @@ namespace hedge::db
         return arr;
     }();
 
+    hedge::status write_iovec(int fd, const iovec& iovec)
+    {
+
+        size_t bytes_written = 0;
+
+        while(bytes_written < iovec.iov_len)
+        {
+            ssize_t res = write(fd,
+                                reinterpret_cast<uint8_t*>(iovec.iov_base) + bytes_written,
+                                iovec.iov_len - bytes_written);
+
+            if(res < 0)
+                return hedge::error(std::format("Failed to write iovec to fd {} at offset {}: {}", fd, lseek(fd, 0, SEEK_CUR), strerror(errno)));
+
+            bytes_written += static_cast<size_t>(res);
+        }
+
+        return hedge::ok();
+    }
+
     hedge::expected<sorted_index>
     index_ops::save_as_sorted_index(const std::filesystem::path& path, std::vector<index_entry_t>&& sorted_keys, size_t upper_bound, bool use_odirect)
     {
@@ -285,32 +305,32 @@ namespace hedge::db
 
             auto fd = maybe_ofs_sorted_index.value().fd();
 
-            std::array<iovec, 3> iovecs{
+            std::array<iovec, 5> iovecs{
                 iovec{
                     .iov_base = reinterpret_cast<uint8_t*>(sorted_keys.data()),
                     .iov_len = index_size_bytes},
                 iovec{
+                    .iov_base = const_cast<uint8_t*>(PADDING_PAGE.data()),
+                    .iov_len = index_padding_bytes},
+                iovec{
                     .iov_base = reinterpret_cast<uint8_t*>(meta_index.data()),
                     .iov_len = meta_index_size_bytes},
+                iovec{
+                    .iov_base = const_cast<uint8_t*>(PADDING_PAGE.data()),
+                    .iov_len = meta_index_padding_bytes},
                 iovec{
                     .iov_base = reinterpret_cast<uint8_t*>(&footer),
                     .iov_len = sizeof(sorted_index_footer)}};
 
-            size_t res = pwritev(fd, iovecs.data(), iovecs.size(), 0);
+            // handling writev is cumbersome when it comes to partial writes
+            // size_t res = writev(fd, iovecs.data(), iovecs.size());
 
-            if(res < 0)
-                return hedge::error("Failed to write sorted index file: " + path.string() +
-                                    " : " + std::string(strerror(errno)));
-
-            size_t estimated_bytes_written =
-                index_size_bytes +
-                meta_index_size_bytes +
-                sizeof(sorted_index_footer);
-            if(res != estimated_bytes_written)
-                return hedge::error("Failed to write sorted index file: " + path.string() +
-                                    " : expected " + std::to_string(estimated_bytes_written) +
-                                    ", got " + std::to_string(res) +
-                                    "strerror: " + std::string(strerror(errno)));
+            for(const auto& iov : iovecs)
+            {
+                auto status = write_iovec(fd, iov);
+                if(!status)
+                    return hedge::error("Failed to write sorted index file: " + path.string() + " : " + status.error().to_string());
+            }
 
             // Sync to disk
             if(use_odirect)

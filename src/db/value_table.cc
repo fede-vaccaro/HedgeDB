@@ -114,7 +114,7 @@ namespace hedge::db
             .separator = FILE_SEPARATOR,
             .key = key,
             .file_size = static_cast<uint32_t>(value.size()),
-            .deleted_flag = false};
+        };
 
         // TODO: Optimize by writing header and value in separate io_uring requests if beneficial,
         // or ensure the current single write is efficient enough.
@@ -163,7 +163,7 @@ namespace hedge::db
             this->_unique_id);
     }
 
-    async::task<expected<output_file>> value_table::read_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor, bool skip_delete_check)
+    async::task<expected<output_file>> value_table::read_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor, bool)
     {
         if(file_offset + file_size > this->_current_offset)
         {
@@ -189,8 +189,19 @@ namespace hedge::db
             size_t page_aligned_file_size = file_size + remainder;
             size_t page_aligned_size = hedge::ceil(page_aligned_file_size, PAGE_SIZE_IN_BYTES) * PAGE_SIZE_IN_BYTES;
 
+            auto* data_ptr = static_cast<uint8_t*>(aligned_alloc(page_aligned_size, PAGE_SIZE_IN_BYTES));
+            if(data_ptr == nullptr)
+            {
+                co_return hedge::error(std::format("Failed to allocate memory for reading file from value table (path: {}): requested size {}",
+                                                   this->path().string(),
+                                                   page_aligned_size));
+            }
+
+            auto data = std::unique_ptr<uint8_t>(data_ptr);
+
             auto read_response = co_await executor->submit_request(async::read_request{
                 .fd = this->fd(),
+                .data = data.get(),
                 .offset = page_aligned_offset,
                 .size = page_aligned_size,
             });
@@ -210,8 +221,8 @@ namespace hedge::db
                                                    read_response.bytes_read));
             }
 
-            std::copy(read_response.data.get() + remainder, read_response.data.get() + remainder + sizeof(file_header), reinterpret_cast<uint8_t*>(&header));
-            value_data.assign(read_response.data.get() + remainder + sizeof(file_header), read_response.data.get() + page_aligned_file_size);
+            std::copy(data_ptr + remainder, data_ptr + remainder + sizeof(file_header), reinterpret_cast<uint8_t*>(&header));
+            value_data.assign(data_ptr + remainder + sizeof(file_header), data_ptr + page_aligned_file_size);
         }
         else
         {
@@ -247,15 +258,6 @@ namespace hedge::db
                                                    file_size,
                                                    read_response.bytes_read));
             }
-        }
-
-        if(!skip_delete_check && header.deleted_flag)
-        {
-            co_return hedge::error(std::format("File with key '{}' is marked as deleted in value table (path: {}) at offset {}",
-                                               uuids::to_string(header.key),
-                                               this->path().string(),
-                                               file_offset),
-                                   hedge::errc::DELETED);
         }
 
         if(header.separator != FILE_SEPARATOR)
@@ -397,10 +399,10 @@ namespace hedge::db
                             uuids::to_string(header.key)));
         }
 
-        if(header.deleted_flag)
-            co_return hedge::ok();
+        // if(header.deleted_flag)
+        //     co_return hedge::ok();
 
-        header.deleted_flag = true;
+        // header.deleted_flag = true;
 
         auto write_response = co_await executor->submit_request(async::write_request{
             .fd = this->fd(),

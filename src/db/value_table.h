@@ -33,7 +33,6 @@ namespace hedge::db
         std::array<uint8_t, 16> separator{FILE_SEPARATOR}; ///< Magic bytes to identify the start of a header.
         key_t key{};                                       ///< The key associated with this value (primarily for recovery/validation).
         uint32_t file_size{};                              ///< The size of the actual value data (excluding this header).
-        bool deleted_flag{false};                          ///< Flag indicating if this entry is logically deleted (tombstone).
     };
 
     /**

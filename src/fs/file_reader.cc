@@ -1,8 +1,8 @@
 #include <format>
 
-#include "types.h"
 #include "file_reader.h"
 #include "fs.hpp"
+#include "types.h"
 
 namespace hedge::fs
 {
@@ -33,7 +33,19 @@ namespace hedge::fs
         if(this->_fd.has_direct_access() && num_bytes_to_read % PAGE_SIZE_IN_BYTES != 0)
             num_bytes_to_read += PAGE_SIZE_IN_BYTES - (num_bytes_to_read % PAGE_SIZE_IN_BYTES);
 
-        auto response = co_await this->_executor->submit_request(async::read_request{.fd = this->_fd.fd(), .offset = this->_current_offset, .size = num_bytes_to_read});
+        auto* data_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, num_bytes_to_read));
+
+        if(data_ptr == nullptr)
+            co_return hedge::error("Failed to allocate aligned memory for file read.");
+
+        auto data = std::unique_ptr<uint8_t>(data_ptr);
+
+        auto response = co_await this->_executor->submit_request(async::read_request{
+            .fd = this->_fd.fd(),
+            .data = data_ptr,
+            .offset = this->_current_offset,
+            .size = num_bytes_to_read,
+        });
 
         this->_current_offset += num_bytes_to_read;
 
@@ -43,7 +55,7 @@ namespace hedge::fs
         if(response.bytes_read != num_bytes_to_read)
             co_return hedge::error(std::format("Unexpected bytes read: {}. Expected: {}", response.bytes_read, num_bytes_to_read));
 
-        co_return std::vector<uint8_t>(response.data.get(), response.data.get() + actual_num_bytes_to_read);
+        co_return std::vector<uint8_t>(data_ptr, data_ptr + actual_num_bytes_to_read);
     }
 
     size_t file_reader::get_current_offset() const

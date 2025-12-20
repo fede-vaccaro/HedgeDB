@@ -10,30 +10,11 @@
 
 namespace hedge::async
 {
-
-    constexpr size_t PAGE_SIZE = 4096;
-
-    std::unique_ptr<uint8_t> aligned_alloc(size_t size)
-    {
-        uint8_t* ptr = nullptr;
-        if(posix_memalign((void**)&ptr, PAGE_SIZE, size) != 0) // todo: preallocate some memory for 4 KB pages
-        {
-            perror("posix_memalign failed");
-            throw std::runtime_error("Failed to allocate aligned memory for buffers");
-        }
-
-        return std::unique_ptr<uint8_t>(ptr);
-    }
-
     void read_mailbox::prepare_sqes(std::span<io_uring_sqe*> sqes)
     {
         io_uring_sqe* sqe = sqes.front();
 
-        this->response = {
-            .data = aligned_alloc(request.size),
-            .bytes_read = 0};
-
-        io_uring_prep_read(sqe, this->request.fd, this->response.data.get(), this->request.size, this->request.offset);
+        io_uring_prep_read(sqe, this->request.fd, this->request.data, this->request.size, this->request.offset);
     }
 
     bool read_mailbox::handle_cqe(io_uring_cqe* cqe, uint8_t /* sub_request_idx */)
@@ -135,13 +116,12 @@ namespace hedge::async
             io_uring_sqe* sqe = *it++;
 
             read_response response{
-                .data = aligned_alloc(req.size),
                 .bytes_read = req.size,
             };
 
-            io_uring_prep_read(sqe, req.fd, response.data.get(), req.size, req.offset);
+            io_uring_prep_read(sqe, req.fd, req.data, req.size, req.offset);
 
-            this->response.responses.emplace_back(std::move(response));
+            this->response.responses.emplace_back(response);
         }
     }
 

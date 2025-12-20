@@ -6,7 +6,7 @@ hedge_db
 .cache/*
 
 # cmake
-build/*
+**/build/*
 
 # install directory
 hedgedb/*

@@ -132,11 +132,23 @@ namespace hedge::db
 
     async::task<expected<std::unique_ptr<uint8_t>>> sorted_index::_load_page_async(size_t offset, const std::shared_ptr<async::executor_context>& executor) const
     {
-        // Submit an asynchronous read request to the executor.
-        // `read_request` implies page-aligned memory will be allocated by the mailbox.
+
+        auto* data_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, PAGE_SIZE_IN_BYTES));
+        if(data_ptr == nullptr)
+        {
+            auto err_msg = std::format(
+                "Failed to allocate memory for loading page at offset {} from file {}",
+                offset,
+                this->path().string());
+            co_return hedge::error(err_msg);
+        }
+
+        auto data = std::unique_ptr<uint8_t>(data_ptr);
+
         auto response = co_await executor->submit_request(
             async::read_request{
                 .fd = this->fd(),
+                .data = data_ptr,
                 .offset = offset,
                 .size = PAGE_SIZE_IN_BYTES});
 
@@ -161,7 +173,7 @@ namespace hedge::db
             co_return hedge::error(err_msg);
         }
 
-        co_return std::move(response.data);
+        co_return std::move(data);
     }
 
     std::optional<value_ptr_t> sorted_index::_find_in_page(const key_t& key, const index_entry_t* start, const index_entry_t* end)
@@ -198,7 +210,7 @@ namespace hedge::db
 
         // Submit the asynchronous write request.
         auto write_response = co_await executor->submit_request(async::write_request{
-            .fd = this->fd(),                         // Use the file descriptor of this sorted_index
+            .fd = this->fd(),                             // Use the file descriptor of this sorted_index
             .data = const_cast<uint8_t*>(entry_byte_ptr), // Pointer to the data to write
             .size = sizeof(index_entry_t),                // Size of the data to write
             .offset = total_file_offset,                  // Exact byte offset in the file

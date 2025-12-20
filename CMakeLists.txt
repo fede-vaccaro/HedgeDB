@@ -25,7 +25,7 @@ if (CMAKE_BUILD_TYPE MATCHES "Debug")
     set(CMAKE_CXX_FLAGS "-O1 -g -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Werror")
 elseif (CMAKE_BUILD_TYPE MATCHES "Release")
     message (STATUS "Building in Release mode")
-    set(CMAKE_CXX_FLAGS "-O3")
+    set(CMAKE_CXX_FLAGS "-O2 -g -fno-omit-frame-pointer")
 endif()
 
 set(PUBLIC_INCLUDES 

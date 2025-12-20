@@ -100,6 +100,9 @@ namespace hedge::db
         std::shared_mutex _mem_index_mutex;
         mem_index _mem_index;
 
+        std::shared_mutex _pending_flushes_mutex;
+        std::map<size_t, mem_index> _pending_flushes; ///< Tracks memtables currently being flushed to disk.
+
         // --- Background Workers ---
         /// Worker thread dedicated to handling index compaction jobs.
         async::worker _compaction_worker;
@@ -240,7 +243,7 @@ namespace hedge::db
          * Clears the `_mem_index` afterwards. Manages partitioning and file naming.
          * @return Status indicating success or failure.
          */
-        hedge::status _flush_mem_index(mem_index&& memtable_to_flush);
+        hedge::status _flush_mem_index(mem_index&& memtable_to_flush, size_t flush_iteration);
         /**
          * @brief The core logic for performing index compaction, run by the `compaction_worker`.
          * Updates the main `_sorted_indices` map upon completion.
