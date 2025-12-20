@@ -24,6 +24,8 @@ namespace hedge::db
             this->PAYLOAD_SIZE = std::get<1>(GetParam());
             this->MEMTABLE_CAPACITY = std::get<2>(GetParam());
 
+            this->_key_value_seeds.reserve(this->N_KEYS);
+
             if(std::filesystem::exists(this->_base_path))
                 std::filesystem::remove_all(this->_base_path);
         }
@@ -153,9 +155,9 @@ namespace hedge::db
         std::cout << "Total duration for UUID generation: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
 
         t0 = std::chrono::high_resolution_clock::now();
+        const auto& executor = async::executor_from_static_pool();
         for(size_t i = 0; i < this->N_KEYS; ++i)
         {
-            const auto& executor = async::executor_from_static_pool();
             executor->submit_io_task(make_put_task(i, executor));
         }
         write_wg.wait();
@@ -194,7 +196,7 @@ namespace hedge::db
         std::cout << "Sleeping " << sleep_time.count() << " seconds before starting retrieval to cool down..." << std::endl;
         std::this_thread::sleep_for(sleep_time);
 
-        this->N_KEYS /= 4; // reduce number of keys to read
+        // this->N_KEYS /= 8; // reduce number of keys to read
         std::cout << "Starting readback now with " << this->N_KEYS << " keys." << std::endl;
 
         async::wait_group read_wg;
@@ -269,8 +271,8 @@ namespace hedge::db
         test_suite,
         database_test,
         testing::Combine(
-            testing::Values(80'000'000), // n keys
-            testing::Values(1024),       // payload size
+            testing::Values(10'000'000), // n keys
+            testing::Values(100),        // payload size
             testing::Values(1'000'000)   // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)

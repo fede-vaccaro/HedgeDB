@@ -5,6 +5,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <ranges>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -83,24 +84,31 @@ namespace hedge::db
                 this->_mem_index = mem_index{};
                 this->_mem_index.reserve(this->_config.keys_in_mem_before_flush);
 
-                [this, old_mem_index_ptr = std::make_shared<mem_index>(std::move(old_mem_index))]()
-                {
-                    if(auto status = this->_flush_mem_index(std::move(*old_mem_index_ptr)); !status)
-                    {
-                        this->_logger.log("An error occurred while flushing the mem_index: " + status.error().to_string());
-                        return;
-                    }
+                size_t curr_flush_iteration = this->_flush_iteration.fetch_add(1, std::memory_order_relaxed);
 
-                    // Trigger compaction
-                    if(this->_config.auto_compaction)
+                {
+                    std::unique_lock lk_pending(this->_pending_flushes_mutex);
+                    this->_pending_flushes[curr_flush_iteration] = mem_index::from_index(std::move(old_mem_index).index());
+                }
+
+                this->_compaction_worker.submit(
+                    [this, old_mem_index_ptr = std::make_shared<mem_index>(std::move(old_mem_index)), curr_flush_iteration]()
                     {
-                        auto t0 = std::chrono::high_resolution_clock::now();
-                        (void)this->compact_sorted_indices(false);
-                        auto t1 = std::chrono::high_resolution_clock::now();
-                        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-                        this->_logger.log("Compaction completed in ", (double)duration.count() / 1000.0, " ms");
-                    }
-                }();
+                        if(auto status = this->_flush_mem_index(std::move(*old_mem_index_ptr), curr_flush_iteration); !status)
+                        {
+                            this->_logger.log("An error occurred while flushing the mem_index: " + status.error().to_string());
+                            return;
+                        }
+
+                        if(this->_config.auto_compaction)
+                        {
+                            auto t0 = std::chrono::high_resolution_clock::now();
+                            (void)this->compact_sorted_indices(false);
+                            auto t1 = std::chrono::high_resolution_clock::now();
+                            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+                            this->_logger.log("Compaction completed in ", (double)duration.count() / 1000.0, " ms");
+                        }
+                    });
             }
         }
 
@@ -153,9 +161,19 @@ namespace hedge::db
         {
             std::shared_lock lk(this->_mem_index_mutex);
             value_ptr_opt = this->_mem_index.get(key);
+        }
 
-            // if(this->_read_only_mem_index.has_value() && !value_ptr_opt.has_value())
-            // value_ptr_opt = this->_read_only_mem_index->first.get(key);
+        // Step 1.1: Also check pending flushes
+        // We reverse iterate: if there are multiple pending flushes, the most recent is the correct one
+        {
+            std::shared_lock lk(this->_pending_flushes_mutex);
+            for(auto& pending_flush : std::ranges::reverse_view(this->_pending_flushes))
+            {
+                auto& pending_memtable = pending_flush.second;
+                value_ptr_opt = pending_memtable.get(key);
+                if(value_ptr_opt.has_value())
+                    break;
+            }
         }
 
         // Step 2: If not found in memtable, search the relevant sorted index files.
@@ -316,7 +334,7 @@ namespace hedge::db
         return hedge::ok();
     }
 
-    hedge::status database::_flush_mem_index(mem_index&& memtable_to_flush)
+    hedge::status database::_flush_mem_index(mem_index&& memtable_to_flush, size_t flush_iteration)
     {
         auto t0 = std::chrono::high_resolution_clock::now();
         if(memtable_to_flush.size() == 0)
@@ -333,11 +351,16 @@ namespace hedge::db
         auto partitioned_sorted_indices = index_ops::flush_mem_index(this->_indices_path,
                                                                      std::move(vec_memtable),
                                                                      this->_config.num_partition_exponent,
-                                                                     this->_flush_iteration.fetch_add(1, std::memory_order_relaxed),
+                                                                     flush_iteration,
                                                                      this->_config.use_odirect_for_indices);
 
         if(!partitioned_sorted_indices)
             return hedge::error("An error occurred while flushing the mem index: " + partitioned_sorted_indices.error().to_string());
+
+        {
+            std::unique_lock lk(this->_pending_flushes_mutex);
+            this->_pending_flushes.erase(flush_iteration);
+        }
 
         {
             std::unique_lock lk(this->_sorted_index_mutex);
@@ -585,7 +608,7 @@ namespace hedge::db
     {
         auto old_mem_index = std::move(this->_mem_index);
 
-        if(auto status = this->_flush_mem_index(std::move(old_mem_index)); !status)
+        if(auto status = this->_flush_mem_index(std::move(old_mem_index), this->_flush_iteration.fetch_add(1, std::memory_order_relaxed)); !status)
             return hedge::error("An error occurred while flushing the mem_index: " + status.error().to_string());
 
         this->_logger.log("Manual flush completed successfully.");

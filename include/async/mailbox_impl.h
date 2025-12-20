@@ -117,13 +117,13 @@ namespace hedge::async
         using mailbox_t = read_mailbox;
 
         int32_t fd{-1};
+        uint8_t* data{nullptr};
         size_t offset{0};
         size_t size{0};
     };
 
     struct read_response
     {
-        std::unique_ptr<uint8_t> data{};
         size_t bytes_read{0};
         int32_t error_code{0};
     };

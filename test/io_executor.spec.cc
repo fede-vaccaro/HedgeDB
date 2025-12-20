@@ -29,6 +29,20 @@ struct test_executor : public ::testing::Test
     std::shared_ptr<executor_context> _executor{};
 };
 
+constexpr size_t PAGE_SIZE = 4096;
+
+std::unique_ptr<uint8_t> aligned_alloc(size_t size)
+{
+    uint8_t* ptr = nullptr;
+    if(posix_memalign((void**)&ptr, PAGE_SIZE, size) != 0) // todo: preallocate some memory for 4 KB pages
+    {
+        perror("posix_memalign failed");
+        throw std::runtime_error("Failed to allocate aligned memory for buffers");
+    }
+
+    return std::unique_ptr<uint8_t>(ptr);
+}
+
 TEST_F(test_executor, test_read_simple)
 {
     // prepare file with some data
@@ -48,10 +62,13 @@ TEST_F(test_executor, test_read_simple)
         auto promise_2 = std::promise<read_response>{};
         auto future_2 = promise_2.get_future();
 
+        auto ptr_0 = aligned_alloc(13);
+        auto ptr_1 = aligned_alloc(13);
+
         auto task = [&]() -> ::task<void>
         {
-            auto response = co_await this->_executor->submit_request(read_request{fd, 0, 13});
-            auto response_2 = co_await this->_executor->submit_request(read_request{fd, 0, 13});
+            auto response = co_await this->_executor->submit_request(read_request{fd, ptr_0.get(), 13, 0});
+            auto response_2 = co_await this->_executor->submit_request(read_request{fd, ptr_1.get(), 13, 0});
 
             promise.set_value(std::move(response));
             promise_2.set_value(std::move(response_2));
@@ -64,11 +81,11 @@ TEST_F(test_executor, test_read_simple)
 
         ASSERT_EQ(response.error_code, 0) << "Read error: " << strerror(-response.error_code);
         ASSERT_EQ(response.bytes_read, 13) << "Read response size mismatch";
-        ASSERT_EQ(std::string(response.data.get(), response.data.get() + response.bytes_read), "Hello, World!") << "Read content mismatch";
+        ASSERT_EQ(std::string(reinterpret_cast<char*>(ptr_0.get()), reinterpret_cast<char*>(ptr_0.get()) + response.bytes_read), "Hello, World!") << "Read content mismatch";
 
         ASSERT_EQ(response_2.error_code, 0) << "Read error: " << strerror(-response_2.error_code);
         ASSERT_EQ(response_2.bytes_read, 13) << "Read response size mismatch";
-        ASSERT_EQ(std::string(response_2.data.get(), response_2.data.get() + response_2.bytes_read), "Hello, World!") << "Read content mismatch";
+        ASSERT_EQ(std::string(reinterpret_cast<char*>(ptr_1.get()), reinterpret_cast<char*>(ptr_1.get()) + response_2.bytes_read), "Hello, World!") << "Read content mismatch";
     }
 
     close(fd);
@@ -126,12 +143,15 @@ TEST_F(test_executor, test_multi_read)
     auto promise = std::promise<multi_read_response>{};
     auto future = promise.get_future();
 
+    auto ptr_0 = aligned_alloc(5);
+    auto ptr_1 = aligned_alloc(8);
+
     auto task = [&]() -> ::task<void>
     {
         auto request = multi_read_request{
             .requests = {
-                read_request{fd, 0, 5}, // Read first 5 bytes
-                read_request{fd, 5, 8}  // Read next 8 bytes
+                read_request{.fd=fd, .data=ptr_0.get(), .offset=5, .size=0}, // Read first 5 bytes
+                read_request{.fd=fd, .data=ptr_1.get(), .offset=8, .size=5}  // Read next 8 bytes
             }};
 
         auto response = co_await this->_executor->submit_request(std::move(request));
@@ -146,10 +166,10 @@ TEST_F(test_executor, test_multi_read)
     ASSERT_EQ(response.responses.size(), 2) << "Expected 2 read responses";
 
     ASSERT_EQ(response.responses[0].bytes_read, 5) << "First read response size mismatch";
-    ASSERT_EQ(std::string(response.responses[0].data.get(), response.responses[0].data.get() + response.responses[0].bytes_read), "Hello") << "First read content mismatch";
+    ASSERT_EQ(std::string(reinterpret_cast<char*>(ptr_0.get()), reinterpret_cast<char*>(ptr_0.get()) + response.responses[0].bytes_read), "Hello") << "First read content mismatch";
 
     ASSERT_EQ(response.responses[1].bytes_read, 8) << "Second read response size mismatch";
-    ASSERT_EQ(std::string(response.responses[1].data.get(), response.responses[1].data.get() + response.responses[1].bytes_read), ", World!") << "Second read content mismatch";
+    ASSERT_EQ(std::string(reinterpret_cast<char*>(ptr_1.get()), reinterpret_cast<char*>(ptr_1.get()) + response.responses[1].bytes_read), ", World!") << "Second read content mismatch";
 }
 
 TEST_F(test_executor, test_open_fallocate_write)
@@ -252,7 +272,7 @@ TEST_F(test_executor, test_file_info_file_exists)
 
         auto response = co_await this->_executor->submit_request(std::move(request));
 
-        promise.set_value(std::move(response));
+        promise.set_value(response);
     };
 
     this->_executor->submit_io_task(task());
