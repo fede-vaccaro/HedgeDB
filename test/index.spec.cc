@@ -10,6 +10,7 @@
 #include "async/wait_group.h"
 #include "db/index_ops.h"
 #include "db/mem_index.h"
+#include "db/page_cache.h"
 #include "db/sorted_index.h"
 #include "utils.h"
 
@@ -213,7 +214,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
     sorted_indices_map_t unified_sorted_indices;
 
     std::vector<std::future<hedge::status>> futures;
-    hedge::async::wait_group merge_wg;
+    auto merge_wg = hedge::async::wait_group::make_shared();
 
     auto merge_task_factory =
         [](
@@ -221,7 +222,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
             const hedge::db::sorted_index& right,
             std::vector<std::future<hedge::status>>& futures,
             std::map<uint16_t, hedge::db::sorted_index>& index_map,
-            hedge::async::wait_group& wg,
+            std::shared_ptr<hedge::async::wait_group> wg,
             auto* _this) -> hedge::async::task<void>
     {
         auto promise = std::promise<hedge::status>{};
@@ -246,7 +247,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
 
         promise.set_value(hedge::ok());
 
-        wg.decr();
+        wg->decr();
     };
 
     std::chrono::microseconds total_duration{0};
@@ -272,7 +273,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
                 return a.size() >= b.size();
             });
 
-        merge_wg.incr();
+        merge_wg->incr();
 
         this->_executor->submit_io_task(merge_task_factory(
             sorted_indices[0],
@@ -283,7 +284,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
             this));
     }
 
-    merge_wg.wait();
+    merge_wg->wait();
 
     for(auto& future : futures)
     {
@@ -301,21 +302,24 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
     std::cout << "Total duration for merging: " << total_duration_ms << " ms" << std::endl;
     std::cout << "Average duration per merge: " << (static_cast<double>(total_duration_ms) / this->_sorted_indices.size()) << " ms" << std::endl;
 
-    hedge::async::wait_group query_wg;
+    auto query_wg = hedge::async::wait_group::make_shared();
 
-    query_wg.set(this->_uuids.size());
+    query_wg->set(this->_uuids.size());
 
     std::unordered_set<uuids::uuid> seen_uuids;
+
+    constexpr auto CACHE_MAX_SIZE = 3UL * 1024 * 1024 * 1024;
+    std::shared_ptr<hedge::db::page_cache> cache = std::make_shared<hedge::db::page_cache>(CACHE_MAX_SIZE);
 
     auto lookup_task_factory = [&](
                                    const uuids::uuid& uuid,
                                    const hedge::db::sorted_index& index,
                                    const std::shared_ptr<hedge::async::executor_context>& executor,
-                                   hedge::async::wait_group& wg) -> hedge::async::task<void>
+                                   std::shared_ptr<hedge::async::wait_group> wg) -> hedge::async::task<void>
     {
         seen_uuids.insert(uuid);
 
-        auto lookup = co_await index.lookup_async(uuid, executor);
+        auto lookup = co_await index.lookup_async(uuid, executor, cache);
 
         if(!lookup.has_value())
             throw std::runtime_error("Failed to lookup uuid: Error: " + lookup.error().to_string());
@@ -332,7 +336,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
 
         seen_uuids.erase(uuid);
 
-        wg.decr();
+        wg->decr();
     };
 
     t0 = std::chrono::high_resolution_clock::now();
@@ -349,7 +353,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
         this->_executor->submit_io_task(lookup_task_factory(uuid, it->second, this->_executor, query_wg));
     }
 
-    query_wg.wait_for(std::chrono::milliseconds(1 * this->_uuids.size()));
+    query_wg->wait_for(std::chrono::milliseconds(1 * this->_uuids.size()));
 
     for(const auto& uuid : seen_uuids)
         std::cout << "UUID not seen: " << uuid << std::endl;

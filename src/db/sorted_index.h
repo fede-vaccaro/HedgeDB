@@ -14,6 +14,7 @@
 #include "async/io_executor.h"
 #include "async/task.h"
 #include "fs/fs.hpp"
+#include "page_cache.h"
 #include "types.h"
 
 namespace hedge::db
@@ -77,9 +78,6 @@ namespace hedge::db
         std::vector<meta_index_entry> _meta_index; ///< In-memory copy of the meta-index (always loaded on construction/load).
         sorted_index_footer _footer;               ///< In-memory copy of the file's footer (always loaded on construction/load).
 
-        // [EXPERIMENTAL] Mutex to protect against concurrent access during compaction or potential in-place updates. It will likely be removed in the future.
-        std::unique_ptr<std::mutex> _compaction_mutex = std::make_unique<std::mutex>();
-
     public:
         /**
          * @brief Constructs a sorted_index object.
@@ -133,22 +131,7 @@ namespace hedge::db
          * @param executor A shared pointer to the `io_uring` executor context used for the read operation.
          * @return A `async::task` that resolves to an `expected` containing an `std::optional<value_ptr_t>`, or an error.
          */
-        [[nodiscard]] async::task<expected<std::optional<value_ptr_t>>> lookup_async(const key_t& key, const std::shared_ptr<async::executor_context>& executor) const;
-
-        /**
-         * @brief [EXPERIMENTAL] Asynchronously attempts to update an entry in-place on disk using `io_uring`.
-         * @details This function tries to overwrite an existing `index_entry_t` in the file. This is
-         * generally **not safe** for immutable sorted files but might be used carefully for specific
-         * purposes (e.g., marking an entry as deleted without a full merge).
-         * It first tries to acquire the `_compaction_mutex` non-blockingly. If the mutex is held (indicating
-         * a compaction is in progress), the operation fails immediately with `errc::BUSY`.
-         * Otherwise, it loads the relevant page, locates the entry, and submits an `io_uring` write request.
-         * It will likely be removed in future versions.
-         * @param entry The `index_entry_t` containing the key to find and the new data to write.
-         * @param executor A shared pointer to the `io_uring` executor context.
-         * @return A `async::task` that resolves to a `hedge::status` indicating success or failure (including `errc::BUSY`, `errc::KEY_NOT_FOUND`, or I/O errors).
-         */
-        [[nodiscard]] async::task<hedge::status> try_update_async(const index_entry_t& entry, const std::shared_ptr<async::executor_context>& executor);
+        [[nodiscard]] async::task<expected<std::optional<value_ptr_t>>> lookup_async(const key_t& key, const std::shared_ptr<async::executor_context>& executor, const std::shared_ptr<page_cache>& cache) const;
 
         /**
          * @brief Loads the entire main index data from the associated file into the in-memory `_index` vector.
@@ -212,7 +195,7 @@ namespace hedge::db
          * @return A `async::task` that resolves to an `expected` containing a `std::unique_ptr<uint8_t>`
          * holding the page data, or an error if the read fails. The memory is allocated page-aligned.
          */
-        [[nodiscard]] async::task<expected<std::unique_ptr<uint8_t>>> _load_page_async(size_t offset, const std::shared_ptr<async::executor_context>& executor) const;
+        [[nodiscard]] async::task<hedge::status> _load_page_async(size_t offset, uint8_t* data_ptr, const std::shared_ptr<async::executor_context>& executor) const;
 
         /**
          * @brief [EXPERIMENTAL] Asynchronously writes a single `index_entry_t` to a specific location within a page on disk.
