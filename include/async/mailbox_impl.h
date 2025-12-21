@@ -47,7 +47,7 @@ namespace hedge::async
             this->continuation = handle;
         }
 
-        auto resume()
+        void resume()
         {
             /*
             TODO:
@@ -66,11 +66,11 @@ namespace hedge::async
             */
 
             if(this->continuation.done())
-                return true;
+                return;
 
             this->continuation.resume();
 
-            return this->continuation.done();
+            // return this->continuation.done();
         }
     };
 

@@ -16,7 +16,9 @@
 #include "async/wait_group.h"
 #include "database.h"
 #include "db/mem_index.h"
+#include "db/page_cache.h"
 #include "index_ops.h"
+#include "io_executor.h"
 #include "sorted_index.h"
 #include "types.h"
 #include "utils.h"
@@ -57,6 +59,9 @@ namespace hedge::db
 
         db->_current_value_table = std::move(new_value_table.value());
         db->_last_table_id = 0;
+
+        if(config.index_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB cache
+            db->_index_cache = std::make_shared<page_cache>(config.index_clock_cache_size_bytes);
 
         return db;
     }
@@ -196,7 +201,7 @@ namespace hedge::db
             // TODO: Add bloom filter support to skip unnecessary lookups.
             for(const auto& sorted_index_ptr : sorted_indices_local)
             {
-                auto maybe_value_ptr = co_await sorted_index_ptr->lookup_async(key, executor);
+                auto maybe_value_ptr = co_await sorted_index_ptr->lookup_async(key, executor, this->_index_cache);
                 if(!maybe_value_ptr.has_value())
                     co_return hedge::error(std::format("An error occurred while reading index at path {}: {}", sorted_index_ptr->path().string(), maybe_value_ptr.error().to_string()));
 
@@ -410,14 +415,16 @@ namespace hedge::db
             stability_reached = true;
 
             std::vector<hedge::error> errors;
-            async::wait_group wg;
+            auto wg = async::wait_group::make_shared();
 
-            wg.set(indices_local_copy.size()); // One task per partition
+            wg->set(indices_local_copy.size()); // One task per partition
 
             auto make_compaction_sub_task = [this,
-                                             &wg,
                                              &errors,
-                                             this_iteration_id = this->_flush_iteration.fetch_add(1)](std::vector<sorted_index_ptr_t>& ordered_indices_vec, const auto& executor) -> async::task<void>
+                                             this_iteration_id = this->_flush_iteration.fetch_add(1)](
+                                                std::vector<sorted_index_ptr_t>& ordered_indices_vec,
+                                                const std::shared_ptr<async::executor_context>& executor,
+                                                std::shared_ptr<async::wait_group> wg) -> async::task<void>
             {
                 auto smallest_index_it = ordered_indices_vec.begin() + (ordered_indices_vec.size() - 1);
                 auto second_smallest_index_it = smallest_index_it - 1;
@@ -457,14 +464,14 @@ namespace hedge::db
                     ordered_indices_vec.emplace_back(std::make_shared<sorted_index>(std::move(maybe_compacted_table.value())));
                 }
 
-                wg.decr();
+                wg->decr();
             };
 
             for(auto& [prefix, partition_vec] : indices_local_copy)
             {
                 if(partition_vec.size() <= 1) // Nothing to compact
                 {
-                    wg.decr();
+                    wg->decr();
                     continue;
                 }
 
@@ -483,7 +490,7 @@ namespace hedge::db
 
                 if(!ignore_ratio && smallest_index / second_smallest_index <= this->_config.target_compaction_size_ratio)
                 {
-                    wg.decr();
+                    wg->decr();
                     continue;
                 }
 
@@ -495,13 +502,13 @@ namespace hedge::db
                 // - A key is in more than two sorted indices and is deleted in one of them
                 // The key would appear again, because we lost track of it after merging the first two indices
                 const auto& executor = async::executor_from_static_pool();
-                executor->submit_io_task(make_compaction_sub_task(partition_vec, executor));
+                executor->submit_io_task(make_compaction_sub_task(partition_vec, executor, wg));
             }
 
             // Barrier waiting for this round of compaction sub-tasks to complete
             // TODO: This could be improved since we can the sorted indices belonging
             // to each partition can be compacted independently
-            bool done = wg.wait_for(this->_config.compaction_timeout);
+            bool done = wg->wait_for(this->_config.compaction_timeout);
 
             if(!done)
                 return hedge::error("compaction timeout.");

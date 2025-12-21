@@ -95,8 +95,8 @@ namespace hedge::db
     {
         this->_key_value_seeds.reserve(this->N_KEYS);
 
-        async::wait_group write_wg;
-        write_wg.set(this->N_KEYS);
+        auto write_wg = hedge::async::wait_group::make_shared();
+        write_wg->set(this->N_KEYS);
 
         db_config config;
         config.auto_compaction = false;
@@ -104,7 +104,9 @@ namespace hedge::db
         config.compaction_read_ahead_size_bytes = 32 * 1024 * 1024;
         config.num_partition_exponent = 0;
         config.target_compaction_size_ratio = 1.0 / 3.0;
-        config.use_odirect_for_indices = false;
+        config.use_odirect_for_indices = true;
+        // config.index_clock_cache_size_bytes = 0;
+        config.index_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024; // 3 GB
 
         auto maybe_db = database::make_new(this->_base_path, config);
         ASSERT_TRUE(maybe_db) << "An error occurred while creating the database: " << maybe_db.error().to_string();
@@ -143,7 +145,7 @@ namespace hedge::db
                 this->_deleted_keys.insert(key);
             }
 
-            write_wg.decr();
+            write_wg->decr();
         };
 
         // prepare uuids
@@ -160,7 +162,7 @@ namespace hedge::db
         {
             executor->submit_io_task(make_put_task(i, executor));
         }
-        write_wg.wait();
+        write_wg->wait();
         t1 = std::chrono::high_resolution_clock::now();
 
         duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
@@ -192,88 +194,96 @@ namespace hedge::db
         std::shuffle(this->_key_value_seeds.begin(), this->_key_value_seeds.end(), this->_generator);
 
         sync();
-        auto sleep_time = std::chrono::seconds(10);
+        auto sleep_time = std::chrono::seconds(1);
         std::cout << "Sleeping " << sleep_time.count() << " seconds before starting retrieval to cool down..." << std::endl;
         std::this_thread::sleep_for(sleep_time);
 
-        // this->N_KEYS /= 8; // reduce number of keys to read
-        std::cout << "Starting readback now with " << this->N_KEYS << " keys." << std::endl;
-
-        async::wait_group read_wg;
-        read_wg.set(this->N_KEYS);
-
-        std::atomic_size_t number_of_errors = 0;
-
-        auto make_get_task = [this, &db, &read_wg, &number_of_errors](size_t i, const auto& executor) -> async::task<void>
+        this->N_KEYS /= 8; // reduce number of keys to read
+        for(int i = 0; i < 2; i++)
         {
-            auto [key, seed] = this->_key_value_seeds[i];
+            if(i == 0)
+                std::cout << "Read test - before cache warm up" << std::endl;
+            else
+                std::cout << "Read test - after cache warm up" << std::endl;
 
-            auto maybe_value = co_await db->get_async(key, executor);
+            std::cout << "Starting readback now with " << this->N_KEYS << " keys." << std::endl;
 
-            if(!maybe_value.has_value() && maybe_value.error().code() == errc::DELETED)
+            auto read_wg = hedge::async::wait_group::make_shared();
+            read_wg->set(this->N_KEYS);
+
+            std::atomic_size_t number_of_errors = 0;
+
+            auto make_get_task = [this, &db, &read_wg, &number_of_errors](size_t i, const auto& executor) -> async::task<void>
             {
-                if(!this->_deleted_keys.contains(key))
+                auto [key, seed] = this->_key_value_seeds[i];
+
+                auto maybe_value = co_await db->get_async(key, executor);
+
+                if(!maybe_value.has_value() && maybe_value.error().code() == errc::DELETED)
                 {
-                    number_of_errors++;
-                    std::cerr << "Key should be between the deleteds: " << key << std::endl;
+                    if(!this->_deleted_keys.contains(key))
+                    {
+                        number_of_errors++;
+                        std::cerr << "Key should be between the deleteds: " << key << std::endl;
+                    }
+
+                    read_wg->decr();
+                    co_return;
                 }
 
-                read_wg.decr();
-                co_return;
-            }
+                if(!maybe_value)
+                {
+                    number_of_errors++;
+                    std::cerr << "An error occurred during retrieval for key " << key << ": " << maybe_value.error().to_string() << std::endl;
+                    read_wg->decr();
+                    co_return;
+                }
 
-            if(!maybe_value)
+                [[maybe_unused]] auto& value = maybe_value.value();
+
+                auto expected_value = database_test::make_random_vec_seeded(this->PAYLOAD_SIZE, seed);
+
+                if(value != expected_value)
+                {
+                    std::cerr << "Retrieved value does not match expected value for item nr.  " << i << std::endl;
+                    number_of_errors++;
+                }
+
+                read_wg->decr();
+            };
+
+            t0 = std::chrono::high_resolution_clock::now();
+
+            for(size_t i = 0; i < this->N_KEYS; ++i)
             {
-                number_of_errors++;
-                std::cerr << "An error occurred during retrieval for key " << key << ": " << maybe_value.error().to_string() << std::endl;
-                read_wg.decr();
-                co_return;
+                const auto& executor = async::executor_from_static_pool();
+                executor->submit_io_task(make_get_task(i, executor));
             }
 
-            [[maybe_unused]] auto& value = maybe_value.value();
+            read_wg->wait();
+            t1 = std::chrono::high_resolution_clock::now();
 
-            auto expected_value = database_test::make_random_vec_seeded(this->PAYLOAD_SIZE, seed);
-
-            if(value != expected_value)
+            if(number_of_errors > 0)
             {
-                std::cerr << "Retrieved value does not match expected value for item nr.  " << i << std::endl;
-                number_of_errors++;
+                std::cerr << "Number of errors: " << number_of_errors << std::endl;
+                FAIL() << "Some errors occurred during retrieval.";
             }
 
-            read_wg.decr();
-        };
-
-        t0 = std::chrono::high_resolution_clock::now();
-
-        for(size_t i = 0; i < this->N_KEYS; ++i)
-        {
-            const auto& executor = async::executor_from_static_pool();
-            executor->submit_io_task(make_get_task(i, executor));
+            duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+            std::cout << "Total duration for retrieval: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
+            std::cout << "Average duration per retrieval: " << (double)duration.count() / this->N_KEYS << " us" << std::endl;
+            std::cout << "Retrieval throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000) << " items/s" << std::endl;
+            std::cout << "Retrieval bandwidth: " << (double)this->N_KEYS * (this->PAYLOAD_SIZE / 1024.0) / (duration.count() / 1000.0) << " MB/s" << std::endl;
         }
-
-        read_wg.wait();
-        t1 = std::chrono::high_resolution_clock::now();
-
-        if(number_of_errors > 0)
-        {
-            std::cerr << "Number of errors: " << number_of_errors << std::endl;
-            FAIL() << "Some errors occurred during retrieval.";
-        }
-
-        duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-        std::cout << "Total duration for retrieval: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
-        std::cout << "Average duration per retrieval: " << (double)duration.count() / this->N_KEYS << " us" << std::endl;
-        std::cout << "Retrieval throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000) << " items/s" << std::endl;
-        std::cout << "Retrieval bandwidth: " << (double)this->N_KEYS * (this->PAYLOAD_SIZE / 1024.0) / (duration.count() / 1000.0) << " MB/s" << std::endl;
     }
 
     INSTANTIATE_TEST_SUITE_P(
         test_suite,
         database_test,
         testing::Combine(
-            testing::Values(10'000'000), // n keys
-            testing::Values(100),        // payload size
-            testing::Values(1'000'000)   // memtable capacity
+            testing::Values(80'000'000), // n keys
+            testing::Values(1024),      // payload size
+            testing::Values(2'000'000)  // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)
         {

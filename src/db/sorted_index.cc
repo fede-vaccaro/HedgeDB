@@ -13,8 +13,10 @@
 #include "async/mailbox_impl.h"
 #include "async/task.h"
 #include "fs/fs.hpp"
+#include "page_cache.h"
 #include "sorted_index.h"
 #include "types.h"
+
 namespace hedge::db
 {
 
@@ -93,29 +95,82 @@ namespace hedge::db
         return sorted_index::_find_in_page(key, page_start_ptr, page_end_ptr);
     }
 
-    async::task<expected<std::optional<value_ptr_t>>> sorted_index::lookup_async(const key_t& key, const std::shared_ptr<async::executor_context>& executor) const
+    async::task<expected<std::optional<value_ptr_t>>> sorted_index::lookup_async(const key_t& key, const std::shared_ptr<async::executor_context>& executor, const std::shared_ptr<page_cache>& cache) const
     {
-        // Step 1: Find the potential page ID using the in-memory meta-index.
         auto maybe_page_id = this->_find_page_id(key);
         if(!maybe_page_id)
             co_return std::nullopt;
 
         auto page_id = maybe_page_id.value();
 
-        // Step 2: Calculate the exact byte offset of the required page in the file.
-        // index data starts at `index_start_offset` and pages are contiguous.
         auto page_start_offset = this->_footer.index_start_offset + (page_id * PAGE_SIZE_IN_BYTES);
 
-        // Step 3: Asynchronously load the page data from disk using the executor.
-        // `_load_page_async` handles the io_uring submission and completion.
-        auto maybe_page_ptr = co_await this->_load_page_async(page_start_offset, executor);
-        if(!maybe_page_ptr)
-            co_return maybe_page_ptr.error();
+        std::optional<page_cache::page_guard> opt_page_guard;
+        auto page_tag = to_page_tag(static_cast<uint32_t>(this->fd()), page_start_offset);
+        std::unique_ptr<uint8_t> data; // might be needed for holding a temporary page memory allocation
+        uint8_t* page_ptr = nullptr;
+        bool should_read_from_fs = (cache == nullptr);
 
-        // `maybe_page_ptr.value()` now holds a `unique_ptr<uint8_t>` to the page data.
-        auto* page_start_ptr = reinterpret_cast<index_entry_t*>(maybe_page_ptr.value().get());
+        if(!should_read_from_fs)
+        {
+            auto maybe_page_guard = cache->lookup(page_tag);
 
-        // Step 4: Calculate the end pointer for the loaded page data.
+            if(maybe_page_guard.has_error() && maybe_page_guard.error().code() == errc::BUSY)
+            {
+                should_read_from_fs = true;
+                // std::cout << "read lock busy!!!!\n";
+            }
+            else if(maybe_page_guard.value().has_value())
+            {
+                opt_page_guard = std::move(maybe_page_guard.value().value());
+                page_ptr = opt_page_guard->page_data;
+                // std::cout << "read lock ok!!!!\n";
+            }
+        }
+
+        if(!should_read_from_fs && !opt_page_guard.has_value())
+        {
+            should_read_from_fs = true;
+
+            auto maybe_write_slot = cache->get_write_slot(page_tag);
+            if(maybe_write_slot.has_value())
+            {
+                opt_page_guard = std::move(maybe_write_slot.value());
+                page_ptr = opt_page_guard->page_data;
+                // std::cout << "write lock ok!\n";
+            }
+            else
+            {
+                // should_read_from_fs = true;
+                // std::cout << "write lock busy!!!\n";
+            }
+        }
+
+        if(should_read_from_fs)
+        {
+            if(!opt_page_guard.has_value())
+            {
+                auto* page_mem_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, PAGE_SIZE_IN_BYTES));
+                if(page_mem_ptr == nullptr)
+                {
+                    auto err_msg = std::format(
+                        "Failed to allocate memory for loading page at offset {} from file {}",
+                        page_start_offset,
+                        this->path().string());
+                    co_return hedge::error(err_msg);
+                }
+
+                data = std::unique_ptr<uint8_t>(page_mem_ptr);
+                page_ptr = page_mem_ptr;
+            }
+
+            assert(page_ptr != nullptr);
+            auto maybe_page_ptr = co_await this->_load_page_async(page_start_offset, page_ptr, executor);
+            if(!maybe_page_ptr)
+                co_return maybe_page_ptr.error();
+        }
+
+        auto* page_start_ptr = reinterpret_cast<index_entry_t*>(page_ptr);
         index_entry_t* page_end_ptr = page_start_ptr + INDEX_PAGE_NUM_ENTRIES;
 
         // Adjust the end pointer if this is the last page, which is potentially partially-filled.
@@ -126,25 +181,13 @@ namespace hedge::db
                 page_end_ptr = page_start_ptr + entries_on_last_page;
         }
 
-        // Step 5: Perform the binary search within the loaded page data.
-        co_return sorted_index::_find_in_page(key, page_start_ptr, page_end_ptr);
+        hedge::expected<std::optional<value_ptr_t>> res = sorted_index::_find_in_page(key, page_start_ptr, page_end_ptr);
+
+        co_return res;
     }
 
-    async::task<expected<std::unique_ptr<uint8_t>>> sorted_index::_load_page_async(size_t offset, const std::shared_ptr<async::executor_context>& executor) const
+    async::task<hedge::status> sorted_index::_load_page_async(size_t offset, uint8_t* data_ptr, const std::shared_ptr<async::executor_context>& executor) const
     {
-
-        auto* data_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, PAGE_SIZE_IN_BYTES));
-        if(data_ptr == nullptr)
-        {
-            auto err_msg = std::format(
-                "Failed to allocate memory for loading page at offset {} from file {}",
-                offset,
-                this->path().string());
-            co_return hedge::error(err_msg);
-        }
-
-        auto data = std::unique_ptr<uint8_t>(data_ptr);
-
         auto response = co_await executor->submit_request(
             async::read_request{
                 .fd = this->fd(),
@@ -173,7 +216,7 @@ namespace hedge::db
             co_return hedge::error(err_msg);
         }
 
-        co_return std::move(data);
+        co_return hedge::ok();
     }
 
     std::optional<value_ptr_t> sorted_index::_find_in_page(const key_t& key, const index_entry_t* start, const index_entry_t* end)
@@ -223,42 +266,6 @@ namespace hedge::db
         // TODO: Consider adding fsync logic here or at a higher level if durability is required immediately after update.
 
         co_return hedge::ok(); // Write submitted successfully (completion doesn't guarantee durability yet).
-    }
-
-    async::task<hedge::status> sorted_index::try_update_async(const index_entry_t& entry, const std::shared_ptr<async::executor_context>& executor)
-    {
-        // Try to acquire the compaction mutex without blocking.
-        std::unique_lock<std::mutex> lock(*this->_compaction_mutex, std::try_to_lock);
-        if(!lock.owns_lock())
-            // If locked, it means a compaction is likely happening, so fail fast.
-            co_return hedge::error("Busy, index is being compacted", errc::BUSY);
-
-        // Find the page ID where the key should reside.
-        auto maybe_page_id = this->_find_page_id(entry.key);
-        if(!maybe_page_id)
-            co_return hedge::error("Key not found in meta-index", errc::KEY_NOT_FOUND); // Key definitely not in this file
-
-        auto page_id = maybe_page_id.value();
-
-        // Calculate the offset and load the page asynchronously.
-        auto page_start_offset = this->_footer.index_start_offset + (page_id * PAGE_SIZE_IN_BYTES);
-        auto maybe_page_ptr = co_await this->_load_page_async(page_start_offset, executor);
-        if(!maybe_page_ptr)
-            co_return maybe_page_ptr.error();
-
-        // Determine the valid range within the loaded page.
-        auto* page_start_ptr = reinterpret_cast<index_entry_t*>(maybe_page_ptr.value().get());
-        index_entry_t* page_end_ptr = page_start_ptr + INDEX_PAGE_NUM_ENTRIES;
-        if(page_id == this->_meta_index.size() - 1) // Adjust for potentially partial last page
-        {
-            size_t last_page_size_entries = this->_footer.indexed_keys % INDEX_PAGE_NUM_ENTRIES;
-            if(last_page_size_entries != 0)
-                page_end_ptr = page_start_ptr + last_page_size_entries;
-        }
-
-        // Call the helper function to perform the actual in-page update.
-        // The lock is still held here and released automatically when the function returns/co_returns.
-        co_return co_await this->_update_in_page(entry, page_id, page_start_ptr, page_end_ptr, executor);
     }
 
     void sorted_index::clear_index()

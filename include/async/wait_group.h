@@ -13,7 +13,14 @@ namespace hedge::async
         std::condition_variable _cv;
         std::mutex _mutex;
 
+        wait_group() = default;
+
     public:
+        static std::shared_ptr<wait_group> make_shared()
+        {
+            return std::shared_ptr<wait_group>(new wait_group());
+        }
+
         void set(size_t count)
         {
             this->_counter = count;

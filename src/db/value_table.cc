@@ -91,7 +91,7 @@ namespace hedge::db
 
     hedge::expected<std::shared_ptr<value_table>> value_table::reload(value_table&& other, fs::file::open_mode open_mode, bool use_direct)
     {
-        //     fsync(other.fd());
+        fsync(other.fd());
 
         auto new_file = fs::file::from_path(
             other.path(),

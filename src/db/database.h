@@ -17,6 +17,7 @@
 #include "async/io_executor.h"
 #include "async/task.h"
 #include "async/worker.h"
+#include "db/page_cache.h"
 #include "mem_index.h"
 #include "sorted_index.h"
 #include "types.h"
@@ -54,7 +55,9 @@ namespace hedge::db
         /// Maximum number of concurrent compaction tasks allowed. Will block execution of insertions if exceeded.
         size_t max_pending_compactions = 16;
         /// If true, use O_DIRECT flag for sorted_index file I/O to bypass
-        bool use_odirect_for_indices = false;
+        bool use_odirect_for_indices = true;
+        /// Use 0 no cache is desired; the cache size in bytes otherwise
+        size_t index_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024;
     };
 
     /**
@@ -106,6 +109,9 @@ namespace hedge::db
         // --- Background Workers ---
         /// Worker thread dedicated to handling index compaction jobs.
         async::worker _compaction_worker;
+
+        // Index page cache
+        std::shared_ptr<page_cache> _index_cache;
 
         // --- Utilities ---
         logger _logger{"database"}; ///< Logger instance for database-related messages.

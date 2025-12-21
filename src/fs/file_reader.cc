@@ -30,10 +30,12 @@ namespace hedge::fs
         // round to page size if using direct I/O
         auto actual_num_bytes_to_read = num_bytes_to_read;
 
+        size_t alignment = this->_fd.has_direct_access() ? PAGE_SIZE_IN_BYTES : 1;
+
         if(this->_fd.has_direct_access() && num_bytes_to_read % PAGE_SIZE_IN_BYTES != 0)
             num_bytes_to_read += PAGE_SIZE_IN_BYTES - (num_bytes_to_read % PAGE_SIZE_IN_BYTES);
 
-        auto* data_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, num_bytes_to_read));
+        auto* data_ptr = static_cast<uint8_t*>(aligned_alloc(alignment, num_bytes_to_read));
 
         if(data_ptr == nullptr)
             co_return hedge::error("Failed to allocate aligned memory for file read.");

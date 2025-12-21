@@ -258,7 +258,11 @@ namespace hedge::db
                                 iovec.iov_len - bytes_written);
 
             if(res < 0)
-                return hedge::error(std::format("Failed to write iovec to fd {} at offset {}: {}", fd, lseek(fd, 0, SEEK_CUR), strerror(errno)));
+                return hedge::error(std::format("Failed to write iovec to fd {} at offset {}: {}. Bytes written: {}",
+                                                fd,
+                                                lseek(fd, 0, SEEK_CUR),
+                                                strerror(errno),
+                                                bytes_written));
 
             bytes_written += static_cast<size_t>(res);
         }
@@ -278,7 +282,7 @@ namespace hedge::db
             // Step 2: Write data sections [index, meta-index, footer] sequentially.
             size_t index_size_bytes = sizeof(index_entry_t) * sorted_keys.size();
             size_t index_padding_bytes = compute_alignment_padding<index_entry_t>(sorted_keys.size());
-            size_t meta_index_size_bytes = sizeof(meta_index_entry) * sorted_keys.size();
+            size_t meta_index_size_bytes = sizeof(meta_index_entry) * meta_index.size();
             size_t meta_index_padding_bytes = compute_alignment_padding<meta_index_entry>(meta_index.size());
 
             builder.upper_bound = upper_bound;
@@ -406,9 +410,6 @@ namespace hedge::db
         const sorted_index& right,
         const std::shared_ptr<async::executor_context>& executor)
     {
-        std::unique_lock lk_left(*left._compaction_mutex);
-        std::unique_lock lk_right(*right._compaction_mutex);
-
         /*
         -- Step 0: Validate preconditions and init all the necessary structures --
         */
