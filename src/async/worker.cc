@@ -30,18 +30,18 @@ namespace hedge::async
     void worker::submit(std::function<void()> job)
     {
         {
-            std::unique_lock lk(this->_queue_m);
+            std::lock_guard lk(this->_queue_m);
 
             if(!this->_running)
                 return;
 
-            this->_cv.wait(lk, [this]()
-                           { return this->_job_queue.size() < MAX_JOBS; });
+            // this->_cv.wait(lk, [this]()
+            //                { return this->_job_queue.size() < MAX_JOBS; });
 
             this->_job_queue.emplace_back(std::move(job));
         }
 
-        this->_cv.notify_all();
+        this->_cv.notify_one();
     }
 
     void worker::shutdown()

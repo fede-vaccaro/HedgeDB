@@ -1,4 +1,5 @@
 // Extracted from https://github.com/PacktPublishing/The-Art-of-Writing-Efficient-Programs/blob/master/Chapter07/spinlock.h
+#pragma once 
 
 #include <atomic>
 #include <stdlib.h>
