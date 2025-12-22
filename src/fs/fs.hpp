@@ -442,7 +442,7 @@ namespace hedge::fs
         {
             if(this->_mapped_ptr != nullptr && this->_mapped_ptr != MAP_FAILED)
             {
-                if(munmap(_mapped_ptr, _mapped_size) == -1)
+                if(munmap(this->_mapped_ptr, this->_mapped_size) == -1)
                     perror("Error munmapping file in mmap_wrapper destructor");
             }
         }

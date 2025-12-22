@@ -33,16 +33,17 @@ namespace hedge::db
         static std::vector<uint8_t> make_random_vec_seeded(size_t payload_size, size_t seed)
         {
             static std::shared_mutex m;
-
             static std::unordered_map<size_t, std::vector<uint8_t>> cache;
+
             constexpr size_t MAX_CACHE_ITEMS_CAPACITY = 1024;
 
             size_t hash = seed % MAX_CACHE_ITEMS_CAPACITY;
 
             {
                 std::shared_lock slk(m);
-                if(cache.contains(hash))
-                    return cache[hash];
+                auto it = cache.find(hash);
+                if(it != cache.end())
+                    return it->second;
             }
 
             std::unique_lock lk(m);
@@ -104,7 +105,7 @@ namespace hedge::db
         config.compaction_read_ahead_size_bytes = 32 * 1024 * 1024;
         config.num_partition_exponent = 0;
         config.target_compaction_size_ratio = 1.0 / 3.0;
-        config.use_odirect_for_indices = true;
+        config.use_odirect_for_indices = false;
         // config.index_clock_cache_size_bytes = 0;
         config.index_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024; // 3 GB
 
@@ -154,12 +155,13 @@ namespace hedge::db
             this->make_key_value(this->PAYLOAD_SIZE, i);
         auto t1 = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-        std::cout << "Total duration for UUID generation: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
+        std::cout << "Total duration for key/value generation: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
 
         t0 = std::chrono::high_resolution_clock::now();
-        const auto& executor = async::executor_from_static_pool();
+
         for(size_t i = 0; i < this->N_KEYS; ++i)
         {
+            const auto& executor = async::executor_from_static_pool();
             executor->submit_io_task(make_put_task(i, executor));
         }
         write_wg->wait();
@@ -168,7 +170,7 @@ namespace hedge::db
         duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         std::cout << "Total duration for insertion: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
         std::cout << "Average duration per insertion: " << (double)duration.count() / this->N_KEYS << " us" << std::endl;
-        std::cout << "Insertion bandwidth: " << (double)this->N_KEYS * (this->PAYLOAD_SIZE / 1024.0) / (duration.count() / 1000.0) << " MB/s" << std::endl;
+        std::cout << "Insertion bandwidth: " << (double)this->N_KEYS * (this->PAYLOAD_SIZE / 1024.0 / 1024.0) / (duration.count() / 1'000'000.0) << " MB/s" << std::endl;
         std::cout << "Insertion throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000) << " items/s" << std::endl;
         std::cout << "Deleted keys: " << this->_deleted_keys.size() << std::endl;
 
@@ -282,8 +284,8 @@ namespace hedge::db
         database_test,
         testing::Combine(
             testing::Values(80'000'000), // n keys
-            testing::Values(1024),      // payload size
-            testing::Values(2'000'000)  // memtable capacity
+            testing::Values(1024),       // payload size
+            testing::Values(1'000'000)   // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)
         {

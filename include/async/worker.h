@@ -3,6 +3,7 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <thread>
 #include <mutex>
 
@@ -11,7 +12,9 @@ namespace hedge::async
 
     class worker
     {
-        static constexpr size_t MAX_JOBS = 16;
+        // static constexpr size_t MAX_JOBS = 16;
+        static constexpr size_t MAX_JOBS = std::numeric_limits<size_t>::max();
+
 
         using job_t = std::function<void()>;
 
