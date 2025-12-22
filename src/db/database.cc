@@ -1,11 +1,13 @@
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <future>
 #include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <ranges>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -53,15 +55,23 @@ namespace hedge::db
 
         db->_mem_index.reserve(config.keys_in_mem_before_flush);
 
-        auto new_value_table = value_table::make_new(db->_values_path, 0);
-        if(!new_value_table)
-            return hedge::error("Failed to create initial value table: " + new_value_table.error().to_string());
+        auto first_value_table = value_table::make_new(db->_values_path, 0);
+        if(!first_value_table)
+            return hedge::error("Failed to create initial value table: " + first_value_table.error().to_string());
 
-        db->_current_value_table = std::move(new_value_table.value());
+        db->_current_value_table = std::move(first_value_table.value());
         db->_last_table_id = 0;
+
+        auto pipelined_value_table = value_table::make_new(db->_values_path, 1);
+        if(!pipelined_value_table)
+            return hedge::error("Failed to create next in pipeline value table: " + pipelined_value_table.error().to_string());
+
+        db->_pipelined_value_table = std::move(pipelined_value_table.value());
 
         if(config.index_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB cache
             db->_index_cache = std::make_shared<page_cache>(config.index_clock_cache_size_bytes);
+
+        db->_value_tables.reserve(4096);
 
         return db;
     }
@@ -130,7 +140,6 @@ namespace hedge::db
             if(auto status = this->_rotate_value_table(value_table_local); !status)
                 co_return hedge::error("Failed to rotate value table: " + status.error().to_string());
 
-            value_table_local = this->_current_value_table.load();
             reservation = value_table_local->get_write_reservation(value.size());
         }
 
@@ -304,45 +313,69 @@ namespace hedge::db
         co_return hedge::ok();
     }
 
-    hedge::status database::_rotate_value_table(const std::shared_ptr<value_table>& rotating)
+    hedge::status database::_rotate_value_table(std::shared_ptr<value_table>& rotating)
     {
-        // TODO: This function is blocking and it is too slow, we cannot block for 1ms, so most of the work should be done with the "low priority" (workers) threads
-        // Things to do:
-        // The new value table should be ready before writing to it
-        // Also the WAL strategy might change: we buffer in memory up to X megabytes of values and then we flush them altogheter with the low priority threads
-        // If the WAL (which is not implemented yet) we write each time 
-        // Although, this might increase the compaction pressure since we might have way more memtables
-
-
         auto t0 = std::chrono::high_resolution_clock::now();
-        std::unique_lock lk(this->_value_tables_mutex);
 
-        // This check is needed in case more thread try rotating the value table at the same time
-        // In this case, they will try executing this function with the same `rotating` object (identified from the
-        // underlying pointer).
-        // Only the first thread will rotate the table because `rotating == current`
-        // For the others, `rotation != current` is true, so they know it's been already rotated
-        if(auto current = this->_current_value_table.load(); rotating != current)
+        // This guarantees that the CAS will fail
+        // Better do an early exit without holding the mutex
+        if(auto curr = this->_current_value_table.load(std::memory_order::relaxed); curr != rotating)
+        {
+            rotating = curr;
+            return hedge::ok();
+        }
+
+        auto pending = this->_pipelined_value_table.load(std::memory_order::relaxed);
+        
+        while(pending == nullptr)
+        {
+            this->_pipelined_value_table.wait(nullptr);
+            pending = this->_pipelined_value_table.load();
+        }
+
+        size_t next_id{};
+
+        if(!this->_current_value_table.compare_exchange_strong(rotating, pending))
             return hedge::ok();
 
-        this->_logger.log("Rotating value table");
+        this->_pipelined_value_table.store(nullptr);
 
-        auto new_value_table = value_table::make_new(this->_values_path, 1 + this->_last_table_id.fetch_add(1, std::memory_order_relaxed));
-        if(!new_value_table)
-            return hedge::error("Failed to create new value table: " + new_value_table.error().to_string());
+        next_id = this->_last_table_id.fetch_add(1, std::memory_order_relaxed) + 2; // The currently pipelined value table is already last + 1
 
-        auto old_vt = this->_current_value_table.exchange(std::move(new_value_table.value()));
-
-        // reload old_vt with o_direct
-        auto reloaded_old_vt = value_table::reload(std::move(*old_vt), fs::file::open_mode::read_only, true);
+        auto reloaded_old_vt = value_table::reload(std::move(*rotating), fs::file::open_mode::read_only, true);
 
         if(!reloaded_old_vt)
             return hedge::error("Failed to reload old value table with O_DIRECT: " + reloaded_old_vt.error().to_string());
 
-        this->_value_tables[old_vt->id()] = std::move(reloaded_old_vt.value());
+        // TODO: fix this race condition: between the CAS and the expression, the old value won't be available
+        {
+            std::lock_guard lk(this->_value_tables_mutex);
+            this->_value_tables[reloaded_old_vt.value()->id()] = std::move(reloaded_old_vt.value());
+        }
+
+        this->_flush_worker.submit(
+            [this, next_id]()
+            {
+                auto t0 = std::chrono::high_resolution_clock::now();
+                auto new_value_table = value_table::make_new(this->_values_path, next_id);
+                if(!new_value_table)
+                {
+                    this->_logger.log("Failed to create new value table: " + new_value_table.error().to_string());
+                    return;
+                }
+
+                this->_pipelined_value_table.store(new_value_table.value());
+                this->_pipelined_value_table.notify_all();
+
+                auto t1 = std::chrono::high_resolution_clock::now();
+                auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+                this->_logger.log("Prepared new value table in ", (double)duration.count() / 1000.0, " ms");
+            });
+
         auto t1 = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-        this->_logger.log("Value table rotated in ", (double)duration.count() / 1000.0, " ms");
+        [[maybe_unused]] auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+
+        // this->_logger.log("Value table rotated in ", (double)duration.count(), " us, pushing job required ", (double)submit_job_duration.count());
 
         return hedge::ok();
     }
@@ -371,12 +404,12 @@ namespace hedge::db
             return hedge::error("An error occurred while flushing the mem index: " + partitioned_sorted_indices.error().to_string());
 
         {
-            std::unique_lock lk(this->_pending_flushes_mutex);
+            std::lock_guard lk(this->_pending_flushes_mutex);
             this->_pending_flushes.erase(flush_iteration);
         }
 
         {
-            std::unique_lock lk(this->_sorted_index_mutex);
+            std::lock_guard lk(this->_sorted_index_mutex);
 
             for(auto& new_sorted_index : partitioned_sorted_indices.value())
             {

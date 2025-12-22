@@ -42,7 +42,6 @@ set(DB_SOURCES
     src/types.h
     src/utils.cc
     src/utils.h
-    src/async/spinlock.h
     src/db/sorted_index.cc
     src/db/sorted_index.h
     src/db/index_ops.cc
@@ -80,7 +79,6 @@ target_link_libraries(index_test gtest gtest_main uring)
 # index (delete and merge) tests
 add_executable(index_delete_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_delete.spec.cc)
 target_link_libraries(index_delete_test gtest gtest_main uring)
-
 
 # paginated_view tests
 add_executable(file_reader_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/file_reader.spec.cc)

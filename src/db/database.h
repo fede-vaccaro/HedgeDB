@@ -91,7 +91,7 @@ namespace hedge::db
         sorted_indices_map_t _sorted_indices;   ///< In-memory map representing the LSM tree levels/files.
 
         std::atomic_size_t _last_table_id{0};  ///< Atomic ID counter for the next value_table file to be created.
-        std::shared_mutex _value_tables_mutex; ///< Protects access to the `_value_tables` map.
+        std::shared_mutex _value_tables_mutex{}; ///< Protects access to the `_value_tables` map.
 
         /// Map storing shared pointers to older, non-current value_table files, keyed by their ID.
         std::unordered_map<uint32_t, std::shared_ptr<value_table>> _value_tables;
@@ -99,6 +99,7 @@ namespace hedge::db
         // --- Current/Mutable State ---
         /// Shared pointer to the currently active value_table file where new values are written.
         std::atomic<std::shared_ptr<value_table>> _current_value_table;
+        std::atomic<std::shared_ptr<value_table>> _pipelined_value_table; // TODO: switch to hedge::expected<...>
 
         /// Mutex protecting access to the mem_index (memtable).
         async::rw_spinlock _mem_index_mutex;
@@ -109,7 +110,9 @@ namespace hedge::db
 
         // --- Background Workers ---
         /// Worker thread dedicated to handling index compaction jobs.
-        async::worker _compaction_worker;
+        async::worker _compaction_worker{};
+        async::worker _flush_worker{};
+
 
         // Index page cache
         std::shared_ptr<page_cache> _index_cache;
@@ -244,7 +247,7 @@ namespace hedge::db
          *                 another thread had already rotate it.
          * @return Status indicating success or failure.
          */
-        hedge::status _rotate_value_table(const std::shared_ptr<value_table>& rotating);
+        hedge::status _rotate_value_table(std::shared_ptr<value_table>& rotating);
         /**
          * @brief Flushes the contents of the `_mem_index` to new `sorted_index` file(s) on disk.
          * Clears the `_mem_index` afterwards. Manages partitioning and file naming.

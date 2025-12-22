@@ -4,8 +4,8 @@
 #include <deque>
 #include <functional>
 #include <limits>
-#include <thread>
 #include <mutex>
+#include <thread>
 
 namespace hedge::async
 {
@@ -14,7 +14,6 @@ namespace hedge::async
     {
         // static constexpr size_t MAX_JOBS = 16;
         static constexpr size_t MAX_JOBS = std::numeric_limits<size_t>::max();
-
 
         using job_t = std::function<void()>;
 
@@ -28,11 +27,11 @@ namespace hedge::async
     public:
         worker();
         ~worker();
-        
+
         void submit(std::function<void()> job);
         void shutdown();
 
     private:
         void _run();
     };
-} // namespace hedge::db
+} // namespace hedge::async
