@@ -87,10 +87,14 @@ public:
 
 std::atomic_uint64_t atomic_counter = 0;
 
-hedge::async::task<void> get_obj(hedge::async::read_request r, [[maybe_unused]] hedge::async::read_request r2, hedge::async::executor_context& executor, working_group& wg)
+hedge::async::task<void> get_obj(hedge::async::read_request r, [[maybe_unused]] hedge::async::read_request r2, [[maybe_unused]] hedge::async::executor_context& executor, working_group& wg)
 {
-    auto response = co_await executor.submit_request(r);
+    [[maybe_unused]]  auto data_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE, PAGE_SIZE));
+    r.data = data_ptr;
 
+    [[maybe_unused]] auto response_f = co_await executor.submit_request(r);
+
+    free(data_ptr);
     // auto response2 = co_await executor.submit_request(r2);
 
     // auto response3 = co_await executor.submit_request(r);
@@ -133,14 +137,14 @@ int main()
     const uint32_t QUEUE_DEPTH = 128;
     std::vector<std::shared_ptr<hedge::async::executor_context>> contexts;
 
-    for(int i = 0; i < 4; ++i)
+    for(int i = 0; i < 8; ++i)
         contexts.emplace_back(std::make_shared<hedge::async::executor_context>(QUEUE_DEPTH));
 
     std::vector<int> fds;
     size_t file_size = 0;
-    for(int i = 0; i < 4; ++i)
+    for(int i = 0; i < 1; ++i)
     {
-        auto [fd, size] = open_fd(INDEX_PATH, false);
+        auto [fd, size] = open_fd(INDEX_PATH, true);
         posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM);
         fds.push_back(fd);
         file_size = size;
@@ -149,7 +153,7 @@ int main()
     auto rng = std::mt19937(std::random_device{}());
     auto dist = std::uniform_int_distribution<size_t>(0, file_size / PAGE_SIZE - 10);
 
-    auto N_REQUESTS = 20000000UL;
+    auto N_REQUESTS = 10000000UL;
     wg.set(N_REQUESTS);
 
     std::vector<size_t> offsets;

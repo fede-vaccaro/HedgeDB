@@ -52,7 +52,7 @@ namespace hedge::async
 
     executor_context::executor_context(uint32_t queue_depth) : _queue_depth(queue_depth), _max_buffered_requests(queue_depth * 4)
     {
-        int ret = io_uring_queue_init(this->_queue_depth, &this->_ring, IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER);
+        int ret = io_uring_queue_init(this->_queue_depth, &this->_ring, 0);
 
         if(ret < 0)
             throw std::runtime_error("error with io_uring_queue_init: "s + strerror(-ret));

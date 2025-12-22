@@ -306,6 +306,14 @@ namespace hedge::db
 
     hedge::status database::_rotate_value_table(const std::shared_ptr<value_table>& rotating)
     {
+        // TODO: This function is blocking and it is too slow, we cannot block for 1ms, so most of the work should be done with the "low priority" (workers) threads
+        // Things to do:
+        // The new value table should be ready before writing to it
+        // Also the WAL strategy might change: we buffer in memory up to X megabytes of values and then we flush them altogheter with the low priority threads
+        // If the WAL (which is not implemented yet) we write each time 
+        // Although, this might increase the compaction pressure since we might have way more memtables
+
+
         auto t0 = std::chrono::high_resolution_clock::now();
         std::unique_lock lk(this->_value_tables_mutex);
 

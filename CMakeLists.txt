@@ -42,6 +42,7 @@ set(DB_SOURCES
     src/types.h
     src/utils.cc
     src/utils.h
+    src/async/spinlock.h
     src/db/sorted_index.cc
     src/db/sorted_index.h
     src/db/index_ops.cc

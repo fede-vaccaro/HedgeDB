@@ -15,6 +15,7 @@
 #include <sys/types.h> // POSIX types, consider if needed or include specific headers like <fcntl.h> if used
 
 #include "async/io_executor.h"
+#include "async/spinlock.h"
 #include "async/task.h"
 #include "async/worker.h"
 #include "db/page_cache.h"
@@ -100,7 +101,7 @@ namespace hedge::db
         std::atomic<std::shared_ptr<value_table>> _current_value_table;
 
         /// Mutex protecting access to the mem_index (memtable).
-        std::shared_mutex _mem_index_mutex;
+        async::rw_spinlock _mem_index_mutex;
         mem_index _mem_index;
 
         std::shared_mutex _pending_flushes_mutex;
