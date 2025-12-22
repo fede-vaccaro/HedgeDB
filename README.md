@@ -1,4 +1,4 @@
-# HedgeDB
+# HedgeDB - _Built for the Hardware_
 
 <p align="center">
 <img src="resources/logo.png" width="100%">
@@ -8,35 +8,43 @@ HedgeDB is a prototype of a larger-than-memory, persisted and embeddable key-val
 
 **Disclaimer**: as you might expect from a prototype it was not extensively tested, nor the code can be considered production ready.
 
-So far it is only Linux compatible as it heavily leverage [liburing](https://github.com/axboe/liburing), amongst other Linux syscalls.
+So far it is only Linux compatible as it heavily leverage [liburing](https://github.com/axboe/liburing), amongst other Linux syscalls; also [tcmalloc](https://github.com/google/tcmalloc) is recommended.
 
-## Features
+## Features & design principles
 
-### Implemented
-
-- **Exclusive UUIDv4 support**: So far, this storage is strictly optimized just to accept UUIDv4 (16 bytes) keys. The Index design follows the assumption that the keys are randomly distrubuted over the key space. In future might support smaller or up to 48 bytes sized keys.
+- **Fiber-style job scheduling**: A brand new and custom `executor` has been implemented to provide an abstraction layer over the [liburing](https://github.com/axboe/liburing) for maximizing the available hardware IOPS; C++20 coroutines and other concurrency facilities have been exploited to strees a modern NVMe SSD at full capacity, while still exposing an API that is familiar to many developers.
 
 - **Separated Index and Value files**: Following the state of the art design of [WiscKey](https://www.usenix.org/system/files/conference/fast16/fast16-papers-lu.pdf), the HedgeDB's LSM tree is implemented through the separation between Index and Value files, allowing for an efficient look-up and compaction.
 
-- **Online and latch-free compaction**: Index compaction is automatically triggered when certain criteria are met. Also, when the compaction is running, the database will keep being available.
+- **Latch-free**: Write and read paths are designed to be almost lock-free: value table instantiation, data flush, compaction, cache access, every operation is written to be lock free or at least to lock for very few operations.
 
-- **Fiber-style job scheduling**: A brand new and custom `executor` has been implemented for maximizing the SSD usage, leveraging concurrency and C++20 coroutines to fully utilize a modern NVMe SSD while exposing an API that is familiar to many developers.
+- **Lightweight dependencies**: One of the core principles of this project is being self-contained as much as possible, escaping the dependency hell that plagues software today.
 
-#### TODO
+- **Memory Aware design**: Memory consumption and performance should be predictable: the user is able to control the trade-off between memory consumption and performance. Also, the database is meant to be transparent in regards of the OS buffered I/O (files can be opened with `O_DIRECT`).
 
-- [ ] **Values garbage collection**: space from deleted values is not freed yet.
+### TODOs: _(in random order of priority)_
 
-- [ ] **Key/Value update**: Key update feature should follow the deletion right away, but a value update was not implemented yet.
+- [ ] **Abitrary sized-keys**: 16 byte keys might be a commond use case, but it's too limiting; for the sake of prototyping I sticked to this case
 
-- [ ] **Multi-threaded executor**: the fiber executor runs every operation on a single thread, but one thread is not enough to fully stress a modern NVME.
+- [ ] **Values garbage collection**: space from deleted values is never reclaimed.
+
+- [ ] **Key/Value update**: Key update should follow the same logic for Key deletion, but it's not been tested.
+
+- [x] **Multi-threaded executor**: the fiber executor runs every operation on a single thread, but one thread is not enough to fully stress a modern NVME.
 
 - [ ] **Write-ahead Log (WAL) & crash recovery**: if any fault occur during write, there might be some data loss and/or the database will end up in an undefined state. This feature is fundamental for a production-ready storage.
 
 - [x] **General purpose API**: currently the `database` class API is only usable within a `async::task<void>` (which can be spawned on the `executor`); a callback-based API would improve the database usability.
 
-- [ ] **Add arguments to the example**: just for sandboxing
+- [ ] **Add arguments to the example**: just for sandboxing & testing.
 
 - [ ] Optional **Bloom filters** in front of each `sorted_index`: by using such filters, we can reduce write amplification (by accepting more tables in the same group with minor compaction pressure) and keeping a low read amplification, by trading-off some memory.
+
+- [x] RC-CLOCK cache (Reference-Counted CLOCK) cache (currently only implemented for the Index).
+
+- [ ] Merge procedure refactoring: I believe it is the most complicated code within this project: it must to be refactored soon or later.
+
+- [ ] Ranged iterators: the use case I focused on is random look-ups; although, ranged search is supported from every database and could be supported here too.
 
 ## Compile & install
 
@@ -93,77 +101,97 @@ Might be useful to raise the number of file descriptors, though:
 ulimit -n 1048576
 ```
 
-Then, for starting the test:
+For starting a benchmark with 80M key (16 bytes) values (1024 bytes):
 
 ```bash
 $ ./build/database_test
 [==========] Running 1 test from 1 test suite.
 [----------] Global test environment set-up.
 [----------] 1 test from test_suite/database_test
-[ RUN      ] test_suite/database_test.database_comprehensive_test/N_75000000_P_1024_C_1000000
+[ RUN      ] test_suite/database_test.database_comprehensive_test/N_80000000_P_1024_C_1000000
+Total duration for key/value generation: 4204.69 ms
 [LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
-[database] Flushing mem index to "/tmp/db/indices" with number of items: 1000232
+[LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
+[LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
+[LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
+[LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
+[LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
+[LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
+[LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
+[database] ... 
+Total duration for insertion: 150840 ms
+Average duration per insertion: 1.8855 us
+Insertion bandwidth: 517.933 MB/s
+Insertion throughput: 530363 items/s
+Deleted keys: 0
 [database] Starting compaction job
-...
-...
-...
-Total duration for insertion: 318637 ms
-Average duration per insertion: 4.2485 us
-Insertion bandwidth: 235.377 MB/s
-[database] Starting compaction job
-Total duration for compaction: 8959.92 ms
-Total duration for retrieval: 202777 ms
-Average duration per retrieval: 2.70369 us
-Retrieval bandwidth: 369.865 MB/s
-Closing uring_reader.
-[       OK ] test_suite/database_test.database_comprehensive_test/N_75000000_P_1024_C_1000000 (530521 ms)
-[----------] 1 test from test_suite/database_test (530521 ms total)
+[database] Compaction job completed successfully
+[database] Total duration for compaction: 67242.1 ms
+Total duration for a full compaction: 67242.1 ms
+syncing...
+Sleeping 1 seconds before starting retrieval to cool down...
+Read test - before cache warm up
+Starting readback now with 10000000 keys.
+Total duration for retrieval: 14732.6 ms
+Average duration per retrieval: 1.47326 us
+Retrieval throughput: 678766 items/s
+Retrieval bandwidth: 678.767 MB/s
+Read test - after cache warm up
+Starting readback now with 10000000 keys.
+Total duration for retrieval: 12420.5 ms
+Average duration per retrieval: 1.24205 us
+Retrieval throughput: 805118 items/s
+Retrieval bandwidth: 805.118 MB/s
+[       OK ] test_suite/database_test.database_comprehensive_test/N_80000000_P_1024_C_1000000 (256117 ms)
+[----------] 1 test from test_suite/database_test (256117 ms total)
 
 [----------] Global test environment tear-down
-[==========] 1 test from 1 test suite ran. (530521 ms total)
+[==========] 1 test from 1 test suite ran. (256117 ms total)
 [  PASSED  ] 1 test.
 ```
 
-To summarize, running on a `13th Gen Intel(R) Core(TM) i7-13700H` with 32GB and a `SAMSUNG MZVL21T0HDLU-00BLL` SSD:
+To summarize, running on a `13th Gen Intel(R) Core(TM) i7-13700H` with 8 threads, 32GB of ram and a `SAMSUNG MZVL21T0HDLU-00BLL` SSD:
 
-- **~370.000** reads/s
-- **~235.000** write/s including compaction
+- **~805.000** reads/s (3GB for index cache)
+- **~530.000** write/s
 
-For comparison, here's a single threaded `fiotest` 30-seconds run on my machine:
+For comparison, here's a single threaded `fio` 30-seconds run on my machine: it records
+**841k IOPS** on my device.
 
 ```bash
-/tmp$ fio --name=randread     --filename=testfile     --rw=randread     --bs=4k     --iodepth=128     --numjobs=1     --direct=1     --size=20G     --time_based     --runtime=30s     --ioengine=io_uring --group_reporting
+/tmp$ fio --name=randread     --filename=testfile     --rw=randread     --bs=4k     --iodepth=128     --numjobs=8     --direct=1     --size=20G     --time_based     --runtime=30s     --ioengine=io_uring --group_reporting
 randread: (g=0): rw=randread, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=io_uring, iodepth=128
+...
 fio-3.36
-Starting 1 process
-Jobs: 1 (f=1): [r(1)][100.0%][r=1407MiB/s][r=360k IOPS][eta 00m:00s]6s]
-randread: (groupid=0, jobs=1): err= 0: pid=2485307: Sat Aug 30 17:17:26 2025
-  read: IOPS=357k, BW=1396MiB/s (1463MB/s)(40.9GiB/30001msec)
-    slat (nsec): min=1088, max=139801, avg=2491.74, stdev=1488.34
-    clat (usec): min=53, max=9306, avg=355.50, stdev=44.14
-     lat (usec): min=54, max=9311, avg=357.99, stdev=44.18
+Starting 8 processes
+Jobs: 8 (f=8): [r(8)][100.0%][r=3287MiB/s][r=841k IOPS][eta 00m:00s]
+randread: (groupid=0, jobs=8): err= 0: pid=550915: Mon Dec 22 20:10:24 2025
+  read: IOPS=840k, BW=3283MiB/s (3443MB/s)(96.2GiB/30002msec)
+    slat (nsec): min=1194, max=1038.6k, avg=3510.93, stdev=2160.09
+    clat (usec): min=111, max=9587, avg=1214.27, stdev=288.30
+     lat (usec): min=124, max=9594, avg=1217.78, stdev=288.29
     clat percentiles (usec):
-     |  1.00th=[  314],  5.00th=[  322], 10.00th=[  326], 20.00th=[  334],
-     | 30.00th=[  338], 40.00th=[  343], 50.00th=[  351], 60.00th=[  355],
-     | 70.00th=[  363], 80.00th=[  375], 90.00th=[  392], 95.00th=[  412],
-     | 99.00th=[  457], 99.50th=[  478], 99.90th=[  578], 99.95th=[  685],
-     | 99.99th=[  996]
-   bw (  MiB/s): min= 1277, max= 1423, per=100.00%, avg=1395.90, stdev=41.65, samples=59
-   iops        : min=327128, max=364334, avg=357351.17, stdev=10661.98, samples=59
-  lat (usec)   : 100=0.01%, 250=0.02%, 500=99.69%, 750=0.27%, 1000=0.01%
-  lat (msec)   : 2=0.01%, 10=0.01%
-  cpu          : usr=15.45%, sys=84.47%, ctx=1798, majf=0, minf=148
+     |  1.00th=[  330],  5.00th=[  717], 10.00th=[  979], 20.00th=[ 1057],
+     | 30.00th=[ 1106], 40.00th=[ 1156], 50.00th=[ 1205], 60.00th=[ 1254],
+     | 70.00th=[ 1303], 80.00th=[ 1385], 90.00th=[ 1532], 95.00th=[ 1680],
+     | 99.00th=[ 2008], 99.50th=[ 2147], 99.90th=[ 2507], 99.95th=[ 2704],
+     | 99.99th=[ 4686]
+   bw (  MiB/s): min= 3164, max= 3355, per=100.00%, avg=3284.92, stdev= 4.26, samples=472
+   iops        : min=810168, max=859132, avg=840940.37, stdev=1090.28, samples=472
+  lat (usec)   : 250=0.36%, 500=2.22%, 750=2.81%, 1000=6.42%
+  lat (msec)   : 2=87.14%, 4=1.04%, 10=0.01%
+  cpu          : usr=9.23%, sys=42.22%, ctx=9872036, majf=0, minf=1113
   IO depths    : 1=0.1%, 2=0.1%, 4=0.1%, 8=0.1%, 16=0.1%, 32=0.1%, >=64=100.0%
      submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
      complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.1%
-     issued rwts: total=10719278,0,0,0 short=0,0,0,0 dropped=0,0,0,0
+     issued rwts: total=25216190,0,0,0 short=0,0,0,0 dropped=0,0,0,0
      latency   : target=0, window=0, percentile=100.00%, depth=128
 
 Run status group 0 (all jobs):
-   READ: bw=1396MiB/s (1463MB/s), 1396MiB/s-1396MiB/s (1463MB/s-1463MB/s), io=40.9GiB (43.9GB), run=30001-30001msec
+   READ: bw=3283MiB/s (3443MB/s), 3283MiB/s-3283MiB/s (3443MB/s-3443MB/s), io=96.2GiB (103GB), run=30002-30002msec
 
 Disk stats (read/write):
-    dm-1: ios=10682351/239, sectors=85458816/2160, merge=0/0, ticks=852438/100, in_queue=852538, util=99.70%, aggrios=10719288/241, aggsectors=85754312/2184, aggrmerge=0/0, aggrticks=851889/100, aggrin_queue=851989, aggrutil=99.64%
-    dm-0: ios=10719288/241, sectors=85754312/2184, merge=0/0, ticks=851889/100, in_queue=851989, util=99.64%, aggrios=10719288/198, aggsectors=85754312/2184, aggrmerge=0/43, aggrticks=811677/104, aggrin_queue=811821, aggrutil=79.33%
-  nvme0n1: ios=10719288/198, sectors=85754312/2184, merge=0/43, ticks=811677/104, in_queue=811821, util=79.33%
+    dm-1: ios=25127635/59, sectors=201022488/496, merge=0/0, ticks=30366683/39, in_queue=30366722, util=99.70%, aggrios=25216452/59, aggsectors=201733024/496, aggrmerge=0/0, aggrticks=30463880/39, aggrin_queue=30463919, aggrutil=99.64%
+    dm-0: ios=25216452/59, sectors=201733024/496, merge=0/0, ticks=30463880/39, in_queue=30463919, util=99.64%, aggrios=25216377/54, aggsectors=201733024/496, aggrmerge=75/5, aggrticks=30379911/22, aggrin_queue=30379936, aggrutil=87.73%
+  nvme0n1: ios=25216377/54, sectors=201733024/496, merge=75/5, ticks=30379911/22, in_queue=30379936, util=87.73%
 ```
