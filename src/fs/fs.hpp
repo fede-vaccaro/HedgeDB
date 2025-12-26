@@ -93,7 +93,7 @@ namespace hedge::fs
             if(!exists && mode == open_mode::read_only)
                 return hedge::error("File does not exist: " + path.string());
 
-            if(exists && mode == open_mode::write_new)
+            if(exists && (mode == open_mode::write_new || mode == open_mode::read_write_new))
                 return hedge::error("File already exists: " + path.string());
 
             // Open the file;
@@ -450,6 +450,12 @@ namespace hedge::fs
         [[nodiscard]] void* get_ptr() const
         {
             return this->_mapped_ptr;
+        }
+
+        template <typename T>
+        [[nodiscard]] T* get_ptr() const
+        {
+            return static_cast<T*>(this->_mapped_ptr);
         }
 
         [[nodiscard]] size_t size() const

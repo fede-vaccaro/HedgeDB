@@ -39,7 +39,7 @@ namespace hedge::db
          * @return An `expected<sorted_index>` containing the loaded `sorted_index` object on success,
          * or an error if the file cannot be opened, read, or is malformed.
          */
-        static hedge::expected<sorted_index> load_sorted_index(const std::filesystem::path& path, bool load_index = false);
+        static hedge::expected<sorted_index> load_sorted_index(const std::filesystem::path& path, bool use_direct, bool load_index = false);
 
         /**
          * @brief Creates a new `sorted_index` file on disk from a sorted vector of index entries.

@@ -1,13 +1,11 @@
 #pragma once
 
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <future>
 #include <map>
 #include <memory>
-#include <mutex>
 
 #include <error.hpp>
 #include <logger.h>
@@ -90,7 +88,7 @@ namespace hedge::db
         std::shared_mutex _sorted_index_mutex;  ///< Protects access to the `_sorted_indices` map.
         sorted_indices_map_t _sorted_indices;   ///< In-memory map representing the LSM tree levels/files.
 
-        std::atomic_size_t _last_table_id{0};  ///< Atomic ID counter for the next value_table file to be created.
+        std::atomic_size_t _last_table_id{0};    ///< Atomic ID counter for the next value_table file to be created.
         std::shared_mutex _value_tables_mutex{}; ///< Protects access to the `_value_tables` map.
 
         /// Map storing shared pointers to older, non-current value_table files, keyed by their ID.
@@ -104,6 +102,7 @@ namespace hedge::db
         /// Mutex protecting access to the mem_index (memtable).
         async::rw_spinlock _mem_index_mutex;
         mem_index _mem_index;
+        std::atomic_size_t _mem_index_size{0};
 
         std::shared_mutex _pending_flushes_mutex;
         std::map<size_t, mem_index> _pending_flushes; ///< Tracks memtables currently being flushed to disk.
@@ -112,7 +111,6 @@ namespace hedge::db
         /// Worker thread dedicated to handling index compaction jobs.
         async::worker _compaction_worker{};
         async::worker _flush_worker{};
-
 
         // Index page cache
         std::shared_ptr<page_cache> _index_cache;
@@ -210,7 +208,7 @@ namespace hedge::db
          * @param base_path The root directory of the existing database.
          * @return An expected containing a shared pointer to the loaded database instance or an error.
          */
-        static expected<std::shared_ptr<database>> load(const std::filesystem::path& base_path);
+        static expected<std::shared_ptr<database>> load(const std::filesystem::path& base_path, const db_config& config);
 
         /**
          * @brief Manually triggers a flush of the current memtable to disk if size criteria are met.

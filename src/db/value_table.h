@@ -74,28 +74,40 @@ namespace hedge::db
      *  Inherits from `fs::file` to manage the underlying file descriptor.
      *
      *  File Layout:
-     *  [file_header_0][value_data_0]
-     *  [file_header_1][value_data_1]
+     *  [file_header_0][value_data_0][padding to page size if necessary]
+     *  [file_header_1][value_data_1][padding to page size if necessary]
      *  ...
-     *  [file_header_N][value_data_N]
+     *  [file_header_N][value_data_N][padding to page size if necessary]
      *  [EOF_MARKER]
      *  --- blank space if any ---
      *  [value_table_info]
      */
     class value_table : public fs::file
     {
+        struct write_buffer
+        {
+            std::vector<uint8_t> buffer;
+            std::atomic_size_t buffer_head;
+            std::atomic_size_t offset;
+
+            write_buffer() = default;
+            explicit write_buffer(size_t capacity) : buffer(capacity), buffer_head(0) { assert(capacity % PAGE_SIZE_IN_BYTES == 0); }
+        };
+
         uint32_t _unique_id;                   ///< Unique identifier for this value table file.
         std::atomic_size_t _current_offset{0}; ///< Current write offset within the file.
-        std::recursive_mutex _delete_mutex{};  ///< Mutex to protect delete operations (potentially during GC).
-        std::recursive_mutex _info_mutex{};
-        std::optional<fs::mmap_view> _mmap; // mmap for write only if not direct IO
+        std::optional<fs::mmap_view> _mmap;    // mmap for write only if not direct IO
+
+        size_t _buffer_capacity = PAGE_SIZE_IN_BYTES * 16;
+        write_buffer _write_buffer;
 
         /** @brief Default constructor (private). Use factory methods. */
         value_table() = default;
         /** @brief Private constructor used by factory methods. */
         value_table(uint32_t unique_id, size_t current_offset, fs::file file_descriptor)
-            : fs::file(std::move(file_descriptor)), _unique_id(unique_id), _current_offset(current_offset) {
-            }
+            : fs::file(std::move(file_descriptor)), _unique_id(unique_id), _current_offset(current_offset), _write_buffer(PAGE_SIZE_IN_BYTES * 16)
+        {
+        }
 
     public:
         /** @brief File extension used for value table files. */
@@ -167,6 +179,8 @@ namespace hedge::db
          */
         async::task<expected<hedge::value_ptr_t>> write_async(key_t key, const std::vector<uint8_t>& value, const write_reservation& reservation, const std::shared_ptr<async::executor_context>& executor);
 
+        void _flush_buffer();
+
         /**
          * @brief Asynchronously reads a value entry (header + data) from a specific offset and size.
          * @param file_offset The starting byte offset of the `file_header`.
@@ -204,7 +218,7 @@ namespace hedge::db
          * @param open_mode The mode to open the file in (e.g., read-only, read-write).
          * @return `expected<value_table>` containing the loaded table object or an error.
          */
-        static hedge::expected<std::shared_ptr<value_table>> load(const std::filesystem::path& path, fs::file::open_mode open_mode);
+        static hedge::expected<std::shared_ptr<value_table>> load(const std::filesystem::path& path, fs::file::open_mode open_mode, bool use_direct = false);
 
         static hedge::expected<std::shared_ptr<value_table>> reload(value_table&& other, fs::file::open_mode open_mode, bool direct);
 

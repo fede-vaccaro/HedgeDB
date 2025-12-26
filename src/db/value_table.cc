@@ -91,8 +91,6 @@ namespace hedge::db
 
     hedge::expected<std::shared_ptr<value_table>> value_table::reload(value_table&& other, fs::file::open_mode open_mode, bool use_direct)
     {
-        fsync(other.fd());
-
         auto new_file = fs::file::from_path(
             other.path(),
             open_mode,
@@ -311,16 +309,15 @@ namespace hedge::db
         // return hedge::error("Failed to mmap value table file: " + maybe_mmap_view.error().to_string());
 
         // vt->_mmap = std::move(maybe_mmap_view.value());
-
         return vt;
     }
 
-    hedge::expected<std::shared_ptr<value_table>> value_table::load(const std::filesystem::path& path, fs::file::open_mode open_mode)
+    hedge::expected<std::shared_ptr<value_table>> value_table::load(const std::filesystem::path& path, fs::file::open_mode open_mode, bool use_direct)
     {
         if(!std::filesystem::exists(path))
             return hedge::error("File does not exist: " + path.string());
 
-        auto file_descriptor = fs::file::from_path(path, open_mode, false); // Assuming no O_DIRECT for now.
+        auto file_descriptor = fs::file::from_path(path, open_mode, use_direct);
 
         if(!file_descriptor)
             return hedge::error("Failed to open file descriptor: " + file_descriptor.error().to_string());

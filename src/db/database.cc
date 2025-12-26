@@ -2,14 +2,10 @@
 #include <atomic>
 #include <chrono>
 #include <future>
-#include <iterator>
-#include <limits>
 #include <memory>
 #include <mutex>
 #include <ranges>
-#include <stdexcept>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <utility>
 
@@ -76,24 +72,93 @@ namespace hedge::db
         return db;
     }
 
-    expected<std::shared_ptr<database>> database::load(const std::filesystem::path& /* base_path */)
+    expected<std::shared_ptr<database>> database::load(const std::filesystem::path& base_path, const db::db_config& config)
     {
-        // TODO: Implement database loading:
-        // 1. Read manifest file (contains config, last table ID, index file list, etc.).
-        // 2. Validate paths and configuration.
-        // 3. Load all sorted_index files mentioned in the manifest into `_sorted_indices`.
-        // 4. Load all value_table files (except the current one) into `_value_tables`.
-        // 5. Load the most recent value_table as `_current_value_table`.
-        // 6. Potentially replay WAL if implemented.
+        auto db = std::shared_ptr<database>(new database());
+
+        db->_base_path = base_path;
+        db->_indices_path = base_path / "indices";
+        db->_values_path = base_path / "values";
+
+        // TODO: consinstency check
+        db->_config = config;
+
+        db->_mem_index.reserve(config.keys_in_mem_before_flush);
+
+        // Load SSTs
+        size_t max_flush_iteration = 0;
+        for(const auto& entry : std::filesystem::directory_iterator(db->_indices_path))
+        {
+            if(!entry.is_directory())
+                continue;
+
+            // parse from hex to uint16_t
+            uint16_t partition_id = std::stoul(entry.path().filename().string(), nullptr, 16);
+            db->_sorted_indices[partition_id] = std::vector<sorted_index_ptr_t>{};
+
+            for(const auto& file_entry : std::filesystem::directory_iterator(entry.path()))
+            {
+                if(file_entry.is_regular_file() && file_entry.path().filename() == file_entry.path().filename())
+                {
+                    auto maybe_index = index_ops::load_sorted_index(file_entry.path(), config.use_odirect_for_indices, false);
+                    if(!maybe_index)
+                        return hedge::error("Failed to load sorted index from file " + file_entry.path().string() + ": " + maybe_index.error().to_string());
+
+                    db->_sorted_indices[partition_id].push_back(std::make_shared<sorted_index>(std::move(maybe_index.value())));
+
+                    size_t flush_iteration = std::stoul(file_entry.path().extension().string().substr(1), nullptr, 10);
+                    max_flush_iteration = std::max(max_flush_iteration, flush_iteration);
+                }
+            }
+        }
+
+        db->_flush_iteration = max_flush_iteration + 1;
+
+        uint32_t max_last_table_id;
+        for(const auto& entry : std::filesystem::directory_iterator(db->_values_path))
+        {
+            if(entry.is_regular_file() && entry.path().extension() == value_table::TABLE_FILE_EXTENSION)
+            {
+                auto table = value_table::load(entry.path(), fs::file::open_mode::read_only, true);
+                if(!table)
+                    return hedge::error("Failed to load value table from file " + entry.path().string() + ": " + table.error().to_string());
+
+                max_last_table_id = std::max(max_last_table_id, table.value()->id());
+                db->_value_tables[table.value()->id()] = std::move(table.value());
+            }
+        }
+
+        auto first_value_table = value_table::make_new(db->_values_path, max_last_table_id + 1);
+        if(!first_value_table)
+            return hedge::error("Failed to create initial value table: " + first_value_table.error().to_string());
+
+        db->_current_value_table = std::move(first_value_table.value());
+        db->_last_table_id = 0;
+
+        auto pipelined_value_table = value_table::make_new(db->_values_path, max_last_table_id + 2);
+        if(!pipelined_value_table)
+            return hedge::error("Failed to create next in pipeline value table: " + pipelined_value_table.error().to_string());
+
+        db->_pipelined_value_table = std::move(pipelined_value_table.value());
+
+        db->_last_table_id = max_last_table_id + 1; // pipelined table is last_table_id + 1
+
+        if(config.index_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB cache
+            db->_index_cache = std::make_shared<page_cache>(config.index_clock_cache_size_bytes);
+
         return hedge::error("Load database from path not implemented yet");
     }
 
     async::task<hedge::status> database::put_async(key_t key, const byte_buffer_t& value, const std::shared_ptr<async::executor_context>& executor)
     {
+        if(auto size = this->_mem_index_size.load(); size >= this->_config.keys_in_mem_before_flush) // Check if the memtable needs flushing
         {
-            std::unique_lock lk(this->_mem_index_mutex);
-            if(this->_mem_index.size() >= this->_config.keys_in_mem_before_flush) // Check if the memtable needs flushing
+            if(this->_mem_index_size.compare_exchange_strong(size, 0))
             {
+                // It might happen that some items get pushed _before_ acquiring the lock: this implies that _mem_index_size and the actual size are desynced,
+                // but is not really problematic: it will only happen that there will be more element in the new sst than expected
+
+                std::unique_lock lk(this->_mem_index_mutex);
                 auto old_mem_index = std::move(this->_mem_index);
 
                 this->_mem_index = mem_index{};
@@ -146,6 +211,8 @@ namespace hedge::db
         if(!reservation)
             co_return hedge::error("Failed to reserve space in value table: " + reservation.error().to_string());
 
+        // hedge::expected<hedge::value_ptr_t> write_response = hedge::value_ptr_t{};
+
         auto write_response = co_await value_table_local->write_async(key, value, reservation.value(), executor);
 
         if(!write_response)
@@ -155,6 +222,7 @@ namespace hedge::db
         {
             std::unique_lock lk(this->_mem_index_mutex);
             this->_mem_index.put(key, write_response.value());
+            this->_mem_index_size.fetch_add(1);
         }
 
         co_return hedge::ok();
@@ -216,9 +284,7 @@ namespace hedge::db
 
                 if(auto& opt_value_ptr = maybe_value_ptr.value(); opt_value_ptr.has_value())
                 {
-                    if(!value_ptr_opt.has_value())
-                        value_ptr_opt = opt_value_ptr.value();
-                    else if(value_ptr_opt && *opt_value_ptr < *value_ptr_opt)
+                    if(!value_ptr_opt.has_value() || (value_ptr_opt && *opt_value_ptr < *value_ptr_opt))
                         value_ptr_opt = opt_value_ptr.value();
                 }
             }
@@ -326,7 +392,7 @@ namespace hedge::db
         }
 
         auto pending = this->_pipelined_value_table.load(std::memory_order::relaxed);
-        
+
         while(pending == nullptr)
         {
             this->_pipelined_value_table.wait(nullptr);
