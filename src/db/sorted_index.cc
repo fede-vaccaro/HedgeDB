@@ -275,21 +275,21 @@ namespace hedge::db
 
     hedge::status sorted_index::load_index()
     {
-        // If the index vector is already populated, do nothing.
         if(!this->_index.empty())
             return hedge::ok();
 
-        // Create a non-owning memory map of the entire file.
-        // This is potentially inefficient if only a small part of the index is needed,
-        // but simple for loading everything.
-        auto mmap = fs::mmap_view::from_file(*this);
+        this->_index.resize(this->_footer.indexed_keys);
 
-        if(!mmap.has_value())
-            throw std::runtime_error("Failed to mmap index file: " + mmap.error().to_string());
+        int res = pread(this->fd(), this->_index.data(), sizeof(index_entry_t) * this->_index.size(), 0);
 
-        auto* mmap_ptr = reinterpret_cast<index_entry_t*>(mmap.value().get_ptr());
+        if(res < 0)
+            return hedge::error(std::format("Failed to load index from file {}: {}", this->path().string(), strerror(errno)));
 
-        this->_index.assign(mmap_ptr, mmap_ptr + this->_footer.indexed_keys);
+        if(static_cast<size_t>(res) != sizeof(index_entry_t) * this->_index.size())
+            return hedge::error(std::format("Incomplete read while loading index from file {}: read {} bytes, expected {} bytes",
+                                            this->path().string(),
+                                            res,
+                                            sizeof(index_entry_t) * this->_index.size()));
 
         // The mmap object goes out of scope here, unmapping the file. The data is now in the vector.
         return hedge::ok();

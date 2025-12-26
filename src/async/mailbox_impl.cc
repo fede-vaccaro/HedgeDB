@@ -233,4 +233,14 @@ namespace hedge::async
         return true;
     }
 
+    void yield_mailbox::prepare_sqes(std::span<io_uring_sqe*> sqe)
+    {
+        io_uring_prep_nop(sqe.front());
+    }
+
+    bool yield_mailbox::handle_cqe(io_uring_cqe* /* cqe */, uint8_t /* sub_request_idx */)
+    {
+        return true;
+    }
+
 } // namespace hedge::async

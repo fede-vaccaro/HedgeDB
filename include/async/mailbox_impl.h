@@ -609,6 +609,41 @@ namespace hedge::async
         }
     };
 
+    struct yield_request;
+    struct yield_response;
+    struct yield_mailbox;
+
+    struct yield_request
+    {
+        using response_t = yield_response;
+        using mailbox_t = yield_mailbox;
+    };
+
+    struct yield_response
+    {
+    };
+
+    struct yield_mailbox : mailbox_base<yield_mailbox>
+    {
+        yield_request request;
+        yield_response response{};
+
+        yield_mailbox(yield_request) {}
+        
+        void prepare_sqes(std::span<io_uring_sqe*> sqes);
+        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
+
+        uint32_t needed_sqes()
+        {
+            return 1;
+        }
+
+        void* get_response()
+        {
+            return &response;
+        }
+    };
+
     // NOLINTEND (*-readability-convert-member-functions-to-static)
 
     using mailbox_impls =
@@ -623,6 +658,7 @@ namespace hedge::async
             fallocate_mailbox,
             close_mailbox,
             file_info_mailbox,
-            fsync_mailbox>;
+            fsync_mailbox,
+            yield_mailbox>;
 
 } // namespace hedge::async

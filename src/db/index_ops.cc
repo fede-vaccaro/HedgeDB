@@ -248,7 +248,6 @@ namespace hedge::db
 
     hedge::status write_iovec(int fd, const iovec& iovec)
     {
-
         size_t bytes_written = 0;
 
         while(bytes_written < iovec.iov_len)
@@ -344,7 +343,8 @@ namespace hedge::db
         // Step 3: Create the sorted_index object to represent the file.
         OUTCOME_TRY(auto fd, fs::file::from_path(path, fs::file::open_mode::read_only, use_odirect));
         OUTCOME_TRY(auto footer, builder.build());
-        posix_fadvise(fd.fd(), 0, 0, POSIX_FADV_RANDOM);
+        if(!use_odirect)
+            posix_fadvise(fd.fd(), 0, 0, POSIX_FADV_RANDOM);
 
         // Create the final object, moving the key and meta-index data into it.
         auto ss = sorted_index(std::move(fd), std::move(sorted_keys), std::move(meta_index), footer);
@@ -358,12 +358,12 @@ namespace hedge::db
      * @param load_index If true, also loads the entire main index data into memory.
      * @return `expected<sorted_index>` containing the loaded object or an error.
      */
-    hedge::expected<sorted_index> index_ops::load_sorted_index(const std::filesystem::path& path, bool load_index)
+    hedge::expected<sorted_index> index_ops::load_sorted_index(const std::filesystem::path& path, bool use_direct, bool load_index)
     {
         if(!std::filesystem::exists(path))
             return hedge::error("Sorted index file does not exist: " + path.string());
 
-        auto maybe_fd = fs::file::from_path(path, fs::file::open_mode::read_only, false, std::nullopt);
+        auto maybe_fd = fs::file::from_path(path, fs::file::open_mode::read_only, use_direct);
 
         if(!maybe_fd.has_value())
             return hedge::error("Failed to open sorted index file: " + maybe_fd.error().to_string());
