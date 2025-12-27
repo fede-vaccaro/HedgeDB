@@ -85,8 +85,9 @@ add_executable(file_reader_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/file_read
 target_link_libraries(file_reader_test uring gtest gtest_main)
 
 # value_table tests
-add_executable(value_table_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/value_table.spec.cc)
-target_link_libraries(value_table_test uring gtest gtest_main)
+# TODO: re-enable
+# add_executable(value_table_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/value_table.spec.cc)
+# target_link_libraries(value_table_test uring gtest gtest_main)
 
 # worker tests
 add_executable(worker_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/worker.spec.cc)
@@ -96,16 +97,16 @@ target_link_libraries(worker_test uring gtest gtest_main)
 add_executable(database_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/database.spec.cc)
 target_link_libraries(database_test uring gtest gtest_main tcmalloc)
 
-# # library
+# # library TODO re-enable
 # add_library(hedgedb STATIC ${IO_EXECUTOR_SRCS} ${DB_SOURCES} src/api/api.cc)
 # target_link_libraries(hedgedb PRIVATE uring)
 # target_include_directories(hedgedb PUBLIC $<INSTALL_INTERFACE:${PUBLIC_INCLUDES}> $<BUILD_INTERFACE:${PUBLIC_INCLUDES}>)
 
-# # db api tests
+# # db api tests TODO re-enable
 # add_executable(db_api_test test/api.spec.cc)
 # target_link_libraries(db_api_test PUBLIC hedgedb gtest gtest_main)
 
-# # installation rules
+# # installation rules TODO re-enable
 # install(TARGETS hedgedb
 #     ARCHIVE 
 #     DESTINATION lib

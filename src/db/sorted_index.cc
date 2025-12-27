@@ -182,7 +182,6 @@ namespace hedge::db
         }
 
         hedge::expected<std::optional<value_ptr_t>> res = sorted_index::_find_in_page(key, page_start_ptr, page_end_ptr);
-
         co_return res;
     }
 

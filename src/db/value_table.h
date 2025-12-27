@@ -8,6 +8,7 @@
 #include <mutex> // Added for _delete_mutex documentation
 
 #include <error.hpp>
+#include <shared_mutex>
 
 #include "async/io_executor.h"
 #include "async/task.h"
@@ -84,28 +85,17 @@ namespace hedge::db
      */
     class value_table : public fs::file
     {
-        struct write_buffer
-        {
-            std::vector<uint8_t> buffer;
-            std::atomic_size_t buffer_head;
-            std::atomic_size_t offset;
-
-            write_buffer() = default;
-            explicit write_buffer(size_t capacity) : buffer(capacity), buffer_head(0) { assert(capacity % PAGE_SIZE_IN_BYTES == 0); }
-        };
-
         uint32_t _unique_id;                   ///< Unique identifier for this value table file.
         std::atomic_size_t _current_offset{0}; ///< Current write offset within the file.
         std::optional<fs::mmap_view> _mmap;    // mmap for write only if not direct IO
 
         size_t _buffer_capacity = PAGE_SIZE_IN_BYTES * 16;
-        write_buffer _write_buffer;
 
         /** @brief Default constructor (private). Use factory methods. */
         value_table() = default;
         /** @brief Private constructor used by factory methods. */
         value_table(uint32_t unique_id, size_t current_offset, fs::file file_descriptor)
-            : fs::file(std::move(file_descriptor)), _unique_id(unique_id), _current_offset(current_offset), _write_buffer(PAGE_SIZE_IN_BYTES * 16)
+            : fs::file(std::move(file_descriptor)), _unique_id(unique_id), _current_offset(current_offset)
         {
         }
 
@@ -156,17 +146,15 @@ namespace hedge::db
             size_t offset{}; ///< The offset at which the write should occur.
         };
 
+        [[nodiscard]] size_t current_offset() const
+        {
+            return this->_current_offset.load(std::memory_order_relaxed);
+        }
+
         /**
-         * @brief Reserves space for an upcoming write operation.
-         * @details Increments the `_current_offset` and updates the on-disk `value_table_info`. TODO: get_write_reservation needs to be thread-safe when multi-threaded executor will be supported.
-         * Checks if the requested size exceeds limits or available space.
-         * The returned `write_reservation` contains the offset where the caller can write the data.
-         * The caller is guaranteed to have exclusive access to this space.
-         * @param file_size The size of the value data (excluding header) to be written.
-         * @return `expected<write_reservation>` containing the offset for the write on success,
-         * or an error (e.g., `errc::VALUE_TABLE_NOT_ENOUGH_SPACE`) on failure.
+        todo: rewrite doc
          */
-        expected<write_reservation> get_write_reservation(size_t file_size);
+        expected<size_t> allocate_pages_for_write(size_t num_bytes);
 
         /**
          * @brief Asynchronously writes a key-value pair at a previously reserved offset.
@@ -179,8 +167,6 @@ namespace hedge::db
          */
         async::task<expected<hedge::value_ptr_t>> write_async(key_t key, const std::vector<uint8_t>& value, const write_reservation& reservation, const std::shared_ptr<async::executor_context>& executor);
 
-        void _flush_buffer();
-
         /**
          * @brief Asynchronously reads a value entry (header + data) from a specific offset and size.
          * @param file_offset The starting byte offset of the `file_header`.
@@ -191,17 +177,6 @@ namespace hedge::db
          * (e.g., `errc::DELETED` if the flag is set and not skipped, I/O errors, validation errors).
          */
         async::task<expected<output_file>> read_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor, bool skip_delete_check = false);
-
-        /**
-         * @brief Asynchronously marks an entry as deleted (sets the tombstone flag).
-         * @details Reads the header at the given offset, verifies the key, sets the `deleted_flag`,
-         * updates the on-disk `value_table_info` (stats), and writes the modified header back.
-         * @param key The expected key (for verification).
-         * @param offset The starting byte offset of the `file_header` to modify.
-         * @param executor The executor context for async I/O.
-         * @return `async::task<status>` indicating success or failure (e.g., key mismatch, I/O error).
-         */
-        async::task<status> delete_async(key_t key, size_t offset, const std::shared_ptr<async::executor_context>& executor);
 
         /**
          * @brief Factory function to create a new, empty value table file.
@@ -223,5 +198,38 @@ namespace hedge::db
         static hedge::expected<std::shared_ptr<value_table>> reload(value_table&& other, fs::file::open_mode open_mode, bool direct);
 
     private:
+    };
+
+    // Per thread write buffer
+    class write_buffer
+    {
+        std::unique_ptr<uint8_t> _buffer{nullptr};
+        size_t _buffer_capacity{0};
+        std::atomic_size_t _write_buffer_head{0};
+
+        std::shared_mutex _flush_mutex;
+        std::shared_ptr<value_table> _reference_table{nullptr};
+        size_t _file_offset{std::numeric_limits<size_t>::max()};
+
+    public:
+        write_buffer() = default;
+        write_buffer(size_t capacity)
+            : _buffer(static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, capacity))), _buffer_capacity(capacity)
+        {
+            assert(_buffer);
+            assert(capacity % PAGE_SIZE_IN_BYTES == 0);
+        }
+
+        void set(std::shared_ptr<value_table> reference_table, size_t reserved_offset)
+        {
+            std::lock_guard lk(this->_flush_mutex);
+            this->_reference_table = std::move(reference_table);
+            this->_write_buffer_head.store(0);
+            this->_file_offset = reserved_offset;
+        }
+
+        async::task<status> flush(const std::shared_ptr<async::executor_context>& executor);
+        expected<value_ptr_t> write(const key_t& key, const std::vector<uint8_t>& value);
+        expected<output_file> try_read(value_ptr_t value_ptr);
     };
 } // namespace hedge::db

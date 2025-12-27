@@ -97,7 +97,14 @@ namespace hedge::db
         // --- Current/Mutable State ---
         /// Shared pointer to the currently active value_table file where new values are written.
         std::atomic<std::shared_ptr<value_table>> _current_value_table;
-        std::atomic<std::shared_ptr<value_table>> _pipelined_value_table; // TODO: switch to hedge::expected<...>
+        std::atomic<std::shared_ptr<value_table>> _pipelined_value_table; // TODO: switch to hedge::expected<...> for signaling potential flush errors
+
+        // --- Write buffers ---
+        /// Each thread should have
+        static constexpr size_t PARALLEL_WRITERS = async::NUM_STATIC_EXECUTORS;
+        static constexpr size_t WRITE_BUFFER_DEFAULT_SIZE = 16 * 4096; // 64 kb
+        inline static std::atomic_size_t _thread_count{0};
+        std::vector<std::unique_ptr<write_buffer>> _write_buffers;
 
         /// Mutex protecting access to the mem_index (memtable).
         async::rw_spinlock _mem_index_mutex;
@@ -245,7 +252,7 @@ namespace hedge::db
          *                 another thread had already rotate it.
          * @return Status indicating success or failure.
          */
-        hedge::status _rotate_value_table(std::shared_ptr<value_table>& rotating);
+        hedge::expected<std::shared_ptr<value_table>> _rotate_value_table(std::shared_ptr<value_table> rotating);
         /**
          * @brief Flushes the contents of the `_mem_index` to new `sorted_index` file(s) on disk.
          * Clears the `_mem_index` afterwards. Manages partitioning and file naming.
