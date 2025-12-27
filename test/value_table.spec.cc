@@ -81,7 +81,7 @@ namespace hedge::db
         ASSERT_EQ(table->id(), 22);
 
         auto value = make_random_vec(1024);
-        auto maybe_reservation = table->get_write_reservation(value.size());
+        auto maybe_reservation = table->allocate_pages_for_write(value.size());
 
         ASSERT_TRUE(maybe_reservation.has_value()) << "An error occurred while reserving space for writing: " << maybe_reservation.error().to_string();
 
@@ -127,7 +127,7 @@ namespace hedge::db
         for(auto i = 0UL; i < value_table::TABLE_MAX_SIZE_BYTES / payload_size; ++i)
         {
             auto value = this->make_random_vec(payload_size);
-            auto reservation = table->get_write_reservation(value.size());
+            auto reservation = table->allocate_pages_for_write(value.size());
 
             ASSERT_TRUE(reservation.has_value()) << "An error occurred while reserving space for writing: " << reservation.error().to_string();
 
@@ -149,7 +149,7 @@ namespace hedge::db
         }
 
         // now asking for a reservation will result in an error
-        auto reservation = table->get_write_reservation(payload_size);
+        auto reservation = table->allocate_pages_for_write(payload_size);
         ASSERT_FALSE(reservation.has_value()) << "Expected an error when trying to reserve space in a full table, but got: " << reservation.error().to_string();
         ASSERT_EQ(reservation.error().code(), errc::VALUE_TABLE_NOT_ENOUGH_SPACE);
 
@@ -176,7 +176,7 @@ namespace hedge::db
         ASSERT_EQ(table->id(), 24);
 
         auto value = make_random_vec(1024);
-        auto reservation = table->get_write_reservation(value.size());
+        auto reservation = table->allocate_pages_for_write(value.size());
 
         ASSERT_TRUE(reservation.has_value()) << "An error occurred while reserving space for writing: " << reservation.error().to_string();
 
@@ -216,7 +216,7 @@ namespace hedge::db
         ASSERT_EQ(table->id(), 25);
 
         auto value = make_random_vec(1024);
-        auto reservation = table->get_write_reservation(value.size());
+        auto reservation = table->allocate_pages_for_write(value.size());
 
         ASSERT_TRUE(reservation.has_value()) << "An error occurred while reserving space for writing: " << reservation.error().to_string();
 
@@ -237,7 +237,7 @@ namespace hedge::db
 
         // write again to the reopened table
         auto new_value = make_random_vec(512);
-        auto new_reservation = reopen_maybe_table.value()->get_write_reservation(new_value.size());
+        auto new_reservation = reopen_maybe_table.value()->allocate_pages_for_write(new_value.size());
 
         ASSERT_TRUE(new_reservation.has_value()) << "An error occurred while reserving space for writing in reopened table: " << new_reservation.error().to_string();
 
@@ -286,7 +286,7 @@ namespace hedge::db
         for(auto i = 0UL; i < N_ITEMS; ++i)
         {
             auto value = this->make_random_vec(payload_size);
-            auto reservation = table->get_write_reservation(value.size());
+            auto reservation = table->allocate_pages_for_write(value.size());
 
             ASSERT_TRUE(reservation.has_value()) << "An error occurred while reserving space for writing: " << reservation.error().to_string();
 

@@ -18,75 +18,32 @@
 namespace hedge::db
 {
 
-    expected<value_table::write_reservation> value_table::get_write_reservation(size_t file_size)
+    expected<size_t> value_table::allocate_pages_for_write(size_t num_bytes)
     {
-        if(file_size > value_table::MAX_FILE_SIZE)
-            return hedge::error(std::format("Requested file size ({}) is larger than max allowed ({})", file_size, value_table::MAX_FILE_SIZE));
+        if(num_bytes % PAGE_SIZE_IN_BYTES != 0)
+            return hedge::error("File size must be multiple of page size (" + std::to_string(PAGE_SIZE_IN_BYTES) + ")");
 
-        auto file_w_header_size = file_size + sizeof(file_header);
+        if(num_bytes > value_table::MAX_FILE_SIZE)
+            return hedge::error(std::format("Requested file size ({}) is larger than max allowed ({})", num_bytes, value_table::MAX_FILE_SIZE));
 
         size_t offset = this->_current_offset.load(std::memory_order::relaxed);
-
-        auto max_needed_pages_for_file = hedge::ceil(file_w_header_size, PAGE_SIZE_IN_BYTES);
-
-        size_t padding = 0;
         size_t next_offset;
 
         do
         {
-            // Check if padding is needed
-            next_offset = offset + file_w_header_size;
-            size_t offset_page = offset / PAGE_SIZE_IN_BYTES;
-            size_t next_offset_page = next_offset / PAGE_SIZE_IN_BYTES;
-            padding = 0;
-
-            if(next_offset_page - offset_page >= max_needed_pages_for_file)
-            {
-                // Align the current offset (where the file is being written) to the following page
-                padding = PAGE_SIZE_IN_BYTES - (offset % PAGE_SIZE_IN_BYTES);
-                next_offset += padding;
-            }
-
-            /*
-                Example of padding computing:
-                file_size_w_header = 1200;
-                max_needed_pages_for_file = 1;
-                offset = 3600
-
-                next_offset = 4800
-                next_offset_page = 1
-                offset_page = 0
-                padding = 0
-
-                if(1 - 0 >= 1)
-                {
-                    padding = 4096 - (3600) = 496
-                    next_offset = 4800 + 496 = 5296
-                }
-
-                ...
-
-                reservation.offset = 3600 + 496 = 4096 (right at the beginn of page 2)
-            */
-
+            next_offset = offset + num_bytes;
             if(next_offset > value_table::TABLE_MAX_SIZE_BYTES)
             {
                 return hedge::error(
                     std::format("Adding this file (of size: {}) to this table will exceed maximum table size ({} > {})",
-                                file_w_header_size,
-                                offset + file_w_header_size,
+                                num_bytes,
+                                offset + num_bytes,
                                 value_table::TABLE_MAX_SIZE_BYTES),
                     errc::VALUE_TABLE_NOT_ENOUGH_SPACE); // This error code signals that the caller needs to create a new table.
             }
         } while(!this->_current_offset.compare_exchange_strong(offset, next_offset));
 
-        // Update the table's metadata (persisted via mmap) with the new offset.
-        // TODO 1: check if it is actually necessary to store the current offset within the infos
-        // It might be cached and - as a fallback mechanism - inferred from EOF marker position on load.
-        // auto& info = this->_info();
-        // std::atomic_ref<size_t>(info.current_offset).fetch_add(file_w_header_size);
-
-        return value_table::write_reservation{offset + padding};
+        return offset;
     }
 
     hedge::expected<std::shared_ptr<value_table>> value_table::reload(value_table&& other, fs::file::open_mode open_mode, bool use_direct)
@@ -224,16 +181,16 @@ namespace hedge::db
         }
         else
         {
-            size_t actual_file_size = file_size - sizeof(file_header);
-            value_data = std::vector<uint8_t>(actual_file_size);
+            size_t actual_value_size = file_size - sizeof(file_header);
+            value_data = std::vector<uint8_t>(actual_value_size);
 
             std::array<iovec, 2> iovecs = {
                 iovec{
-                    .iov_base = reinterpret_cast<uint8_t*>(&header),
+                    .iov_base = static_cast<void*>(&header),
                     .iov_len = sizeof(file_header)},
                 iovec{
-                    .iov_base = value_data.data(),
-                    .iov_len = actual_file_size}};
+                    .iov_base = static_cast<void*>(value_data.data()),
+                    .iov_len = actual_value_size}};
 
             auto read_response = co_await executor->submit_request(async::unaligned_readv_request{
                 .fd = this->fd(),
@@ -291,13 +248,14 @@ namespace hedge::db
 
         auto file_desc = fs::file::from_path(file_path,
                                              fs::file::open_mode::read_write_new,
-                                             false, // Avoid O_DIRECT for value_tables due to non-aligned data being written.
+                                             true,
                                              preallocate ? std::optional{value_table::TABLE_ACTUAL_MAX_SIZE} : std::nullopt);
 
         if(!file_desc)
             return hedge::error("Failed to create file descriptor: " + file_desc.error().to_string());
 
-        posix_fadvise(file_desc.value().fd(), 0, 0, POSIX_FADV_RANDOM);
+        if(file_desc.value().has_direct_access())
+            posix_fadvise(file_desc.value().fd(), 0, 0, POSIX_FADV_NOREUSE);
 
         auto vt = std::shared_ptr<value_table>(new value_table{
             id,
@@ -330,101 +288,103 @@ namespace hedge::db
             std::move(file_descriptor.value())});
     }
 
-    async::task<status> value_table::delete_async(key_t key, size_t offset, const std::shared_ptr<async::executor_context>& executor)
+    async::task<status> write_buffer::flush(const std::shared_ptr<async::executor_context>&)
     {
-        // TODO: fix table locking to avoid a race condition between GC and delete_async
-        // Explanation:
-        // It might happen the following situation:
-        // The Value table GC will operate by iterating over the entire table and rebuilding it
-        // in a new file, but skipping deleted entries.
-        // If a delete_async is called while the GC is running, we might delete a file that has already
-        // been copied to the new table, leading to inconsistencies.
-        //
-        // NB: keeping the deletion flag here as well will avoid heavy batch of lookups over the index
-        // to check if a file is deleted or not.
-        // But at this point, we might incur to the issue of being unable to delete items while GC is running.
-        // A possible fall-back solution could be to buffer/queue the delete requests and apply them after GC is done.
-        // This, however, requires WAL. Which is not available yet.
-        // Last but not least, locking in a coroutine might easily lead to deadlocks
+        // TODO: Test write with io_uring
+        // Although, the other writes should be blocked if a fiber is flushing
 
-        // std::unique_lock<std::mutex> try_lock(*this->_delete_mutex, std::try_to_lock);
-        // if(!try_lock.owns_lock())
-        // co_return hedge::error("Cannot delete object, garbage collection is running and the table is locked", errc::BUSY);
+        int res = pwrite(
+            this->_reference_table->fd(),
+            this->_buffer.get(),
+            this->_buffer_capacity,
+            this->_file_offset);
 
-        if(offset + sizeof(file_header) > this->_current_offset)
-            co_return hedge::error(std::format("Requested file offset ({}) + size ({}) exceeds current table offset ({})",
-                                               offset,
-                                               sizeof(file_header),
-                                               this->_current_offset.load(std::memory_order_relaxed)));
+        if(res < 0)
+            co_return hedge::error(std::format("Failed to flush write buffer to value table (path: {}): {}",
+                                               this->_reference_table->path().string(),
+                                               strerror(-res)));
 
-        auto read_response = co_await executor->submit_request(async::unaligned_read_request{
-            .fd = this->fd(),
-            .offset = offset,
-            .size = sizeof(file_header),
-        });
+        if(res != static_cast<int>(this->_buffer_capacity))
+            co_return hedge::error(std::format("Failed to flush write buffer to value table (path: {}): expected {}, got {}",
+                                               this->_reference_table->path().string(),
+                                               this->_buffer_capacity,
+                                               res));
 
-        if(read_response.error_code != 0)
+        std::lock_guard lk(this->_flush_mutex);
+        this->_file_offset = std::numeric_limits<size_t>::max();
+        this->_reference_table = nullptr;
+
+        co_return hedge::ok();
+    }
+
+    expected<value_ptr_t> write_buffer::write(const key_t& key, const std::vector<uint8_t>& value)
+    {
+        size_t total_size = sizeof(file_header) + value.size();
+
+        // TODO: If the data spans across two pages (but can fit in one), add some padding
+        auto cur_offset = this->_write_buffer_head.load(std::memory_order::relaxed);
+
+        size_t padding = 0;
+        size_t next_offset = cur_offset + sizeof(file_header) + value.size();
+        size_t offset_page = cur_offset / PAGE_SIZE_IN_BYTES;
+        size_t next_offset_page = next_offset / PAGE_SIZE_IN_BYTES;
+
+        size_t max_needed_pages_for_file = hedge::ceil(sizeof(file_header) + value.size(), PAGE_SIZE_IN_BYTES);
+        if(next_offset_page - offset_page >= max_needed_pages_for_file)
         {
-            co_return hedge::error(std::format("Failed to read file header from value table (path: {}): {}",
-                                               this->path().string(),
-                                               strerror(-read_response.error_code)));
+            // Align the current offset (where the file is being written) to the following page
+            padding = PAGE_SIZE_IN_BYTES - (cur_offset % PAGE_SIZE_IN_BYTES);
+            next_offset += padding;
         }
 
-        if(read_response.bytes_read != sizeof(file_header))
-        {
-            co_return hedge::error(std::format("Failed to read file header from value table (path: {}): expected {}, got {}",
-                                               this->path().string(),
-                                               sizeof(file_header),
-                                               read_response.bytes_read));
-        }
+        if(cur_offset + padding + total_size > this->_buffer_capacity)
+            return hedge::error("buffer full", hedge::errc::BUFFER_FULL); // Tells that flush is needed
+
+        auto* header_ptr = reinterpret_cast<file_header*>(this->_buffer.get() + cur_offset + padding);
+        header_ptr->separator = FILE_SEPARATOR;
+        header_ptr->key = key;
+        header_ptr->file_size = static_cast<uint32_t>(value.size());
+
+        std::copy(value.data(), value.data() + value.size(), this->_buffer.get() + cur_offset + padding + sizeof(file_header));
+
+        size_t write_offset = this->_file_offset + cur_offset + padding;
+        this->_write_buffer_head.fetch_add(padding + total_size, std::memory_order::release);
+
+        return value_ptr_t(
+            write_offset,
+            static_cast<uint32_t>(total_size),
+            this->_reference_table->id());
+    }
+
+    expected<output_file> write_buffer::try_read(value_ptr_t value_ptr)
+    {
+        std::shared_lock lk(this->_flush_mutex);
+
+        if(this->_reference_table == nullptr || this->_reference_table->id() != value_ptr.table_id())
+            return hedge::error("wrong_id", errc::KEY_NOT_FOUND);
+
+        if(value_ptr.offset() < this->_file_offset || value_ptr.offset() + value_ptr.size() > this->_file_offset + this->_write_buffer_head.load(std::memory_order::acquire))
+            return hedge::error("oob", errc::KEY_NOT_FOUND); // out of bounds
+
+        size_t rescaled_offset = value_ptr.offset() - this->_file_offset;
 
         file_header header;
-        std::copy(read_response.data.data(), read_response.data.data() + sizeof(file_header), reinterpret_cast<uint8_t*>(&header));
+        std::copy(this->_buffer.get() + rescaled_offset,
+                  this->_buffer.get() + rescaled_offset + sizeof(file_header),
+                  reinterpret_cast<uint8_t*>(&header));
+
+        if(header.file_size + sizeof(file_header) != value_ptr.size())
+            return hedge::error("File size in header does not match value pointer size");
 
         if(header.separator != FILE_SEPARATOR)
-        {
-            co_return hedge::error(std::format("Invalid file header separator in value table (path: {}) at offset {}",
-                                               this->path().string(),
-                                               offset));
-        }
+            return hedge::error("Invalid file header separator in write buffer");
 
-        if(header.key != key)
-        {
-            co_return hedge::error(
-                std::format("Key mismatch on delete: expected {}, got {}",
-                            uuids::to_string(key),
-                            uuids::to_string(header.key)));
-        }
+        std::vector<uint8_t> value_data(header.file_size);
+        std::copy(this->_buffer.get() + rescaled_offset + sizeof(file_header),
+                  this->_buffer.get() + rescaled_offset + sizeof(file_header) + header.file_size,
+                  value_data.data());
 
-        // if(header.deleted_flag)
-        //     co_return hedge::ok();
-
-        // header.deleted_flag = true;
-
-        auto write_response = co_await executor->submit_request(async::write_request{
-            .fd = this->fd(),
-            .data = reinterpret_cast<uint8_t*>(&header),
-            .size = sizeof(file_header),
-            .offset = offset,
-        });
-
-        if(write_response.error_code != 0)
-        {
-            co_return hedge::error(std::format("Failed to write delete marker to value table (path: {}): {}",
-                                               this->path().string(),
-                                               strerror(-write_response.error_code)));
-        }
-
-        if(write_response.bytes_written != sizeof(file_header))
-        {
-            co_return hedge::error(std::format("Failed to write delete marker to value table (path: {}): expected {}, got {}",
-                                               this->path().string(),
-                                               sizeof(file_header),
-                                               write_response.bytes_written));
-        }
-
-        // Deletion successful.
-        co_return hedge::ok();
+        return output_file{.header = header, .binaries = std::move(value_data)};
     }
 
 } // namespace hedge::db

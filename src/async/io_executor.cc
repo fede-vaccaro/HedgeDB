@@ -339,9 +339,7 @@ namespace hedge::async
 
     const std::shared_ptr<executor_context>& executor_from_static_pool()
     {
-        constexpr size_t POOL_SIZE = 8;
-
-        using executor_pool = std::array<std::shared_ptr<executor_context>, POOL_SIZE>;
+        using executor_pool = std::array<std::shared_ptr<executor_context>, async::NUM_STATIC_EXECUTORS>;
 
         static std::atomic_uint64_t current_head{0};
         static executor_pool pool = []()
@@ -355,6 +353,24 @@ namespace hedge::async
         }();
 
         return pool[current_head.fetch_add(1, std::memory_order_relaxed) % pool.size()];
+    }
+
+    executor_pool::executor_pool(size_t pool_size, uint32_t queue_depth)
+    {
+        // check if is power of 2
+        if(std::popcount(pool_size) != 1)
+            throw std::runtime_error("executor_pool size must be a power of 2");
+
+        for(size_t i = 0; i < pool_size; ++i)
+        {
+            this->_executors.emplace_back(std::make_shared<executor_context>(queue_depth));
+        }
+    }
+
+    const std::shared_ptr<executor_context>& executor_pool::get_executor()
+    {
+        auto idx = this->_next_executor.fetch_add(1, std::memory_order_relaxed) & (this->_executors.size() - 1);
+        return this->_executors[idx];
     }
 
 } // namespace hedge::async

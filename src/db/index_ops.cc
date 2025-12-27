@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -344,7 +345,7 @@ namespace hedge::db
         OUTCOME_TRY(auto fd, fs::file::from_path(path, fs::file::open_mode::read_only, use_odirect));
         OUTCOME_TRY(auto footer, builder.build());
         if(!use_odirect)
-            posix_fadvise(fd.fd(), 0, 0, POSIX_FADV_RANDOM);
+            posix_fadvise(fd.fd(), 0, 0, POSIX_FADV_NOREUSE);
 
         // Create the final object, moving the key and meta-index data into it.
         auto ss = sorted_index(std::move(fd), std::move(sorted_keys), std::move(meta_index), footer);

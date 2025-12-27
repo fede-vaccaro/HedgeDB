@@ -69,6 +69,16 @@ namespace hedge::db
 
         db->_value_tables.reserve(4096);
 
+        db->_write_buffers.resize(database::PARALLEL_WRITERS);
+
+        for(auto& write_buffer_ptr : db->_write_buffers)
+        {
+            write_buffer_ptr = std::make_unique<write_buffer>(WRITE_BUFFER_DEFAULT_SIZE);
+            auto vtable = db->_current_value_table.load();
+            auto allocated_offset = vtable->allocate_pages_for_write(WRITE_BUFFER_DEFAULT_SIZE);
+            write_buffer_ptr->set(vtable, allocated_offset.value());
+        }
+
         return db;
     }
 
@@ -146,6 +156,16 @@ namespace hedge::db
         if(config.index_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB cache
             db->_index_cache = std::make_shared<page_cache>(config.index_clock_cache_size_bytes);
 
+        db->_write_buffers.resize(database::PARALLEL_WRITERS);
+
+        for(auto& write_buffer_ptr : db->_write_buffers)
+        {
+            write_buffer_ptr = std::make_unique<write_buffer>(WRITE_BUFFER_DEFAULT_SIZE);
+            auto vtable = db->_current_value_table.load();
+            auto allocated_offset = vtable->allocate_pages_for_write(WRITE_BUFFER_DEFAULT_SIZE);
+            write_buffer_ptr->set(vtable, allocated_offset.value());
+        }
+
         return hedge::error("Load database from path not implemented yet");
     }
 
@@ -192,36 +212,56 @@ namespace hedge::db
             }
         }
 
-        // --- Write value to Value Table ---
-        std::shared_ptr<value_table> value_table_local = this->_current_value_table.load();
-        expected<value_table::write_reservation> reservation = value_table_local->get_write_reservation(value.size());
-
-        constexpr size_t MAX_RETRIES = 10;
-        size_t retry_it = 0;
-
-        // Running even more than 1 retry should be extremely rare
-        while(!reservation && reservation.error().code() == hedge::errc::VALUE_TABLE_NOT_ENOUGH_SPACE && retry_it++ < MAX_RETRIES)
+        // --- Try writing value to buffer first ---
+        auto _allocate_space_for_write_buffer = [this](write_buffer& write_buffer) -> hedge::status
         {
-            if(auto status = this->_rotate_value_table(value_table_local); !status)
-                co_return hedge::error("Failed to rotate value table: " + status.error().to_string());
+            std::shared_ptr<value_table> value_table_local = this->_current_value_table.load();
+            expected<size_t> allocation = value_table_local->allocate_pages_for_write(WRITE_BUFFER_DEFAULT_SIZE);
 
-            reservation = value_table_local->get_write_reservation(value.size());
+            constexpr size_t MAX_RETRIES = 10;
+            size_t retry_it = 0;
+
+            // Running even more than 1 retry should be extremely rare
+            while(!allocation && allocation.error().code() == hedge::errc::VALUE_TABLE_NOT_ENOUGH_SPACE && retry_it++ < MAX_RETRIES)
+            {
+                auto maybe_updated_value_table = this->_rotate_value_table(value_table_local);
+                if(!maybe_updated_value_table)
+                    return hedge::error("Failed to rotate value table: " + maybe_updated_value_table.error().to_string());
+
+                value_table_local = std::move(maybe_updated_value_table.value());
+
+                allocation = value_table_local->allocate_pages_for_write(WRITE_BUFFER_DEFAULT_SIZE);
+            }
+
+            if(!allocation)
+                return hedge::error("Failed to allocate from value table: " + allocation.error().to_string());
+
+            write_buffer.set(value_table_local, allocation.value());
+            return hedge::ok();
+        };
+
+        static thread_local size_t this_thread_idx = database::_thread_count.fetch_add(1);
+        assert(this_thread_idx < this->_write_buffers.size());
+
+        auto& write_buffer_ref = this->_write_buffers[this_thread_idx];
+        auto maybe_write = write_buffer_ref->write(key, value);
+
+        // TODO: Currently is not supported the case when the value is greater than the buffer capacity
+        // If so, we should write directly on file
+        if(!maybe_write && maybe_write.error().code() == hedge::errc::BUFFER_FULL)
+        {
+            auto buffer_flush_status = co_await write_buffer_ref->flush(executor);
+            if(!buffer_flush_status)
+                co_return buffer_flush_status;
+
+            _allocate_space_for_write_buffer(*write_buffer_ref);
+            maybe_write = write_buffer_ref->write(key, value);
         }
-
-        if(!reservation)
-            co_return hedge::error("Failed to reserve space in value table: " + reservation.error().to_string());
-
-        // hedge::expected<hedge::value_ptr_t> write_response = hedge::value_ptr_t{};
-
-        auto write_response = co_await value_table_local->write_async(key, value, reservation.value(), executor);
-
-        if(!write_response)
-            co_return hedge::error("Failed to write value to value table: " + write_response.error().to_string());
 
         // --- Update Memtable 7---
         {
             std::unique_lock lk(this->_mem_index_mutex);
-            this->_mem_index.put(key, write_response.value());
+            this->_mem_index.put(key, maybe_write.value());
             this->_mem_index_size.fetch_add(1);
         }
 
@@ -328,6 +368,14 @@ namespace hedge::db
 
         auto [value_ptr, table_ptr] = std::move(maybe_value_ptr_table.value());
 
+        // Try reading from write_buffer
+        for(auto& write_buf : this->_write_buffers)
+        {
+            auto maybe_file = write_buf->try_read(value_ptr);
+            if(maybe_file)
+                co_return std::move(maybe_file.value().binaries);
+        }
+
         auto maybe_file = co_await table_ptr->read_async(value_ptr.offset(), value_ptr.size(), executor);
 
         if(!maybe_file)
@@ -337,6 +385,7 @@ namespace hedge::db
         // with the requested `key` to detect potential data corruption or pointer errors.
 
         co_return std::move(maybe_file.value().binaries);
+        // co_return std::vector<uint8_t>{};
     }
 
     size_t database::_find_matching_partition_for_key(const key_t& key) const
@@ -365,11 +414,6 @@ namespace hedge::db
 
         auto [value_ptr, table_ptr] = std::move(maybe_value_ptr_table.value());
 
-        auto table_delete_result = co_await table_ptr->delete_async(key, value_ptr.offset(), executor);
-
-        if(!table_delete_result)
-            co_return hedge::error("Error marking entry deleted in value table: " + table_delete_result.error().to_string());
-
         // TODO: As written above, we might want to allow deleting non-existing keys
         // Hence, we might want to always run this step
         {
@@ -379,17 +423,14 @@ namespace hedge::db
         co_return hedge::ok();
     }
 
-    hedge::status database::_rotate_value_table(std::shared_ptr<value_table>& rotating)
+    hedge::expected<std::shared_ptr<value_table>> database::_rotate_value_table(std::shared_ptr<value_table> rotating)
     {
         auto t0 = std::chrono::high_resolution_clock::now();
 
         // This guarantees that the CAS will fail
         // Better do an early exit without holding the mutex
         if(auto curr = this->_current_value_table.load(std::memory_order::relaxed); curr != rotating)
-        {
-            rotating = curr;
-            return hedge::ok();
-        }
+            return curr;
 
         auto pending = this->_pipelined_value_table.load(std::memory_order::relaxed);
 
@@ -402,21 +443,16 @@ namespace hedge::db
         size_t next_id{};
 
         if(!this->_current_value_table.compare_exchange_strong(rotating, pending))
-            return hedge::ok();
+            return rotating;
 
         this->_pipelined_value_table.store(nullptr);
 
         next_id = this->_last_table_id.fetch_add(1, std::memory_order_relaxed) + 2; // The currently pipelined value table is already last + 1
 
-        auto reloaded_old_vt = value_table::reload(std::move(*rotating), fs::file::open_mode::read_only, true);
-
-        if(!reloaded_old_vt)
-            return hedge::error("Failed to reload old value table with O_DIRECT: " + reloaded_old_vt.error().to_string());
-
         // TODO: fix this race condition: between the CAS and the expression, the old value won't be available
         {
             std::lock_guard lk(this->_value_tables_mutex);
-            this->_value_tables[reloaded_old_vt.value()->id()] = std::move(reloaded_old_vt.value());
+            this->_value_tables[rotating->id()] = rotating;
         }
 
         this->_flush_worker.submit(
@@ -443,7 +479,7 @@ namespace hedge::db
 
         // this->_logger.log("Value table rotated in ", (double)duration.count(), " us, pushing job required ", (double)submit_job_duration.count());
 
-        return hedge::ok();
+        return this->_current_value_table.load();
     }
 
     hedge::status database::_flush_mem_index(mem_index&& memtable_to_flush, size_t flush_iteration)

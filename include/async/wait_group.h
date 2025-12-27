@@ -10,7 +10,6 @@ namespace hedge::async
         std::atomic_uint64_t _counter{0};
         std::atomic_bool _done{false};
 
-        // needed for the wait for
         std::condition_variable _cv;
         std::mutex _mutex;
 
@@ -34,23 +33,19 @@ namespace hedge::async
 
         void decr()
         {
-            auto cntr = this->_counter.fetch_sub(1) - 1;
+            this->_counter--;
 
-            bool done = (cntr == 0);
+            this->_done = this->_counter == 0;
 
-            if(done)
-            {
-                this->_done = true;
-                this->_done.notify_all();
+            if(this->_done)
                 this->_cv.notify_all();
-            }
         }
 
         void wait()
         {
-            if(this->_done.load())
-                return;
-            this->_done.wait(true);
+            std::unique_lock lk(this->_mutex);
+            this->_cv.wait(lk, [this]()
+                           { return this->_done.load(); });
         }
 
         bool wait_for(std::chrono::milliseconds timeout)

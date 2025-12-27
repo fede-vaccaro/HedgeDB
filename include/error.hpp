@@ -19,6 +19,7 @@ namespace hedge
         KEY_NOT_FOUND,
         DELETED,
         BUSY,
+        BUFFER_FULL,
     };
 
     class error
