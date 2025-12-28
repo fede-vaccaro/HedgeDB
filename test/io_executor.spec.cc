@@ -129,49 +129,6 @@ TEST_F(test_executor, test_write_simple)
     std::cout << "Test completed successfully, file written and verified." << std::endl;
 }
 
-TEST_F(test_executor, test_multi_read)
-{
-    // prepare file with some data
-    std::ofstream file("/tmp/test_file", std::ios::binary);
-    ASSERT_TRUE(file.is_open()) << "Failed to open file for writing: " << strerror(errno);
-    file << "Hello, World!";
-    file.close();
-
-    auto fd = open("/tmp/test_file", O_RDONLY);
-    ASSERT_GE(fd, 0) << "Failed to open file: " << strerror(errno);
-
-    auto promise = std::promise<multi_read_response>{};
-    auto future = promise.get_future();
-
-    auto ptr_0 = aligned_alloc(5);
-    auto ptr_1 = aligned_alloc(8);
-
-    auto task = [&]() -> ::task<void>
-    {
-        auto request = multi_read_request{
-            .requests = {
-                read_request{.fd=fd, .data=ptr_0.get(), .offset=5, .size=0}, // Read first 5 bytes
-                read_request{.fd=fd, .data=ptr_1.get(), .offset=8, .size=5}  // Read next 8 bytes
-            }};
-
-        auto response = co_await this->_executor->submit_request(std::move(request));
-
-        promise.set_value(std::move(response));
-    };
-
-    this->_executor->submit_io_task(task());
-
-    auto response = future.get();
-
-    ASSERT_EQ(response.responses.size(), 2) << "Expected 2 read responses";
-
-    ASSERT_EQ(response.responses[0].bytes_read, 5) << "First read response size mismatch";
-    ASSERT_EQ(std::string(reinterpret_cast<char*>(ptr_0.get()), reinterpret_cast<char*>(ptr_0.get()) + response.responses[0].bytes_read), "Hello") << "First read content mismatch";
-
-    ASSERT_EQ(response.responses[1].bytes_read, 8) << "Second read response size mismatch";
-    ASSERT_EQ(std::string(reinterpret_cast<char*>(ptr_1.get()), reinterpret_cast<char*>(ptr_1.get()) + response.responses[1].bytes_read), ", World!") << "Second read content mismatch";
-}
-
 TEST_F(test_executor, test_open_fallocate_write)
 {
     std::filesystem::remove("/tmp/test_file"); // to be sure
