@@ -25,22 +25,16 @@ namespace hedge::async
         {
         }
 
-        auto needed_sqes()
-        {
-            return std::visit([](auto& impl)
-                              { return impl.needed_sqes(); }, _mailbox_impl);
-        }
-
-        auto prepare_sqes(std::span<io_uring_sqe*> sqes)
+        auto prepare_sqe(io_uring_sqe* sqes)
         {
             return std::visit([sqes](auto& impl)
-                              { return impl.prepare_sqes(sqes); }, _mailbox_impl);
+                              { return impl.prepare_sqe(sqes); }, _mailbox_impl);
         }
 
-        auto handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx)
+        auto handle_cqe(io_uring_cqe* cqe)
         {
-            return std::visit([cqe, sub_request_idx](auto& impl)
-                              { return impl.handle_cqe(cqe, sub_request_idx); }, _mailbox_impl);
+            return std::visit([cqe](auto& impl)
+                              { return impl.handle_cqe(cqe); }, _mailbox_impl);
         }
 
         void* get_response()

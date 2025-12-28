@@ -21,20 +21,14 @@ namespace hedge::async
     {
         std::coroutine_handle<> continuation;
 
-        uint32_t needed_sqes()
+        void prepare_sqe(io_uring_sqe* sqe)
         {
-            return static_cast<Derived*>(this)->needed_sqes();
-        }
-
-        void prepare_sqes(std::span<io_uring_sqe*> sqes)
-        {
-            assert(sqes.size() == static_cast<size_t>(this->needed_sqes()) && "sqes span size does not match needed sqes");
-            return static_cast<Derived*>(this)->prepare_sqes(sqes);
+            return static_cast<Derived*>(this)->prepare_sqe(sqe);
         };
 
-        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx)
+        void handle_cqe(io_uring_cqe* cqe)
         {
-            return static_cast<Derived*>(this)->handle_cqe(cqe, sub_request_idx);
+            return static_cast<Derived*>(this)->handle_cqe(cqe);
         }
 
         void* get_response() // todo: use &response as default otherwise call get_response() on the derived class (implement through SFINAE)
@@ -136,13 +130,8 @@ namespace hedge::async
         read_request request;
         read_response response;
 
-        void prepare_sqes(std::span<io_uring_sqe*> sqes);
-        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
-
-        uint32_t needed_sqes()
-        {
-            return 1;
-        }
+        void prepare_sqe(io_uring_sqe* sqe);
+        void handle_cqe(io_uring_cqe* cqe);
 
         void* get_response()
         {
@@ -178,13 +167,8 @@ namespace hedge::async
         unaligned_read_request request;
         unaligned_read_response response;
 
-        void prepare_sqes(std::span<io_uring_sqe*> sqes);
-        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
-
-        uint32_t needed_sqes()
-        {
-            return 1;
-        }
+        void prepare_sqe(io_uring_sqe* sqe);
+        void handle_cqe(io_uring_cqe* cqe);
 
         void* get_response()
         {
@@ -220,13 +204,8 @@ namespace hedge::async
         unaligned_readv_request request;
         unaligned_readv_response response;
 
-        void prepare_sqes(std::span<io_uring_sqe*> sqes);
-        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
-
-        uint32_t needed_sqes()
-        {
-            return 1;
-        }
+        void prepare_sqe(io_uring_sqe* sqe);
+        void handle_cqe(io_uring_cqe* cqe);
 
         void* get_response()
         {
@@ -263,13 +242,8 @@ namespace hedge::async
         write_request request;
         write_response response;
 
-        void prepare_sqes(std::span<io_uring_sqe*> sqes);
-        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
-
-        uint32_t needed_sqes()
-        {
-            return 1;
-        }
+        void prepare_sqe(io_uring_sqe* sqe);
+        void handle_cqe(io_uring_cqe* cqe);
 
         void* get_response()
         {
@@ -306,13 +280,8 @@ namespace hedge::async
         writev_request request;
         writev_response response;
 
-        void prepare_sqes(std::span<io_uring_sqe*> sqes);
-        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
-
-        uint32_t needed_sqes()
-        {
-            return 1;
-        }
+        void prepare_sqe(io_uring_sqe* sqe);
+        void handle_cqe(io_uring_cqe* cqe);
 
         void* get_response()
         {
@@ -320,47 +289,6 @@ namespace hedge::async
         }
     };
 
-    struct multi_read_request;
-    struct multi_read_response;
-    struct multi_read_mailbox;
-
-    struct multi_read_request
-    {
-        using response_t = multi_read_response;
-        using mailbox_t = multi_read_mailbox;
-
-        std::vector<read_request> requests;
-    };
-
-    struct multi_read_response
-    {
-        std::vector<read_response> responses;
-    };
-
-    struct multi_read_mailbox : mailbox_base<multi_read_mailbox>
-    {
-        multi_read_mailbox(multi_read_request req)
-            : request(std::move(req)) {}
-
-        multi_read_request request;
-        multi_read_response response;
-
-        void prepare_sqes(std::span<io_uring_sqe*> sqes);
-        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
-
-        uint32_t needed_sqes()
-        {
-            return static_cast<uint32_t>(request.requests.size());
-        }
-
-        void* get_response()
-        {
-            return &response;
-        }
-
-    private:
-        uint64_t _landed_response{0};
-    };
 
     struct open_request;
     struct open_response;
@@ -389,13 +317,8 @@ namespace hedge::async
         open_request request;
         open_response response;
 
-        void prepare_sqes(std::span<io_uring_sqe*> sqes);
-        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
-
-        uint32_t needed_sqes()
-        {
-            return 1;
-        }
+        void prepare_sqe(io_uring_sqe* sqe);
+        void handle_cqe(io_uring_cqe* cqe);
 
         void* get_response()
         {
@@ -431,13 +354,8 @@ namespace hedge::async
         fallocate_request request;
         fallocate_response response;
 
-        void prepare_sqes(std::span<io_uring_sqe*> sqes);
-        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
-
-        uint32_t needed_sqes()
-        {
-            return 1;
-        }
+        void prepare_sqe(io_uring_sqe* sqe);
+        void handle_cqe(io_uring_cqe* cqe);
 
         void* get_response()
         {
@@ -470,13 +388,8 @@ namespace hedge::async
         close_request request;
         close_response response;
 
-        void prepare_sqes(std::span<io_uring_sqe*> sqes);
-        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
-
-        uint32_t needed_sqes()
-        {
-            return 1;
-        }
+        void prepare_sqe(io_uring_sqe* sqe);
+        void handle_cqe(io_uring_cqe* cqe);
 
         void* get_response()
         {
@@ -511,13 +424,8 @@ namespace hedge::async
         file_info_request request;
         file_info_response response;
 
-        void prepare_sqes(std::span<io_uring_sqe*> sqes);
-        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
-
-        uint32_t needed_sqes()
-        {
-            return 1;
-        }
+        void prepare_sqe(io_uring_sqe* sqe);
+        void handle_cqe(io_uring_cqe* cqe);
 
         void* get_response()
         {
@@ -555,13 +463,8 @@ namespace hedge::async
         fsync_request request;
         fsync_response response;
 
-        void prepare_sqes(std::span<io_uring_sqe*> sqes);
-        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
-
-        uint32_t needed_sqes()
-        {
-            return 1;
-        }
+        void prepare_sqe(io_uring_sqe* sqe);
+        void handle_cqe(io_uring_cqe* cqe);
 
         void* get_response()
         {
@@ -595,13 +498,8 @@ namespace hedge::async
         ftruncate_request request;
         ftruncate_response response;
 
-        void prepare_sqes(std::span<io_uring_sqe*> sqes);
-        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
-
-        uint32_t needed_sqes()
-        {
-            return 1;
-        }
+        void prepare_sqe(io_uring_sqe* sqe);
+        void handle_cqe(io_uring_cqe* cqe);
 
         void* get_response()
         {
@@ -630,13 +528,8 @@ namespace hedge::async
 
         yield_mailbox(yield_request) {}
         
-        void prepare_sqes(std::span<io_uring_sqe*> sqes);
-        bool handle_cqe(io_uring_cqe* cqe, uint8_t sub_request_idx);
-
-        uint32_t needed_sqes()
-        {
-            return 1;
-        }
+        void prepare_sqe(io_uring_sqe* sqe);
+        void handle_cqe(io_uring_cqe* cqe);
 
         void* get_response()
         {
@@ -653,7 +546,6 @@ namespace hedge::async
             unaligned_readv_mailbox,
             write_mailbox,
             writev_mailbox,
-            multi_read_mailbox,
             open_mailbox,
             fallocate_mailbox,
             close_mailbox,

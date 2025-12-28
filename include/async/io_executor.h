@@ -78,7 +78,7 @@ namespace hedge::async
         std::atomic_bool _running{true};
         std::thread _worker;
 
-        uint64_t current_request_id{0};
+        uint64_t _current_request_id{0};
         std::unordered_map<uint64_t, std::unique_ptr<mailbox>> _in_flight_requests;
 
         std::deque<std::unique_ptr<mailbox>> _waiting_for_io_queue;
