@@ -121,6 +121,9 @@ namespace hedge::db
         ifs.read(reinterpret_cast<char*>(allocated_data.data()), allocated_data.size() * sizeof(T));
     }
 
+    ///< Threshold indicating whether the super index should be enabled or not
+    constexpr size_t SUPER_INDEX_ENABLED_THRESHOLD = 16;
+
     /**
      * @brief Constructs the meta-index data structure from a sorted list of index entries.
      * @details Calculates the required size and iterates through the sorted keys, adding the
@@ -128,21 +131,26 @@ namespace hedge::db
      * to the meta-index vector. Through the meta-index, we can quickly locate (because each meta-index lookup
      * is in memory with complexity O(logN), where N is the number of pages) which page might
      * contain a given key.
+     * This same function can be used for building the super-index (or, meta-meta-index)
      * @param sorted_keys A const reference to the vector containing all index entries, sorted by key.
+     * @tparam T Item of ordered keys or key/value Ordered std::vector<T>.
      * @return The generated `std::vector<meta_index_entry>`.
      */
-    std::vector<meta_index_entry> create_meta_index(const std::vector<index_entry_t>& sorted_keys)
+    template <typename T, size_t PAGE_SIZE>
+    std::vector<meta_index_entry> create_meta_index(const std::vector<T>& sorted_keys)
     {
         // Calculate how many meta-index entries are needed (one per page).
-        auto meta_index_size = hedge::ceil(sorted_keys.size(), INDEX_PAGE_NUM_ENTRIES);
+        constexpr size_t ENTRIES_PER_PAGE = PAGE_SIZE / sizeof(T);
+
+        auto meta_index_size = hedge::ceil(sorted_keys.size(), ENTRIES_PER_PAGE);
         auto meta_index = std::vector<meta_index_entry>{};
         meta_index.reserve(meta_index_size);
 
         // Iterate through each conceptual page.
         for(size_t i = 0; i < meta_index_size; ++i)
         {
-            auto idx = std::min(((i + 1) * INDEX_PAGE_NUM_ENTRIES) - 1, sorted_keys.size() - 1);
-            meta_index.push_back({.page_max_id = sorted_keys[idx].key});
+            auto idx = std::min(((i + 1) * ENTRIES_PER_PAGE) - 1, sorted_keys.size() - 1);
+            meta_index.push_back({.key = sorted_keys[idx].key});
         }
 
         meta_index.shrink_to_fit();
@@ -274,7 +282,7 @@ namespace hedge::db
     index_ops::save_as_sorted_index(const std::filesystem::path& path, std::vector<index_entry_t>&& sorted_keys, size_t upper_bound, bool use_odirect)
     {
         // Step 1: Generate the meta-index from the sorted keys.
-        auto meta_index = create_meta_index(sorted_keys);
+        auto meta_index = create_meta_index<index_entry_t, PAGE_SIZE_IN_BYTES>(sorted_keys);
 
         footer_builder builder;
 
@@ -347,8 +355,20 @@ namespace hedge::db
         if(!use_odirect)
             posix_fadvise(fd.fd(), 0, 0, POSIX_FADV_NOREUSE);
 
+        constexpr size_t REF_PAGE_SIZE = 4096;
+        constexpr size_t KEYS_PER_META_INDEX_PAGE = REF_PAGE_SIZE / sizeof(meta_index_entry);
+
+        // Super index enabled if there would be 512 * 256 = 131072 meta index entries (2MB)
+        // In this case the super index would be 512 * 16 bytes = 8KB
+        std::optional<std::vector<meta_index_entry>> super_index;
+
+        if(meta_index.size() > KEYS_PER_META_INDEX_PAGE * SUPER_INDEX_ENABLED_THRESHOLD)
+            super_index = create_meta_index<meta_index_entry, REF_PAGE_SIZE>(meta_index);
+
         // Create the final object, moving the key and meta-index data into it.
         auto ss = sorted_index(std::move(fd), std::move(sorted_keys), std::move(meta_index), footer);
+
+        ss._super_index = std::move(super_index);
 
         return ss;
     }
@@ -395,7 +415,7 @@ namespace hedge::db
             return ss;
 
         // Finally, read index if requested
-        if(auto status = ss.load_index(); !status)
+        if(auto status = ss.load_index_from_fs(); !status)
             return hedge::error("Failed to load sorted index: " + status.error().to_string());
 
         return ss;
@@ -828,13 +848,28 @@ namespace hedge::db
         if(!read_fd.has_value())
             co_return hedge::error("Failed to open merged index file for reading: " + read_fd.error().to_string());
 
-        posix_fadvise(read_fd.value().fd(), 0, 0, POSIX_FADV_RANDOM);
+        if(read_fd.value().has_direct_access())
+            posix_fadvise(read_fd.value().fd(), 0, 0, POSIX_FADV_RANDOM);
+
+        constexpr size_t REF_PAGE_SIZE = 4096;
+        constexpr size_t KEYS_PER_META_INDEX_PAGE = REF_PAGE_SIZE / sizeof(meta_index_entry);
+
+        // Super index enabled if there would be 512 * 256 = 131072 meta index entries (2MB)
+        // In this case the super index would be 512 * 16 bytes = 8KB
+        std::optional<std::vector<meta_index_entry>> super_index;
+
+        if(merged_meta_index.size() > KEYS_PER_META_INDEX_PAGE * SUPER_INDEX_ENABLED_THRESHOLD)
+            super_index = create_meta_index<meta_index_entry, REF_PAGE_SIZE>(merged_meta_index);
+
+        merged_meta_index.shrink_to_fit();
 
         sorted_index result{
             std::move(read_fd.value()),
             {},
             std::move(merged_meta_index),
             footer};
+
+        result._super_index = std::move(super_index);
 
         co_return result;
     }

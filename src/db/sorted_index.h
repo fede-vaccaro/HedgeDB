@@ -14,8 +14,10 @@
 #include "async/io_executor.h"
 #include "async/task.h"
 #include "fs/fs.hpp"
-#include "page_cache.h"
+#include "cache.h"
 #include "types.h"
+
+#include "perf_counter.h"
 
 namespace hedge::db
 {
@@ -51,7 +53,7 @@ namespace hedge::db
      */
     struct meta_index_entry
     {
-        uuids::uuid page_max_id{}; ///< The maximum key present in the corresponding data page.
+        uuids::uuid key{}; ///< The maximum key present in the corresponding data page.
     };
 
     /**
@@ -74,11 +76,16 @@ namespace hedge::db
         // Allow index_ops to access private members for operations like merging/saving.
         friend struct index_ops;
 
-        std::vector<index_entry_t> _index;         ///< In-memory copy of the entire main index data (optional, loaded by load_index()). Empty if using on-demand page loading.
-        std::vector<meta_index_entry> _meta_index; ///< In-memory copy of the meta-index (always loaded on construction/load).
-        sorted_index_footer _footer;               ///< In-memory copy of the file's footer (always loaded on construction/load).
+        std::vector<index_entry_t> _index;                         ///< In-memory copy of the entire main index data (optional, loaded by load_index()). Empty if using on-demand page loading.
+        std::vector<meta_index_entry> _meta_index;                 ///< In-memory copy of the meta-index (always loaded on construction/load).
+        std::optional<std::vector<meta_index_entry>> _super_index; ///< The super index can be built to facilitate lookup over the meta index.
+        sorted_index_footer _footer;                               ///< In-memory copy of the file's footer (always loaded on construction/load).
 
     public:
+        inline static avg_stat get_write_slot_time{};
+        inline static avg_stat cache_lookup_time{};
+        inline static avg_stat find_in_page_time{};
+
         /**
          * @brief Constructs a sorted_index object.
          * @param fd An rvalue reference to an `fs::file` object managing the file descriptor.
@@ -141,7 +148,7 @@ namespace hedge::db
          * @return A `hedge::status`. Returns an error if memory mapping or file reading fails.
          * @throws std::runtime_error (meaning, it panics) if mmap fails.
          */
-        hedge::status load_index();
+        hedge::status load_index_from_fs();
 
         /**
          * @brief Gets the upper bound of the key partition this index belongs to, as stored in the footer.

@@ -1,8 +1,12 @@
+#include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <linux/perf_event.h>
 #include <optional>
+#include <stdexcept>
 #include <unistd.h>
 #include <vector>
 
@@ -12,26 +16,52 @@
 #include "async/io_executor.h"
 #include "async/mailbox_impl.h"
 #include "async/task.h"
+#include "cache.h"
 #include "fs/fs.hpp"
-#include "page_cache.h"
 #include "sorted_index.h"
 #include "types.h"
+
+#include <perf_counter.h>
 
 namespace hedge::db
 {
 
     std::optional<size_t> sorted_index::_find_page_id(const key_t& key) const
     {
-        // Define a custom comparator for lower_bound. We are looking for the first
-        // element 'a' for which the predicate `a.page_max_id < key` is false.
-        // This means `a.page_max_id >= key`.
+        auto meta_index_range_begin = this->_meta_index.begin();
+        auto meta_index_range_end = this->_meta_index.end();
+
         auto comparator = [](const meta_index_entry& a, const key_t& b)
         {
-            return a.page_max_id < b;
+            return a.key < b;
         };
 
+        if(this->_super_index.has_value())
+        {
+            auto it = std::lower_bound(this->_super_index->begin(), this->_super_index->end(), key, comparator);
+            if(it == this->_super_index->end())
+                return std::nullopt;
+
+            constexpr size_t REF_PAGE_SIZE = 4096;
+            constexpr size_t KEYS_PER_META_INDEX_PAGE = REF_PAGE_SIZE / sizeof(meta_index_entry);
+
+            size_t meta_index_page_id = std::distance(this->_super_index->begin(), it);
+
+            meta_index_range_begin = this->_meta_index.begin() + (meta_index_page_id * KEYS_PER_META_INDEX_PAGE);
+            meta_index_range_end = meta_index_range_begin + KEYS_PER_META_INDEX_PAGE;
+
+            if(bool is_last_page = meta_index_page_id == this->_super_index->size() - 1; is_last_page)
+            {
+                size_t last_page_size = this->_meta_index.size() % KEYS_PER_META_INDEX_PAGE;
+                if(last_page_size != 0)
+                    meta_index_range_end = meta_index_range_begin + last_page_size;
+            }
+            for(auto it = meta_index_range_begin; it != meta_index_range_end; it++)
+                __builtin_prefetch(it.base());
+        }
+
         // Perform the binary search on the meta-index.
-        auto it = std::lower_bound(this->_meta_index.begin(), this->_meta_index.end(), key, comparator);
+        auto it = std::lower_bound(meta_index_range_begin, meta_index_range_end, key, comparator);
 
         // If lower_bound returns the end iterator, it means the key is greater than
         // the maximum key of all pages in this index file.
@@ -105,6 +135,12 @@ namespace hedge::db
 
         auto page_start_offset = this->_footer.index_start_offset + (page_id * PAGE_SIZE_IN_BYTES);
 
+        // start_counter(fd);
+
+        int get_write_slot_fd = avg_stat::fd();
+        int find_in_page_fd = avg_stat::fd();
+        int cache_lookup_time_fd = avg_stat::fd();
+
         std::optional<page_cache::page_guard> opt_page_guard;
         auto page_tag = to_page_tag(static_cast<uint32_t>(this->fd()), page_start_offset);
         std::unique_ptr<uint8_t> data; // might be needed for holding a temporary page memory allocation
@@ -113,37 +149,34 @@ namespace hedge::db
 
         if(!should_read_from_fs)
         {
+            start_counter(cache_lookup_time_fd);
             auto maybe_page_guard = cache->lookup(page_tag);
 
             if(maybe_page_guard.has_error() && maybe_page_guard.error().code() == errc::BUSY)
             {
                 should_read_from_fs = true;
-                // std::cout << "read lock busy!!!!\n";
             }
             else if(maybe_page_guard.value().has_value())
             {
                 opt_page_guard = std::move(maybe_page_guard.value().value());
                 page_ptr = opt_page_guard->page_data;
-                // std::cout << "read lock ok!!!!\n";
             }
+            sorted_index::cache_lookup_time.add(stop_counter(cache_lookup_time_fd));
         }
 
         if(!should_read_from_fs && !opt_page_guard.has_value())
         {
+            start_counter(get_write_slot_fd);
             should_read_from_fs = true;
 
             auto maybe_write_slot = cache->get_write_slot(page_tag);
+
             if(maybe_write_slot.has_value())
             {
                 opt_page_guard = std::move(maybe_write_slot.value());
                 page_ptr = opt_page_guard->page_data;
-                // std::cout << "write lock ok!\n";
             }
-            else
-            {
-                // should_read_from_fs = true;
-                // std::cout << "write lock busy!!!\n";
-            }
+            sorted_index::get_write_slot_time.add(stop_counter(get_write_slot_fd));
         }
 
         if(should_read_from_fs)
@@ -170,6 +203,8 @@ namespace hedge::db
                 co_return maybe_page_ptr.error();
         }
 
+        // auto cycles = stop_counter(fd);
+
         auto* page_start_ptr = reinterpret_cast<index_entry_t*>(page_ptr);
         index_entry_t* page_end_ptr = page_start_ptr + INDEX_PAGE_NUM_ENTRIES;
 
@@ -181,7 +216,10 @@ namespace hedge::db
                 page_end_ptr = page_start_ptr + entries_on_last_page;
         }
 
+        start_counter(find_in_page_fd);
         hedge::expected<std::optional<value_ptr_t>> res = sorted_index::_find_in_page(key, page_start_ptr, page_end_ptr);
+        sorted_index::find_in_page_time.add(stop_counter(find_in_page_fd));
+
         co_return res;
     }
 
@@ -226,7 +264,10 @@ namespace hedge::db
             return it->value_ptr; // Key found, return the associated value pointer.
 
         // Debugging output (commented out)
-        // for(auto* dbg_it = start; dbg_it != end; ++dbg_it) { std::cout << "Index entry key: " << dbg_it->key << std::endl; }
+        // for(auto* dbg_it = start; dbg_it != end; ++dbg_it)
+        // {
+        //     std::cout << "Index entry key: " << dbg_it->key << std::endl;
+        // }
 
         return std::nullopt; // Key not found in this page range.
     }
@@ -272,7 +313,7 @@ namespace hedge::db
         this->_index = std::vector<index_entry_t>{};
     }
 
-    hedge::status sorted_index::load_index()
+    hedge::status sorted_index::load_index_from_fs()
     {
         if(!this->_index.empty())
             return hedge::ok();

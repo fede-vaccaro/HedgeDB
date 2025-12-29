@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -213,8 +215,6 @@ namespace hedge::db
             return this->_size;
         }
 
-        inline static size_t s_total_duration = 0;
-
     private:
         void _find_frame()
         {
@@ -245,6 +245,43 @@ namespace hedge::db
                 // Advance clock head
                 this->_clock_head = (this->_clock_head + 1) % this->_max_page_capacity;
             }
+        }
+    };
+
+    class point_cache
+    {
+        std::shared_mutex _m{};
+        std::unordered_map<key_t, value_ptr_t> _lut;
+        size_t _max_page_capacity;
+
+    public:
+        explicit point_cache(size_t bytes) : _max_page_capacity(hedge::ceil(bytes, sizeof(index_entry_t)))
+        {
+            this->_lut.reserve(this->_max_page_capacity);
+        }
+
+        void put(key_t key, value_ptr_t value_ptr)
+        {
+            std::lock_guard lk(this->_m);
+            if(this->_lut.size() >= this->_max_page_capacity)
+                this->_lut.erase(this->_lut.begin());
+
+            this->_lut[key] = value_ptr;
+        }
+
+        std::optional<value_ptr_t> lookup(key_t key)
+        {
+            std::shared_lock lk(this->_m);
+            auto it = this->_lut.find(key);
+            if(it == this->_lut.end())
+                return std::nullopt;
+
+            return it->second;
+        }
+
+        size_t capacity() const
+        {
+            return this->_max_page_capacity;
         }
     };
 

@@ -13,8 +13,8 @@
 
 #include "async/wait_group.h"
 #include "database.h"
+#include "db/cache.h"
 #include "db/mem_index.h"
-#include "db/page_cache.h"
 #include "index_ops.h"
 #include "io_executor.h"
 #include "sorted_index.h"
@@ -64,12 +64,15 @@ namespace hedge::db
 
         db->_pipelined_value_table = std::move(pipelined_value_table.value());
 
-        if(config.index_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB cache
-            db->_index_cache = std::make_shared<page_cache>(config.index_clock_cache_size_bytes);
+        if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB page cache
+            db->_index_page_cache = std::make_shared<page_cache>(config.index_page_clock_cache_size_bytes);
+
+        if(config.index_point_cache_size_bytes > 1024 * 1024 * 1) // Mininum 1MB entry cache
+            db->_index_point_cache = std::make_shared<point_cache>(config.index_point_cache_size_bytes);
 
         db->_value_tables.reserve(4096);
 
-        db->_write_buffers.resize(database::PARALLEL_WRITERS);
+        db->_write_buffers.resize(async::executor_pool::static_pool().size());
 
         for(auto& write_buffer_ptr : db->_write_buffers)
         {
@@ -153,10 +156,13 @@ namespace hedge::db
 
         db->_last_table_id = max_last_table_id + 1; // pipelined table is last_table_id + 1
 
-        if(config.index_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB cache
-            db->_index_cache = std::make_shared<page_cache>(config.index_clock_cache_size_bytes);
+        if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB page cache
+            db->_index_page_cache = std::make_shared<page_cache>(config.index_page_clock_cache_size_bytes);
 
-        db->_write_buffers.resize(database::PARALLEL_WRITERS);
+        if(config.index_point_cache_size_bytes > 1024 * 1024 * 1) // Mininum 1MB entry cache
+            db->_index_point_cache = std::make_shared<point_cache>(config.index_point_cache_size_bytes);
+
+        db->_write_buffers.resize(async::executor_pool::static_pool().size());
 
         for(auto& write_buffer_ptr : db->_write_buffers)
         {
@@ -169,7 +175,7 @@ namespace hedge::db
         return hedge::error("Load database from path not implemented yet");
     }
 
-    async::task<hedge::status> database::put_async(key_t key, const byte_buffer_t& value, const std::shared_ptr<async::executor_context>& executor)
+    async::task<hedge::status> database::put_async(key_t key, const byte_buffer_t& value)
     {
         if(auto size = this->_mem_index_size.load(); size >= this->_config.keys_in_mem_before_flush) // Check if the memtable needs flushing
         {
@@ -250,7 +256,7 @@ namespace hedge::db
         // If so, we should write directly on file
         if(!maybe_write && maybe_write.error().code() == hedge::errc::BUFFER_FULL)
         {
-            auto buffer_flush_status = co_await write_buffer_ref->flush(executor);
+            auto buffer_flush_status = co_await write_buffer_ref->flush(async::this_thread_executor());
             if(!buffer_flush_status)
                 co_return buffer_flush_status;
 
@@ -298,7 +304,15 @@ namespace hedge::db
             }
         }
 
-        // Step 2: If not found in memtable, search the relevant sorted index files.
+        // Step 1.2: Check entry cache
+        std::optional<value_ptr_t> cached_key;
+        if(!value_ptr_opt && this->_index_point_cache)
+        {
+            cached_key = this->_index_point_cache->lookup(key);
+            value_ptr_opt = cached_key;
+        }
+
+        // Step 2: If not found in memtable and cache, search the relevant sorted index files.
         if(!value_ptr_opt.has_value())
         {
             size_t matching_partition_id = this->_find_matching_partition_for_key(key);
@@ -318,7 +332,7 @@ namespace hedge::db
             // TODO: Add bloom filter support to skip unnecessary lookups.
             for(const auto& sorted_index_ptr : sorted_indices_local)
             {
-                auto maybe_value_ptr = co_await sorted_index_ptr->lookup_async(key, executor, this->_index_cache);
+                auto maybe_value_ptr = co_await sorted_index_ptr->lookup_async(key, executor, this->_index_page_cache);
                 if(!maybe_value_ptr.has_value())
                     co_return hedge::error(std::format("An error occurred while reading index at path {}: {}", sorted_index_ptr->path().string(), maybe_value_ptr.error().to_string()));
 
@@ -335,6 +349,10 @@ namespace hedge::db
 
         if(value_ptr_opt.value().is_deleted())
             co_return hedge::error("Key deleted from index", errc::DELETED);
+
+        // Update cache if possible
+        if(cached_key != value_ptr_opt && this->_index_point_cache)
+            this->_index_point_cache->put(key, value_ptr_opt.value());
 
         // Step 4: Find the corresponding value table based on the table ID in the value pointer.
         auto table_finder = [this](uint32_t id) -> std::shared_ptr<value_table>
@@ -359,8 +377,10 @@ namespace hedge::db
         co_return {value_ptr_opt.value(), std::move(table_ptr)};
     }
 
-    async::task<expected<database::byte_buffer_t>> database::get_async(key_t key, const std::shared_ptr<async::executor_context>& executor)
+    async::task<expected<database::byte_buffer_t>> database::get_async(key_t key)
     {
+        const auto& executor = async::this_thread_executor();
+
         auto maybe_value_ptr_table = co_await this->_find_value_ptr_and_value_table(key, executor);
 
         if(!maybe_value_ptr_table)
@@ -385,7 +405,6 @@ namespace hedge::db
         // with the requested `key` to detect potential data corruption or pointer errors.
 
         co_return std::move(maybe_file.value().binaries);
-        // co_return std::vector<uint8_t>{};
     }
 
     size_t database::_find_matching_partition_for_key(const key_t& key) const
@@ -400,15 +419,17 @@ namespace hedge::db
         return matching_partition_id;
     }
 
-    async::task<hedge::status> database::remove_async(key_t key, const std::shared_ptr<async::executor_context>& executor)
+    async::task<hedge::status> database::remove_async(key_t key)
     {
+        const auto& executor = async::this_thread_executor();
+
         // First, locate the latest version of the key (value_ptr and its table).
         // This is necessary to potentially mark the entry deleted in the value log itself (if not already handled by GC).
         auto maybe_value_ptr_table = co_await this->_find_value_ptr_and_value_table(key, executor);
 
         // TODO: We might want to allow deleting non-existing keys (idempotent delete)
         // and completely skip the lookup. This will create some overhead in the memtable
-        // but should not be inconsistent
+        // bu7t should not be inconsistent
         if(!maybe_value_ptr_table)
             co_return maybe_value_ptr_table.error();
 
@@ -644,7 +665,7 @@ namespace hedge::db
                 // - filter_delete_keys is `true`
                 // - A key is in more than two sorted indices and is deleted in one of them
                 // The key would appear again, because we lost track of it after merging the first two indices
-                const auto& executor = async::executor_from_static_pool();
+                const auto& executor = async::executor_pool::executor_from_static_pool();
                 executor->submit_io_task(make_compaction_sub_task(partition_vec, executor, wg));
             }
 

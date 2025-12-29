@@ -57,8 +57,11 @@ namespace hedge::async
         if(ret < 0)
             throw std::runtime_error("error with io_uring_queue_init: "s + strerror(-ret));
 
-        this->_worker = std::thread([this]()
-                                    { this->_event_loop(); });
+        this->_worker = std::thread(
+            [this]()
+            {
+                this->_event_loop();
+            });
 
         this->_in_flight_requests.reserve(this->_queue_depth * 32);
 
@@ -272,34 +275,57 @@ namespace hedge::async
         }
     }
 
-    const std::shared_ptr<executor_context>& executor_from_static_pool()
+    //
+    // Static I/O Thread Pool
+    //
+    std::unique_ptr<executor_pool> executor_pool::_static_pool = nullptr;
+
+    void executor_pool::init_static_pool(size_t pool_size, size_t queue_depth)
     {
-        using executor_pool = std::array<std::shared_ptr<executor_context>, async::NUM_STATIC_EXECUTORS>;
+        if(executor_pool::_static_pool)
+            return;
 
-        static std::atomic_uint64_t current_head{0};
-        static executor_pool pool = []()
-        {
-            executor_pool _pool;
+        executor_pool::_static_pool = std::unique_ptr<executor_pool>(new executor_pool(pool_size, queue_depth));
+    }
 
-            for(auto& pool_ptr : _pool)
-                pool_ptr = std::make_shared<executor_context>(128);
+    const std::shared_ptr<executor_context>& executor_pool::executor_from_static_pool()
+    {
+        assert(executor_pool::_static_pool);
+        return executor_pool::_static_pool->get_executor();
+    }
 
-            return _pool;
-        }();
+    thread_local std::shared_ptr<executor_context> executor_context::_this_thread_executor = nullptr;
 
-        return pool[current_head.fetch_add(1, std::memory_order_relaxed) % pool.size()];
+    const std::shared_ptr<executor_context>& executor_context::this_thread_executor()
+    {
+        return executor_context::_this_thread_executor;
     }
 
     executor_pool::executor_pool(size_t pool_size, uint32_t queue_depth)
     {
-        // check if is power of 2
+        // Check if pool size is power of 2
         if(std::popcount(pool_size) != 1)
             throw std::runtime_error("executor_pool size must be a power of 2");
 
         for(size_t i = 0; i < pool_size; ++i)
         {
-            this->_executors.emplace_back(std::make_shared<executor_context>(queue_depth));
+            auto new_executor = std::make_shared<executor_context>(queue_depth);
+            new_executor->sync_submit(
+                [&new_executor]() -> async::task<int>
+                {
+                    executor_context::_this_thread_executor = new_executor;
+                    co_return 0; // At the moment, sync_submit requires a return value
+                }());
+            this->_executors.emplace_back(std::move(new_executor));
         }
+    }
+
+    executor_pool& executor_pool::static_pool()
+    {
+        if(executor_pool::_static_pool == nullptr)
+            throw std::runtime_error("static executors not initialized: call executor_pool::init first");
+
+        return *executor_pool::_static_pool;
     }
 
     const std::shared_ptr<executor_context>& executor_pool::get_executor()

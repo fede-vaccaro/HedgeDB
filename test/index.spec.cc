@@ -10,7 +10,7 @@
 #include "async/wait_group.h"
 #include "db/index_ops.h"
 #include "db/mem_index.h"
-#include "db/page_cache.h"
+#include "db/cache.h"
 #include "db/sorted_index.h"
 #include "utils.h"
 
