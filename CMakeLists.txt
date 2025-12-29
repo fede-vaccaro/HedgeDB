@@ -22,10 +22,10 @@ endif()
 
 if (CMAKE_BUILD_TYPE MATCHES "Debug")
     message (STATUS "Building in Debug mode")
-    set(CMAKE_CXX_FLAGS "-g -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Werror")
+    set(CMAKE_CXX_FLAGS "-O0 -g -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Werror")
 elseif (CMAKE_BUILD_TYPE MATCHES "Release")
     message (STATUS "Building in Release mode")
-    set(CMAKE_CXX_FLAGS "-O3 -g -fno-omit-frame-pointer")
+    set(CMAKE_CXX_FLAGS "-O2 -g -fno-omit-frame-pointer")
 endif()
 
 set(PUBLIC_INCLUDES 
@@ -55,7 +55,7 @@ set(DB_SOURCES
     src/db/value_table.h
     src/db/database.cc
     src/db/database.h
-    src/db/page_cache.h
+    src/db/cache.h
 )
 
 set(IO_EXECUTOR_SRCS 

@@ -16,7 +16,7 @@
 #include "async/spinlock.h"
 #include "async/task.h"
 #include "async/worker.h"
-#include "db/page_cache.h"
+#include "db/cache.h"
 #include "mem_index.h"
 #include "sorted_index.h"
 #include "types.h"
@@ -56,7 +56,9 @@ namespace hedge::db
         /// If true, use O_DIRECT flag for sorted_index file I/O to bypass
         bool use_odirect_for_indices = true;
         /// Use 0 no cache is desired; the cache size in bytes otherwise
-        size_t index_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024;
+        size_t index_page_clock_cache_size_bytes = 1UL * 1024 * 1024 * 1024;
+
+        size_t index_point_cache_size_bytes = 512 * 1024 * 1024;
     };
 
     /**
@@ -101,7 +103,6 @@ namespace hedge::db
 
         // --- Write buffers ---
         /// Each thread should have
-        static constexpr size_t PARALLEL_WRITERS = async::NUM_STATIC_EXECUTORS;
         static constexpr size_t WRITE_BUFFER_DEFAULT_SIZE = 16 * 4096; // 64 kb
         inline static std::atomic_size_t _thread_count{0};
         std::vector<std::unique_ptr<write_buffer>> _write_buffers;
@@ -120,7 +121,8 @@ namespace hedge::db
         async::worker _flush_worker{};
 
         // Index page cache
-        std::shared_ptr<page_cache> _index_cache;
+        std::shared_ptr<page_cache> _index_page_cache;
+        std::shared_ptr<point_cache> _index_point_cache;
 
         // --- Utilities ---
         logger _logger{"database"}; ///< Logger instance for database-related messages.
@@ -136,7 +138,7 @@ namespace hedge::db
          * @param executor The I/O executor context for disk operations.
          * @return An async task resolving to an expected containing the value (byte_buffer_t) or an error.
          */
-        async::task<expected<byte_buffer_t>> get_async(key_t key, const std::shared_ptr<async::executor_context>& executor);
+        async::task<expected<byte_buffer_t>> get_async(key_t key);
 
         /**
          * @brief Asynchronously inserts or updates a key-value pair (by copying value).
@@ -147,7 +149,7 @@ namespace hedge::db
          * @param executor The I/O executor context.
          * @return An async task resolving to a status indicating success or failure.
          */
-        async::task<hedge::status> put_async(key_t key, const byte_buffer_t& value, const std::shared_ptr<async::executor_context>& executor);
+        async::task<hedge::status> put_async(key_t key, const byte_buffer_t& value);
 
         /**
          * @brief Asynchronously marks a key as deleted.
@@ -158,7 +160,7 @@ namespace hedge::db
          * @param executor The I/O executor context.
          * @return An async task resolving to a status indicating success or failure (e.g., key not found).
          */
-        async::task<hedge::status> remove_async(key_t key, const std::shared_ptr<async::executor_context>& executor);
+        async::task<hedge::status> remove_async(key_t key);
         /**
          * @brief Submits a compaction job to the background compaction worker.
          * Iteratively merges pairs of sorted_index files within partitions based on configured ratios until stable.

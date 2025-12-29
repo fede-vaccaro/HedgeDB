@@ -102,7 +102,7 @@ namespace hedge::db
          * @return Always returns `true` (consistent with `std::map::insert_or_assign` which returns an iterator+bool).
          * The boolean indicates if an insertion happened, but this implementation simplifies it.
          */
-        bool put(const key_t& key, const value_ptr_t& value)
+        bool put(key_t key, value_ptr_t value)
         {
             auto [it, inserted] = this->_index.emplace(key, value);
             this->_buffer.emplace_back(key, value);
@@ -120,7 +120,7 @@ namespace hedge::db
          * @return An `std::optional<value_ptr_t>` containing the associated value pointer
          * if the key is found, otherwise `std::nullopt`.
          */
-        std::optional<value_ptr_t> get(const key_t& key) const
+        std::optional<value_ptr_t> get(key_t key) const
         {
             auto it = _index.find(key);
             if(it != _index.end())

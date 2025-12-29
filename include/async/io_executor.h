@@ -67,9 +67,12 @@ namespace hedge::async
         6. mailbox.handle_cqe() → populate response
         7. mailbox.resume() → coroutine continues
     */
+    class executor_pool;
 
-    class executor_context
+    class executor_context : public std::enable_shared_from_this<executor_context>
     {
+        friend executor_pool;
+
         size_t _queue_depth;
         size_t _max_buffered_requests;
 
@@ -136,28 +139,42 @@ namespace hedge::async
 
         void register_fd(int32_t fd);
 
+        static const std::shared_ptr<executor_context>& this_thread_executor();
+
     private:
+        static thread_local std::shared_ptr<executor_context> _this_thread_executor;
+
         void _submit_sqe();
         void _do_work();
         void _wait_for_cqe();
         void _event_loop();
         std::vector<io_uring_sqe*>& _fill_sqes(size_t sqes_requested);
-
-        static uint64_t forge_request_key(uint64_t request_id, uint8_t sub_request_idx);
-        static std::pair<uint64_t, uint8_t> parse_request_key(uint64_t key);
     };
 
-    constexpr size_t NUM_STATIC_EXECUTORS = 8;
-    const std::shared_ptr<executor_context>& executor_from_static_pool();
+    inline const std::shared_ptr<executor_context>& this_thread_executor()
+    {
+        return executor_context::this_thread_executor();
+    }
 
     class executor_pool
     {
         std::vector<std::shared_ptr<executor_context>> _executors;
         std::atomic_size_t _next_executor{0};
 
-    public:
         executor_pool(size_t pool_size, uint32_t queue_depth);
         const std::shared_ptr<executor_context>& get_executor();
+
+        static std::unique_ptr<executor_pool> _static_pool;
+
+    public:
+        [[nodiscard]] size_t size() const
+        {
+            return this->_executors.size();
+        }
+
+        static executor_pool& static_pool();
+        static void init_static_pool(size_t pool_size, size_t queue_depth);
+        static const std::shared_ptr<executor_context>& executor_from_static_pool();
     };
 
 } // namespace hedge::async

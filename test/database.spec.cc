@@ -2,7 +2,6 @@
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
-#include <mutex>
 #include <random>
 #include <stdexcept>
 #include <sys/types.h>
@@ -14,6 +13,7 @@
 #include "async/io_executor.h"
 #include "async/wait_group.h"
 #include "db/database.h"
+#include "db/sorted_index.h"
 #include "fs/fs.hpp"
 #include "uuid.h"
 
@@ -21,6 +21,11 @@ namespace hedge::db
 {
     struct database_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, size_t>>
     {
+        static void SetUpTestSuite()
+        {
+            async::executor_pool::init_static_pool(8, 128);
+        }
+
         void SetUp() override
         {
             this->N_KEYS = std::get<0>(GetParam());
@@ -122,14 +127,16 @@ namespace hedge::db
         write_wg->set(this->N_KEYS);
 
         db_config config;
-        config.auto_compaction = false;
+        config.auto_compaction = true;
         config.keys_in_mem_before_flush = this->MEMTABLE_CAPACITY;
         config.compaction_read_ahead_size_bytes = 32 * 1024 * 1024;
         config.num_partition_exponent = 0;
         config.target_compaction_size_ratio = 1.0 / 3.0;
         config.use_odirect_for_indices = true;
-        // config.index_clock_cache_size_bytes = 0;
-        config.index_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024;
+        config.index_page_clock_cache_size_bytes = 0;
+
+        // config.index_page_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024;
+        config.index_point_cache_size_bytes = 1UL * 1024 * 1024 * 1024;
 
         auto maybe_db = database::make_new(this->_base_path, config);
         ASSERT_TRUE(maybe_db) << "An error occurred while creating the database: " << maybe_db.error().to_string();
@@ -140,29 +147,20 @@ namespace hedge::db
 
         std::uniform_real_distribution<double> dist(0.0, 1.0);
 
-        // auto format_value_hex = [](const std::vector<uint8_t>& value) -> std::string
-        // {
-        //     std::ostringstream oss;
-        //     oss << std::hex;
-        //     for(const auto& byte : value)
-        //         oss << static_cast<int>(byte);
-        //     return oss.str();
-        // };
-
-        auto make_put_task = [this, &db, &write_wg, &dist](size_t i, const auto& executor) -> async::task<void>
+        auto make_put_task = [this, &db, &write_wg, &dist](size_t i) -> async::task<void>
         {
             auto [key, seed] = this->_key_value_seeds[i];
 
             auto value = this->_possible_values[seed % MAX_CACHE_ITEMS_CAPACITY];
 
-            auto status = co_await db->put_async(key, value, executor);
+            auto status = co_await db->put_async(key, value);
 
             if(!status)
                 std::cerr << "An error occurred during insertion: " << status.error().to_string() << std::endl;
 
             if(this->TEST_DELETION && dist(this->_generator) < this->DELETE_PROBABILITY)
             {
-                auto status = co_await db->remove_async(key, executor);
+                auto status = co_await db->remove_async(key);
 
                 if(!status)
                     std::cerr << "An error occurred during deletion: " << status.error().to_string() << std::endl;
@@ -177,8 +175,8 @@ namespace hedge::db
 
         for(size_t i = 0; i < this->N_KEYS; ++i)
         {
-            const auto& executor = async::executor_from_static_pool();
-            executor->submit_io_task(make_put_task(i, executor));
+            const auto& executor = async::executor_pool::executor_from_static_pool();
+            executor->submit_io_task(make_put_task(i));
         }
         write_wg->wait();
         auto t1 = std::chrono::high_resolution_clock::now();
@@ -211,15 +209,20 @@ namespace hedge::db
         auto begin = this->_key_value_seeds.begin();
         auto end = this->_key_value_seeds.end();
 
+        std::cout << "Shufflin keys..." << std::endl;
         std::shuffle(begin, end, this->_generator);
 
+        std::cout << "Syncing FDs..." << std::endl;
         sync();
 
         auto sleep_time = std::chrono::seconds(1);
         std::cout << "Sleeping " << sleep_time.count() << " seconds before starting retrieval to cool down..." << std::endl;
         std::this_thread::sleep_for(sleep_time);
 
-        // this->N_KEYS /= 8; // reduce number of keys to read
+        this->N_KEYS = std::min(10'000'000UL, this->N_KEYS); // reduce number of keys to read
+
+        this->_key_value_seeds.resize(this->N_KEYS);
+        this->_key_value_seeds.shrink_to_fit();
 
         for(int i = 0; i < 2; i++)
         {
@@ -235,11 +238,11 @@ namespace hedge::db
 
             std::atomic_size_t number_of_errors = 0;
 
-            auto make_get_task = [this, &db, &read_wg, &number_of_errors](size_t i, const auto& executor) -> async::task<void>
+            auto make_get_task = [this, &db, &read_wg, &number_of_errors](size_t i) -> async::task<void>
             {
                 auto [key, seed] = this->_key_value_seeds[i];
 
-                auto maybe_value = co_await db->get_async(key, executor);
+                auto maybe_value = co_await db->get_async(key);
 
                 if(!maybe_value.has_value() && maybe_value.error().code() == errc::DELETED)
                 {
@@ -278,8 +281,8 @@ namespace hedge::db
 
             for(size_t i = 0; i < this->N_KEYS; ++i)
             {
-                const auto& executor = async::executor_from_static_pool();
-                executor->submit_io_task(make_get_task(i, executor));
+                const auto& executor = async::executor_pool::executor_from_static_pool();
+                executor->submit_io_task(make_get_task(i));
             }
 
             read_wg->wait();
@@ -296,6 +299,13 @@ namespace hedge::db
             std::cout << "Average duration per retrieval: " << (double)duration.count() / this->N_KEYS << " us" << std::endl;
             std::cout << "Retrieval throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000) << " items/s" << std::endl;
             std::cout << "Retrieval bandwidth: " << (double)this->N_KEYS * (this->PAYLOAD_SIZE / 1000.0) / (duration.count() / 1000.0) << " MB/s" << std::endl;
+
+            std::cout << "Cache write slot clocks: " << sorted_index::get_write_slot_time.get() << std::endl;
+            sorted_index::get_write_slot_time.reset();
+            std::cout << "Cache lookup clocks: " << sorted_index::cache_lookup_time.get() << std::endl;
+            sorted_index::cache_lookup_time.reset();
+            std::cout << "Find in page clocks: " << sorted_index::find_in_page_time.get() << std::endl;
+            sorted_index::find_in_page_time.reset();
         }
     }
 
@@ -303,9 +313,9 @@ namespace hedge::db
         test_suite,
         database_test,
         testing::Combine(
-            testing::Values(10'000'000), // n keys
-            testing::Values(100),       // payload size
-            testing::Values(1'000'000)   // memtable capacity
+            testing::Values(80'000'000), // n keys
+            testing::Values(100),         // payload size
+            testing::Values(1'000'000)    // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)
         {
