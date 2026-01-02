@@ -33,7 +33,7 @@ namespace hedge
     }
 
     template <typename T>
-    inline T ceil(T value, T divisor)
+    constexpr T ceil(T value, T divisor)
     {
         return (value + divisor - 1) / divisor;
     }
@@ -68,5 +68,83 @@ namespace hedge
     [[nodiscard]] std::pair<std::string, std::string> format_prefix(uint16_t prefix);
 
     std::vector<std::pair<size_t, std::filesystem::path>> get_prefixes(const std::filesystem::path& base_path, size_t num_space_partitions);
+
+    // Needed for page aligned buffers
+    template <typename T>
+    struct page_aligned_buffer
+    {
+    private:
+        std::unique_ptr<uint8_t> buf;
+        size_t _size;
+
+    public:
+        page_aligned_buffer() = default;
+        explicit page_aligned_buffer(size_t s) : _size(s)
+        {
+            size_t mem = hedge::ceil(s * sizeof(T), PAGE_SIZE_IN_BYTES) * PAGE_SIZE_IN_BYTES;
+
+            buf = std::unique_ptr<uint8_t>(static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, mem)));
+            assert(buf);
+
+            std::fill(buf.get(), buf.get() + mem, 0);
+        }
+
+        T* data()
+        {
+            return reinterpret_cast<T*>(buf.get());
+        }
+
+        const T* data() const
+        {
+            return reinterpret_cast<T*>(buf.get());
+        }
+
+        T* begin()
+        {
+            return this->data();
+        }
+
+        T* end()
+        {
+            return this->data() + _size;
+        }
+
+        const T* begin() const
+        {
+            return this->data();
+        }
+
+        const T* end() const
+        {
+            return this->data() + _size;
+        }
+
+        T& operator[](size_t idx)
+        {
+            return this->data()[idx];
+        }
+
+        const T& operator[](size_t idx) const
+        {
+            return this->data()[idx];
+        }
+
+        [[nodiscard]] bool empty() const
+        {
+            return this->_size == 0;
+        }
+
+        [[nodiscard]] size_t size() const
+        {
+            return this->_size;
+        }
+
+        void resize(size_t size)
+        {
+            assert(size <= this->_size);
+            std::fill(this->data() + size, this->data() + this->_size, T{});
+            this->_size = size;
+        }
+    };
 
 } // namespace hedge

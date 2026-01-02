@@ -94,7 +94,7 @@ namespace hedge::db
         std::shared_mutex _value_tables_mutex{}; ///< Protects access to the `_value_tables` map.
 
         /// Map storing shared pointers to older, non-current value_table files, keyed by their ID.
-        std::unordered_map<uint32_t, std::shared_ptr<value_table>> _value_tables;
+        tsl::robin_map<uint32_t, std::shared_ptr<value_table>> _value_tables;
 
         // --- Current/Mutable State ---
         /// Shared pointer to the currently active value_table file where new values are written.
@@ -121,7 +121,7 @@ namespace hedge::db
         async::worker _flush_worker{};
 
         // Index page cache
-        std::shared_ptr<page_cache> _index_page_cache;
+        std::shared_ptr<shared_page_cache> _index_page_cache;
         std::shared_ptr<point_cache> _index_point_cache;
 
         // --- Utilities ---
@@ -260,7 +260,7 @@ namespace hedge::db
          * Clears the `_mem_index` afterwards. Manages partitioning and file naming.
          * @return Status indicating success or failure.
          */
-        hedge::status _flush_mem_index(mem_index&& memtable_to_flush, size_t flush_iteration);
+        hedge::status _flush_mem_index(mem_index* memtable_to_flush, size_t flush_iteration);
         /**
          * @brief The core logic for performing index compaction, run by the `compaction_worker`.
          * Updates the main `_sorted_indices` map upon completion.
@@ -276,7 +276,7 @@ namespace hedge::db
          * @param executor The I/O executor for potential sorted_index lookups.
          * @return An async task resolving to an expected containing the pair {value_ptr, value_table_ptr} or an error (e.g., KEY_NOT_FOUND, DELETED).
          */
-        async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> _find_value_ptr_and_value_table(key_t key, const std::shared_ptr<async::executor_context>& executor);
+        async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> _find_value_ptr_and_value_table(key_t key);
     };
 
 } // namespace hedge::db

@@ -2,7 +2,6 @@
 #include <atomic>
 #include <cassert>
 #include <condition_variable>
-#include <coroutine>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -13,7 +12,6 @@
 #include <liburing/io_uring.h>
 #include <stdexcept>
 #include <thread>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -23,6 +21,7 @@
 
 #include "io_executor.h"
 #include "logger.h"
+#include "perf_counter.h"
 #include "task.h"
 
 using namespace std::string_literals;
@@ -64,6 +63,7 @@ namespace hedge::async
             });
 
         this->_in_flight_requests.reserve(this->_queue_depth * 32);
+        this->_in_progress_tasks.reserve(this->_queue_depth * 2);
 
         pthread_setname_np(this->_worker.native_handle(), "io-executor");
     }
@@ -152,7 +152,7 @@ namespace hedge::async
             if(it == this->_in_flight_requests.end())
                 throw std::runtime_error("Invalid user_data: " + std::to_string(request_id) + ", not found in in_flight_requests");
 
-            auto& mailbox = it->second;
+            auto& mailbox = it.value();
 
             mailbox->handle_cqe(cqe);
 
@@ -216,17 +216,15 @@ namespace hedge::async
     {
         log_always("Launching io executor. Queue depth: ", this->_queue_depth, " Max buffered tasks: ", this->_max_buffered_requests);
 
-        std::vector<task<void>> in_progress_tasks;
-        in_progress_tasks.reserve(this->_max_buffered_requests);
-
         std::deque<task<void>> new_tasks;
+
         while(true)
         {
-            if(in_progress_tasks.size() < this->_queue_depth)
+            if(this->_in_progress_tasks.size() < this->_queue_depth)
             {
                 std::unique_lock lk(this->_pending_requests_mutex); // should have priority over submit
 
-                while(!this->_pending_requests.empty() && in_progress_tasks.size() < this->_queue_depth)
+                while(!this->_pending_requests.empty() && this->_in_progress_tasks.size() < this->_queue_depth)
                 {
                     auto task = std::move(this->_pending_requests.front());
                     this->_pending_requests.pop_front();
@@ -246,21 +244,38 @@ namespace hedge::async
                 auto task = std::move(new_tasks.front());
                 new_tasks.pop_front();
 
-                bool done = task();
-                if(!done)
-                    in_progress_tasks.emplace_back(std::move(task));
+                auto handle = task.handle();
+                auto [_, ok] = this->_in_progress_tasks.insert({handle, std::move(task)});
+                assert(ok);
+
+                handle.resume();
             }
 
-            in_progress_tasks.erase(
-                std::remove_if(in_progress_tasks.begin(), in_progress_tasks.end(),
-                               [](const auto& task)
-                               { return task.done(); }),
-                in_progress_tasks.end());
+            this->_gc_tasks();
 
             this->_do_work();
 
             this->_wait_for_cqe();
         }
+    }
+
+    void executor_context::_gc_tasks()
+    {
+        prof::avg_stat::PERF_STATS["gc_coros"].start();
+
+        thread_local std::vector<decltype(this->_in_progress_tasks)::iterator> to_remove;
+        to_remove.clear();
+
+        for(auto it = this->_in_progress_tasks.begin(); it != this->_in_progress_tasks.end(); ++it)
+        {
+            if(it->second.done())
+                to_remove.emplace_back(it);
+        }
+
+        for(const auto& it : to_remove)
+            this->_in_progress_tasks.erase(it);
+
+        prof::avg_stat::PERF_STATS["gc_coros"].stop();
     }
 
     void executor_context::register_fd(int32_t fd)
@@ -303,19 +318,17 @@ namespace hedge::async
 
     executor_pool::executor_pool(size_t pool_size, uint32_t queue_depth)
     {
-        // Check if pool size is power of 2
-        if(std::popcount(pool_size) != 1)
-            throw std::runtime_error("executor_pool size must be a power of 2");
-
         for(size_t i = 0; i < pool_size; ++i)
         {
             auto new_executor = std::make_shared<executor_context>(queue_depth);
-            new_executor->sync_submit(
-                [&new_executor]() -> async::task<int>
-                {
-                    executor_context::_this_thread_executor = new_executor;
-                    co_return 0; // At the moment, sync_submit requires a return value
-                }());
+
+            auto task_generator = [&new_executor]() -> async::task<int>
+            {
+                executor_context::_this_thread_executor = new_executor;
+                co_return 0; // At the moment, sync_submit requires a return value
+            };
+
+            [[maybe_unused]] auto r = new_executor->sync_submit(task_generator());
             this->_executors.emplace_back(std::move(new_executor));
         }
     }
@@ -330,7 +343,7 @@ namespace hedge::async
 
     const std::shared_ptr<executor_context>& executor_pool::get_executor()
     {
-        auto idx = this->_next_executor.fetch_add(1, std::memory_order_relaxed) & (this->_executors.size() - 1);
+        auto idx = this->_next_executor.fetch_add(1, std::memory_order_relaxed) % this->_executors.size();
         return this->_executors[idx];
     }
 

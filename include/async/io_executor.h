@@ -11,8 +11,9 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <tsl/robin_map.h>
+#include <tsl/sparse_map.h>
 #include <type_traits>
-#include <unordered_map>
 
 #include <logger.h>
 
@@ -82,7 +83,10 @@ namespace hedge::async
         std::thread _worker;
 
         uint64_t _current_request_id{0};
-        std::unordered_map<uint64_t, std::unique_ptr<mailbox>> _in_flight_requests;
+
+        tsl::robin_map<uint64_t, std::unique_ptr<mailbox>> _in_flight_requests;
+        // tsl::robin_map<std::coroutine_handle<>, task<void>> _in_progress_tasks;
+        std::unordered_map<std::coroutine_handle<>, task<void>> _in_progress_tasks;
 
         std::deque<std::unique_ptr<mailbox>> _waiting_for_io_queue;
         std::deque<std::unique_ptr<mailbox>> _io_ready_queue;
@@ -102,20 +106,20 @@ namespace hedge::async
         executor_context& operator=(const executor_context&) = delete;
 
         template <typename T>
-        T sync_submit(task<T> task)
+        T sync_submit(task<T> t)
         {
             std::promise<T> promise;
 
             auto future = promise.get_future();
 
-            auto task_lambda = [promise = std::move(promise), &task]() mutable -> hedge::async::task<void>
+            auto task_lambda = [](std::promise<T> promise, task<T> t) mutable -> hedge::async::task<void>
             {
-                auto value = co_await task;
+                auto value = co_await t;
 
                 promise.set_value(std::move(value));
             };
 
-            this->submit_io_task(task_lambda());
+            this->submit_io_task(task_lambda(std::move(promise), std::move(t)));
 
             return future.get();
         }
@@ -124,6 +128,7 @@ namespace hedge::async
 
         void shutdown();
 
+        // TODO: enforce that this is callable only from this_thread_executor()
         auto submit_request(auto request)
         {
             using request_t = std::decay_t<decltype(request)>;
@@ -137,6 +142,35 @@ namespace hedge::async
             return awaitable;
         }
 
+        task<void> extract_task(std::coroutine_handle<> root_coro)
+        {
+            auto it = this->_in_progress_tasks.find(root_coro);
+
+            assert(it != this->_in_progress_tasks.end());
+
+            auto extracted = task<void>(std::move(it->second));
+
+            this->_in_progress_tasks.erase(it);
+
+            return extracted;
+        }
+
+        void transfer_task(task<void> task, std::coroutine_handle<> continuation)
+        {
+            auto [it, ok] = this->_in_progress_tasks.emplace(task.handle(), std::move(task));
+            assert(ok);
+
+            // make continuation mailbox
+            auto continuation_mailbox = std::make_unique<mailbox>(async::continuation_mailbox{});
+            continuation_mailbox->set_continuation(continuation);
+            this->_io_ready_queue.push_front(std::move(continuation_mailbox));
+        }
+
+        auto yield()
+        {
+            return this->submit_request(yield_request{});
+        }
+
         void register_fd(int32_t fd);
 
         static const std::shared_ptr<executor_context>& this_thread_executor();
@@ -148,6 +182,7 @@ namespace hedge::async
         void _do_work();
         void _wait_for_cqe();
         void _event_loop();
+        void _gc_tasks();
         std::vector<io_uring_sqe*>& _fill_sqes(size_t sqes_requested);
     };
 

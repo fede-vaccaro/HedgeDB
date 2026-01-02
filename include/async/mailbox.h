@@ -3,7 +3,6 @@
 #include <cassert>
 #include <coroutine>
 #include <liburing.h>
-#include <span>
 #include <variant>
 
 #include "mailbox_impl.h"

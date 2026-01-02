@@ -20,6 +20,7 @@
 #include "fs/fs.hpp"
 #include "sorted_index.h"
 #include "types.h"
+#include "utils.h"
 
 #include <perf_counter.h>
 
@@ -56,8 +57,8 @@ namespace hedge::db
                 if(last_page_size != 0)
                     meta_index_range_end = meta_index_range_begin + last_page_size;
             }
-            for(auto it = meta_index_range_begin; it != meta_index_range_end; it++)
-                __builtin_prefetch(it.base());
+            for(const auto* it = meta_index_range_begin; it != meta_index_range_end; it++)
+                __builtin_prefetch(it);
         }
 
         // Perform the binary search on the meta-index.
@@ -125,7 +126,7 @@ namespace hedge::db
         return sorted_index::_find_in_page(key, page_start_ptr, page_end_ptr);
     }
 
-    async::task<expected<std::optional<value_ptr_t>>> sorted_index::lookup_async(const key_t& key, const std::shared_ptr<async::executor_context>& executor, const std::shared_ptr<page_cache>& cache) const
+    async::task<expected<std::optional<value_ptr_t>>> sorted_index::lookup_async(const key_t& key, const std::shared_ptr<shared_page_cache>& cache) const
     {
         auto maybe_page_id = this->_find_page_id(key);
         if(!maybe_page_id)
@@ -136,47 +137,44 @@ namespace hedge::db
         auto page_start_offset = this->_footer.index_start_offset + (page_id * PAGE_SIZE_IN_BYTES);
 
         // start_counter(fd);
-
-        int get_write_slot_fd = avg_stat::fd();
-        int find_in_page_fd = avg_stat::fd();
-        int cache_lookup_time_fd = avg_stat::fd();
-
         std::optional<page_cache::page_guard> opt_page_guard;
         auto page_tag = to_page_tag(static_cast<uint32_t>(this->fd()), page_start_offset);
-        std::unique_ptr<uint8_t> data; // might be needed for holding a temporary page memory allocation
+
+        std::unique_ptr<uint8_t> data; // might be needed for holding a temporary memory allocation
         uint8_t* page_ptr = nullptr;
         bool should_read_from_fs = (cache == nullptr);
 
         if(!should_read_from_fs)
         {
-            start_counter(cache_lookup_time_fd);
+            prof::avg_stat::PERF_STATS["lookup"].start();
             auto maybe_page_guard = cache->lookup(page_tag);
 
-            if(maybe_page_guard.has_error() && maybe_page_guard.error().code() == errc::BUSY)
+            if(maybe_page_guard.has_value())
             {
-                should_read_from_fs = true;
+                opt_page_guard = std::move(co_await maybe_page_guard.value());
+                page_ptr = opt_page_guard->data + opt_page_guard->idx;
+                prof::avg_stat::PERF_STATS["cache_hits"].add(1);
+                prof::avg_stat::PERF_STATS["lookup"].stop(false);
             }
-            else if(maybe_page_guard.value().has_value())
+            else
             {
-                opt_page_guard = std::move(maybe_page_guard.value().value());
-                page_ptr = opt_page_guard->page_data;
+                prof::avg_stat::PERF_STATS["lookup"].stop(true);
             }
-            sorted_index::cache_lookup_time.add(stop_counter(cache_lookup_time_fd));
         }
 
         if(!should_read_from_fs && !opt_page_guard.has_value())
         {
-            start_counter(get_write_slot_fd);
             should_read_from_fs = true;
 
+            prof::avg_stat::PERF_STATS["get_slot"].start();
             auto maybe_write_slot = cache->get_write_slot(page_tag);
 
-            if(maybe_write_slot.has_value())
-            {
-                opt_page_guard = std::move(maybe_write_slot.value());
-                page_ptr = opt_page_guard->page_data;
-            }
-            sorted_index::get_write_slot_time.add(stop_counter(get_write_slot_fd));
+            opt_page_guard = std::move(maybe_write_slot);
+            page_ptr = opt_page_guard->data + opt_page_guard->idx;
+
+            prof::avg_stat::PERF_STATS["get_slot"].stop();
+
+            prof::avg_stat::PERF_STATS["cache_hits"].add(0);
         }
 
         if(should_read_from_fs)
@@ -198,12 +196,10 @@ namespace hedge::db
             }
 
             assert(page_ptr != nullptr);
-            auto maybe_page_ptr = co_await this->_load_page_async(page_start_offset, page_ptr, executor);
-            if(!maybe_page_ptr)
-                co_return maybe_page_ptr.error();
+            auto status = co_await this->_load_page_async(page_start_offset, page_ptr);
+            if(!status)
+                co_return status.error();
         }
-
-        // auto cycles = stop_counter(fd);
 
         auto* page_start_ptr = reinterpret_cast<index_entry_t*>(page_ptr);
         index_entry_t* page_end_ptr = page_start_ptr + INDEX_PAGE_NUM_ENTRIES;
@@ -216,16 +212,16 @@ namespace hedge::db
                 page_end_ptr = page_start_ptr + entries_on_last_page;
         }
 
-        start_counter(find_in_page_fd);
+        prof::avg_stat::PERF_STATS["find_in_page"].start();
         hedge::expected<std::optional<value_ptr_t>> res = sorted_index::_find_in_page(key, page_start_ptr, page_end_ptr);
-        sorted_index::find_in_page_time.add(stop_counter(find_in_page_fd));
+        prof::avg_stat::PERF_STATS["find_in_page"].stop(should_read_from_fs);
 
         co_return res;
     }
 
-    async::task<hedge::status> sorted_index::_load_page_async(size_t offset, uint8_t* data_ptr, const std::shared_ptr<async::executor_context>& executor) const
+    async::task<hedge::status> sorted_index::_load_page_async(size_t offset, uint8_t* data_ptr) const
     {
-        auto response = co_await executor->submit_request(
+        auto response = co_await async::this_thread_executor()->submit_request(
             async::read_request{
                 .fd = this->fd(),
                 .data = data_ptr,
@@ -272,45 +268,9 @@ namespace hedge::db
         return std::nullopt; // Key not found in this page range.
     }
 
-    async::task<hedge::status> sorted_index::_update_in_page(const index_entry_t& entry, size_t page_id, const index_entry_t* start, const index_entry_t* end, const std::shared_ptr<async::executor_context>& executor)
-    {
-        // First, verify the key exists at the expected location within the provided page range.
-        // Use lower_bound to find where the key *should* be.
-        const auto* it = std::lower_bound(start, end, index_entry_t{.key = entry.key, .value_ptr = {}});
-
-        // If the iterator is at the end or the key doesn't match, the entry isn't where we expected it.
-        if(it == end || it->key != entry.key)
-            co_return hedge::error("Key not found in page for update", errc::KEY_NOT_FOUND);
-
-        // Calculate the exact byte offset within the file for this entry.
-        // Offset = start_of_page + offset_within_page
-        size_t entry_offset_in_page_bytes = std::distance(start, it) * sizeof(index_entry_t);
-        size_t total_file_offset = (this->_footer.index_start_offset + PAGE_SIZE_IN_BYTES * page_id) + entry_offset_in_page_bytes;
-
-        // Get a pointer to the raw byte data of the new entry to write.
-        // Need const_cast as io_uring write takes a non-const void*.
-        const auto* entry_byte_ptr = reinterpret_cast<const uint8_t*>(&entry);
-
-        // Submit the asynchronous write request.
-        auto write_response = co_await executor->submit_request(async::write_request{
-            .fd = this->fd(),                             // Use the file descriptor of this sorted_index
-            .data = const_cast<uint8_t*>(entry_byte_ptr), // Pointer to the data to write
-            .size = sizeof(index_entry_t),                // Size of the data to write
-            .offset = total_file_offset,                  // Exact byte offset in the file
-        });
-
-        // Check for io_uring errors.
-        if(write_response.error_code != 0)
-            co_return hedge::error("An error occurred while updating an index entry: " + std::string(strerror(-write_response.error_code)));
-
-        // TODO: Consider adding fsync logic here or at a higher level if durability is required immediately after update.
-
-        co_return hedge::ok(); // Write submitted successfully (completion doesn't guarantee durability yet).
-    }
-
     void sorted_index::clear_index()
     {
-        this->_index = std::vector<index_entry_t>{};
+        this->_index = page_aligned_buffer<index_entry_t>{};
     }
 
     hedge::status sorted_index::load_index_from_fs()
@@ -335,7 +295,7 @@ namespace hedge::db
         return hedge::ok();
     }
 
-    sorted_index::sorted_index(fs::file fd, std::vector<index_entry_t> index, std::vector<meta_index_entry> meta_index, sorted_index_footer footer)
+    sorted_index::sorted_index(fs::file fd, page_aligned_buffer<index_entry_t> index, page_aligned_buffer<meta_index_entry> meta_index, sorted_index_footer footer)
         : fs::file(std::move(fd)),            // Initialize the base class with the file descriptor
           _index(std::move(index)),           // Move the provided index data
           _meta_index(std::move(meta_index)), // Move the provided meta-index data

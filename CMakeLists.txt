@@ -3,6 +3,7 @@ project(hedgeDB CXX)
 
 enable_testing()
 
+# download googletest
 include(FetchContent)
 FetchContent_Declare(
         googletest
@@ -11,6 +12,31 @@ FetchContent_Declare(
 
 set(INSTALL_GTEST OFF)
 FetchContent_MakeAvailable(googletest)
+
+# download outcome.hpp
+file(
+    DOWNLOAD
+    "https://raw.githubusercontent.com/ned14/outcome/8b25c1713ebb2590981d8c4bc176d028026bdf8a/single-header/outcome.hpp"
+    ${CMAKE_SOURCE_DIR}/include/outcome.hpp
+    EXPECTED_HASH SHA256=2b9d92acca21cc9294e138c848630c8992edc3540f4fb4819a3b396e9d8a2ccc
+    SHOW_PROGRESS
+)
+
+# download tsl:robin_map
+FetchContent_Declare(
+    tsl_robin_map
+    GIT_REPOSITORY https://github.com/Tessil/robin-map.git
+    GIT_TAG        v1.4.1
+)
+FetchContent_MakeAvailable(tsl_robin_map)
+
+# download tsl:sparse_map
+FetchContent_Declare(
+    tsl_sparse_map
+    GIT_REPOSITORY https://github.com/Tessil/sparse-map.git
+    GIT_TAG        v0.7.0
+)
+FetchContent_MakeAvailable(tsl_sparse_map)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -25,7 +51,7 @@ if (CMAKE_BUILD_TYPE MATCHES "Debug")
     set(CMAKE_CXX_FLAGS "-O0 -g -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Werror")
 elseif (CMAKE_BUILD_TYPE MATCHES "Release")
     message (STATUS "Building in Release mode")
-    set(CMAKE_CXX_FLAGS "-O2 -g -fno-omit-frame-pointer")
+    set(CMAKE_CXX_FLAGS "-O3 -g -fno-omit-frame-pointer")
 endif()
 
 set(PUBLIC_INCLUDES 
@@ -37,9 +63,12 @@ set(PUBLIC_INCLUDES
 include_directories(PUBLIC ${PUBLIC_INCLUDES})
 include_directories(PRIVATE "src")
 
+include_directories(PUBLIC ${tsl_robin_map_SOURCE_DIR}/include)
+include_directories(PUBLIC ${tsl_sparse_map_SOURCE_DIR}/include)
 
 set(DB_SOURCES
     src/types.h
+    src/perf_counter.cc
     src/utils.cc
     src/utils.h
     src/db/sorted_index.cc
@@ -56,9 +85,11 @@ set(DB_SOURCES
     src/db/database.cc
     src/db/database.h
     src/db/cache.h
+    src/db/cache.cc
 )
 
 set(IO_EXECUTOR_SRCS 
+    src/perf_counter.cc
     src/async/io_executor.cc
     src/async/mailbox_impl.cc
     src/async/worker.cc
@@ -95,7 +126,7 @@ target_link_libraries(worker_test uring gtest gtest_main)
 
 # database tests
 add_executable(database_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/database.spec.cc)
-target_link_libraries(database_test uring gtest gtest_main tcmalloc)
+target_link_libraries(database_test uring gtest gtest_main)
 
 # # library TODO re-enable
 # add_library(hedgedb STATIC ${IO_EXECUTOR_SRCS} ${DB_SOURCES} src/api/api.cc)

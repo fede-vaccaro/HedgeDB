@@ -10,3 +10,6 @@ hedge_db
 
 # install directory
 hedgedb/*
+
+# ignore outcome.hpp (downloaded file)
+include/outcome.hpp

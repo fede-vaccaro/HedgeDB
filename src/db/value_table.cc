@@ -23,8 +23,8 @@ namespace hedge::db
         if(num_bytes % PAGE_SIZE_IN_BYTES != 0)
             return hedge::error("File size must be multiple of page size (" + std::to_string(PAGE_SIZE_IN_BYTES) + ")");
 
-        if(num_bytes > value_table::MAX_FILE_SIZE)
-            return hedge::error(std::format("Requested file size ({}) is larger than max allowed ({})", num_bytes, value_table::MAX_FILE_SIZE));
+        if(num_bytes > value_table::MAX_VALUE_SIZE)
+            return hedge::error(std::format("Requested file size ({}) is larger than max allowed ({})", num_bytes, value_table::MAX_VALUE_SIZE));
 
         size_t offset = this->_current_offset.load(std::memory_order::relaxed);
         size_t next_offset;
@@ -63,7 +63,7 @@ namespace hedge::db
         });
     }
 
-    async::task<expected<hedge::value_ptr_t>> value_table::write_async(key_t key, const std::vector<uint8_t>& value, const value_table::write_reservation& reservation, const std::shared_ptr<async::executor_context>& executor)
+    async::task<expected<hedge::value_ptr_t>> value_table::write_async(key_t key, const std::vector<uint8_t>& value, const value_table::write_reservation& reservation)
     {
         auto header = file_header{
             .separator = FILE_SEPARATOR,
@@ -99,7 +99,7 @@ namespace hedge::db
                 .iov_base = const_cast<uint8_t*>(value.data()),
                 .iov_len = value.size()}};
 
-        auto write_value_response = co_await executor->submit_request(async::writev_request{
+        auto write_value_response = co_await async::this_thread_executor()->submit_request(async::writev_request{
             .fd = this->fd(),
             .iovecs = iovecs.data(),
             .iovecs_count = iovecs.size(),
@@ -118,7 +118,7 @@ namespace hedge::db
             this->_unique_id);
     }
 
-    async::task<expected<output_file>> value_table::read_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor, bool)
+    async::task<expected<output_file>> value_table::read_async(size_t file_offset, size_t file_size, bool /* skip_delete_check */)
     {
         if(file_offset + file_size > this->_current_offset)
         {
@@ -154,7 +154,7 @@ namespace hedge::db
 
             auto data = std::unique_ptr<uint8_t>(data_ptr);
 
-            auto read_response = co_await executor->submit_request(async::read_request{
+            auto read_response = co_await async::this_thread_executor()->submit_request(async::read_request{
                 .fd = this->fd(),
                 .data = data.get(),
                 .offset = page_aligned_offset,
@@ -192,7 +192,7 @@ namespace hedge::db
                     .iov_base = static_cast<void*>(value_data.data()),
                     .iov_len = actual_value_size}};
 
-            auto read_response = co_await executor->submit_request(async::unaligned_readv_request{
+            auto read_response = co_await async::this_thread_executor()->submit_request(async::unaligned_readv_request{
                 .fd = this->fd(),
                 .iovecs = iovecs.data(),
                 .iovecs_count = iovecs.size(),
@@ -255,14 +255,14 @@ namespace hedge::db
             return hedge::error("Failed to create file descriptor: " + file_desc.error().to_string());
 
         if(file_desc.value().has_direct_access())
-            posix_fadvise(file_desc.value().fd(), 0, 0, POSIX_FADV_NOREUSE);
+            posix_fadvise(file_desc.value().fd(), 0, 0, POSIX_FADV_DONTNEED);
 
         auto vt = std::shared_ptr<value_table>(new value_table{
             id,
             0,
             std::move(file_desc.value())});
 
-        auto maybe_mmap_view = fs::mmap_view::from_file(*vt);
+        // auto maybe_mmap_view = fs::mmap_view::from_file(*vt);
         // if(!maybe_mmap_view)
         // return hedge::error("Failed to mmap value table file: " + maybe_mmap_view.error().to_string());
 

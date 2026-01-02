@@ -193,7 +193,7 @@ namespace hedge::fs
                     case open_mode::read_write_new:
                         auto res = co_await executor->submit_request(async::fallocate_request{
                             .fd = fd,
-                            .mode = 0777,
+                            .mode = 0,
                             .offset = 0,
                             .length = expected_size.value()});
 
