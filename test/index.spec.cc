@@ -60,10 +60,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
                 memtable.put(uuid, {static_cast<uint64_t>(j), uuid_fake_size(uuid), 0});
             }
 
-            auto vec_memtable = std::vector<hedge::db::mem_index>{};
-            vec_memtable.emplace_back(std::move(memtable));
-
-            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, std::move(vec_memtable), NUM_PARTITION_EXPONENT, i);
+            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, &memtable, NUM_PARTITION_EXPONENT, i);
 
             if(!partitioned_sorted_indices)
             {
@@ -309,17 +306,16 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
     std::unordered_set<uuids::uuid> seen_uuids;
 
     constexpr auto CACHE_MAX_SIZE = 3UL * 1024 * 1024 * 1024;
-    std::shared_ptr<hedge::db::page_cache> cache = std::make_shared<hedge::db::page_cache>(CACHE_MAX_SIZE);
+    std::shared_ptr<hedge::db::shared_page_cache> cache = std::make_shared<hedge::db::shared_page_cache>(CACHE_MAX_SIZE, 1);
 
     auto lookup_task_factory = [&](
                                    const uuids::uuid& uuid,
                                    const hedge::db::sorted_index& index,
-                                   const std::shared_ptr<hedge::async::executor_context>& executor,
                                    std::shared_ptr<hedge::async::wait_group> wg) -> hedge::async::task<void>
     {
         seen_uuids.insert(uuid);
 
-        auto lookup = co_await index.lookup_async(uuid, executor, cache);
+        auto lookup = co_await index.lookup_async(uuid, cache);
 
         if(!lookup.has_value())
             throw std::runtime_error("Failed to lookup uuid: Error: " + lookup.error().to_string());
@@ -350,7 +346,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
 
         ASSERT_TRUE(it != unified_sorted_indices.end()) << "Expected to find sorted index for prefix " << prefix;
 
-        this->_executor->submit_io_task(lookup_task_factory(uuid, it->second, this->_executor, query_wg));
+        this->_executor->submit_io_task(lookup_task_factory(uuid, it->second, query_wg));
     }
 
     query_wg->wait_for(std::chrono::milliseconds(1 * this->_uuids.size()));

@@ -289,7 +289,6 @@ namespace hedge::async
         }
     };
 
-
     struct open_request;
     struct open_response;
     struct open_mailbox;
@@ -527,13 +526,26 @@ namespace hedge::async
         yield_response response{};
 
         yield_mailbox(yield_request) {}
-        
+
         void prepare_sqe(io_uring_sqe* sqe);
         void handle_cqe(io_uring_cqe* cqe);
 
         void* get_response()
         {
             return &response;
+        }
+    };
+
+    // Hack for transferring coros
+    struct continuation_mailbox : mailbox_base<continuation_mailbox>
+    {
+        void prepare_sqe(io_uring_sqe*) {}
+        void handle_cqe(io_uring_cqe*) {}
+
+        void* get_response()
+        {
+            assert(false);
+            return nullptr;
         }
     };
 
@@ -551,6 +563,7 @@ namespace hedge::async
             close_mailbox,
             file_info_mailbox,
             fsync_mailbox,
-            yield_mailbox>;
+            yield_mailbox,
+            continuation_mailbox>;
 
 } // namespace hedge::async

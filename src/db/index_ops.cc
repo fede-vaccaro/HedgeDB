@@ -16,6 +16,7 @@
 #include "async/io_executor.h"
 #include "async/mailbox_impl.h"
 #include "async/task.h"
+#include "db/mem_index.h"
 #include "fs/fs.hpp"
 #include "index_ops.h"
 #include "merge_utils.h"
@@ -87,7 +88,7 @@ namespace hedge::db
      * @return Number of padding bytes needed (0 if already aligned).
      */
     template <typename T>
-    size_t compute_alignment_padding(size_t element_count, size_t page_size = PAGE_SIZE_IN_BYTES)
+    constexpr size_t compute_alignment_padding(size_t element_count, size_t page_size = PAGE_SIZE_IN_BYTES)
     {
         size_t complement = page_size - ((element_count * sizeof(T)) % page_size);
 
@@ -137,53 +138,58 @@ namespace hedge::db
      * @return The generated `std::vector<meta_index_entry>`.
      */
     template <typename T, size_t PAGE_SIZE>
-    std::vector<meta_index_entry> create_meta_index(const std::vector<T>& sorted_keys)
+    page_aligned_buffer<meta_index_entry> create_meta_index(const page_aligned_buffer<T>& sorted_keys)
     {
         // Calculate how many meta-index entries are needed (one per page).
         constexpr size_t ENTRIES_PER_PAGE = PAGE_SIZE / sizeof(T);
 
         auto meta_index_size = hedge::ceil(sorted_keys.size(), ENTRIES_PER_PAGE);
-        auto meta_index = std::vector<meta_index_entry>{};
-        meta_index.reserve(meta_index_size);
+        auto meta_index = page_aligned_buffer<meta_index_entry>(meta_index_size);
 
         // Iterate through each conceptual page.
         for(size_t i = 0; i < meta_index_size; ++i)
         {
             auto idx = std::min(((i + 1) * ENTRIES_PER_PAGE) - 1, sorted_keys.size() - 1);
-            meta_index.push_back({.key = sorted_keys[idx].key});
+            meta_index[i] = {.key = sorted_keys[idx].key};
         }
-
-        meta_index.shrink_to_fit();
 
         return meta_index;
     }
 
-    std::vector<index_entry_t> index_ops::merge_memtables_in_mem(std::vector<mem_index>&& indices)
+    page_aligned_buffer<index_entry_t> index_ops::sort_memtable(mem_index* index)
     {
-        // TODO: Update the interface to accept only one index
-        // Or implement some multi-vector iterator
-        auto buffer = std::move(indices[0]._buffer);
+        page_aligned_buffer<index_entry_t> buf(index->size());
 
-        std::sort(buffer.begin(), buffer.end(),
-                  [](const index_entry_t& lhs, const index_entry_t& rhs)
-                  {
-                      if(lhs.key < rhs.key)
-                          return true;
+        auto* buf_ptr = buf.data();
 
-                      if(rhs.key < lhs.key)
-                          return false;
+        size_t idx = 0;
+        for(auto [k, v] : index->_index)
+            buf_ptr[idx++] = {.key = k, .value_ptr = v};
 
-                      return lhs.value_ptr < rhs.value_ptr;
-                  });
+        std::sort(
+            buf.begin(),
+            buf.end(),
+            [](const index_entry_t& lhs, const index_entry_t& rhs)
+            {
+                if(lhs.key < rhs.key)
+                    return true;
 
-        auto it = std::unique(buffer.begin(), buffer.end());
-        buffer.erase(it, buffer.end());
+                if(rhs.key < lhs.key)
+                    return false;
 
-        return buffer;
+                return lhs.value_ptr < rhs.value_ptr;
+            });
+
+        auto* last_it = std::unique(buf.begin(), buf.end());
+
+        // move the size cursor back
+        buf.resize(std::distance(buf.begin(), last_it));
+
+        return buf;
     }
 
     hedge::expected<std::vector<sorted_index>> index_ops::flush_mem_index(const std::filesystem::path& base_path,
-                                                                          std::vector<mem_index>&& indices,
+                                                                          mem_index* index,
                                                                           size_t num_partition_exponent,
                                                                           size_t flush_iteration,
                                                                           bool use_odirect)
@@ -192,21 +198,22 @@ namespace hedge::db
             return hedge::error("Number of partitions exponent must be less than or equal to 16");
 
         // Step 1: Combine all memtables into one large sorted list in memory.
-        auto index_sorted = merge_memtables_in_mem(std::move(indices));
+        auto index_sorted = sort_memtable(index);
 
-        std::vector<sorted_index> resulting_indices;          // To store the created sorted_index objects.
-        std::vector<index_entry_t> current_partition_entries; // Temp buffer for entries of the current partition.
+        std::vector<sorted_index> resulting_indices;                                       // To store the created sorted_index objects.
+        page_aligned_buffer<index_entry_t> current_partition_entries(index_sorted.size()); // Temp buffer for entries of the current partition.
+        size_t curr_partition_count{0};
 
         // Calculate the range of key prefixes per partition.
         size_t partition_key_prefix_range = (1 << 16) / (1 << num_partition_exponent);
         // Determine the partition ID for the very first key.
-        size_t current_partition_id = hedge::find_partition_prefix_for_key(index_sorted[0].key, partition_key_prefix_range);
+        size_t current_partition_id = hedge::find_partition_prefix_for_key(index_sorted.begin()->key, partition_key_prefix_range);
 
         // Step 2: Iterate through the sorted list, grouping entries by partition ID.
         // TODO: Handle potential errors during file writing more gracefully (e.g., cleanup).
-        for(auto it = index_sorted.begin(); it != index_sorted.end(); ++it)
+        for(auto* it = index_sorted.begin(); it != index_sorted.end(); ++it)
         {
-            current_partition_entries.push_back(*it);
+            current_partition_entries[curr_partition_count++] = *it;
 
             // Check if this is the last entry for the current partition.
             bool is_last_in_list = (it + 1 == index_sorted.end());
@@ -230,11 +237,15 @@ namespace hedge::db
 
                 auto path = dir_path / with_extension(file_prefix, std::format(".{}", flush_iteration));
 
+                current_partition_entries.resize(curr_partition_count);
+
                 OUTCOME_TRY(auto sorted_index, index_ops::save_as_sorted_index(
                                                    path,
-                                                   std::exchange(current_partition_entries, std::vector<index_entry_t>{}),
+                                                   std::exchange(current_partition_entries, page_aligned_buffer<index_entry_t>(index_sorted.size())),
                                                    current_partition_id,
                                                    use_odirect));
+
+                curr_partition_count = 0;
 
                 resulting_indices.push_back(std::move(sorted_index));
 
@@ -248,125 +259,112 @@ namespace hedge::db
         return resulting_indices;
     }
 
-    constexpr std::array<uint8_t, PAGE_SIZE_IN_BYTES> PADDING_PAGE = []()
+    hedge::expected<size_t> pwrite_iovec(int fd, const iovec& iovec, size_t offset)
     {
-        std::array<uint8_t, PAGE_SIZE_IN_BYTES> arr{};
-        arr.fill(0);
-        return arr;
-    }();
+        int res = pwrite(fd,
+                         reinterpret_cast<uint8_t*>(iovec.iov_base),
+                         iovec.iov_len,
+                         offset);
 
-    hedge::status write_iovec(int fd, const iovec& iovec)
-    {
-        size_t bytes_written = 0;
+        if(res < 0)
+            return hedge::error(std::format("Failed to write iovec to fd {} at offset {}: {}.",
+                                            fd,
+                                            lseek(fd, 0, SEEK_CUR),
+                                            strerror(errno)));
 
-        while(bytes_written < iovec.iov_len)
-        {
-            ssize_t res = write(fd,
-                                reinterpret_cast<uint8_t*>(iovec.iov_base) + bytes_written,
-                                iovec.iov_len - bytes_written);
+        if(static_cast<size_t>(res) != iovec.iov_len)
+            return hedge::error(std::format("Partial write occurred when writing iovec to fd {} at offset {}: wrote {} bytes out of {}.",
+                                            fd,
+                                            lseek(fd, 0, SEEK_CUR),
+                                            res,
+                                            iovec.iov_len));
 
-            if(res < 0)
-                return hedge::error(std::format("Failed to write iovec to fd {} at offset {}: {}. Bytes written: {}",
-                                                fd,
-                                                lseek(fd, 0, SEEK_CUR),
-                                                strerror(errno),
-                                                bytes_written));
-
-            bytes_written += static_cast<size_t>(res);
-        }
-
-        return hedge::ok();
+        return res;
     }
 
     hedge::expected<sorted_index>
-    index_ops::save_as_sorted_index(const std::filesystem::path& path, std::vector<index_entry_t>&& sorted_keys, size_t upper_bound, bool use_odirect)
+    index_ops::save_as_sorted_index(const std::filesystem::path& path, page_aligned_buffer<index_entry_t>&& sorted_keys, size_t upper_bound, bool use_odirect)
     {
         // Step 1: Generate the meta-index from the sorted keys.
         auto meta_index = create_meta_index<index_entry_t, PAGE_SIZE_IN_BYTES>(sorted_keys);
 
         footer_builder builder;
 
-        {
-            // Step 2: Write data sections [index, meta-index, footer] sequentially.
-            size_t index_size_bytes = sizeof(index_entry_t) * sorted_keys.size();
-            size_t index_padding_bytes = compute_alignment_padding<index_entry_t>(sorted_keys.size());
-            size_t meta_index_size_bytes = sizeof(meta_index_entry) * meta_index.size();
-            size_t meta_index_padding_bytes = compute_alignment_padding<meta_index_entry>(meta_index.size());
+        // Step 2: Write data sections [index, meta-index, footer] sequentially.
+        size_t index_size_bytes = sizeof(index_entry_t) * sorted_keys.size();
+        size_t index_padding_bytes = compute_alignment_padding<index_entry_t>(sorted_keys.size());
+        size_t meta_index_size_bytes = sizeof(meta_index_entry) * meta_index.size();
+        size_t meta_index_padding_bytes = compute_alignment_padding<meta_index_entry>(meta_index.size());
+        size_t footer_alignment_padding_bytes = compute_alignment_padding<sorted_index_footer>(1);
 
-            builder.upper_bound = upper_bound;
-            builder.indexed_keys = sorted_keys.size();
-            builder.meta_index_entries = meta_index.size();
-            builder.index_start_offset = 0;
-            builder.index_end_offset = index_size_bytes;
-            builder.meta_index_start_offset = index_size_bytes + index_padding_bytes;
-            builder.meta_index_end_offset = index_size_bytes + index_padding_bytes + meta_index_size_bytes;
-            builder.footer_start_offset = index_size_bytes + index_padding_bytes + meta_index_size_bytes + meta_index_padding_bytes;
+        builder.upper_bound = upper_bound;
+        builder.indexed_keys = sorted_keys.size();
+        builder.meta_index_entries = meta_index.size();
+        builder.index_start_offset = 0;
+        builder.index_end_offset = index_size_bytes;
+        builder.meta_index_start_offset = index_size_bytes + index_padding_bytes;
+        builder.meta_index_end_offset = index_size_bytes + index_padding_bytes + meta_index_size_bytes;
+        builder.footer_start_offset = index_size_bytes + index_padding_bytes + meta_index_size_bytes + meta_index_padding_bytes;
 
-            OUTCOME_TRY(auto footer, builder.build());
+        OUTCOME_TRY(auto footer, builder.build());
 
-            size_t estimated_size =
-                index_size_bytes +
-                index_padding_bytes +
-                meta_index_size_bytes +
-                meta_index_padding_bytes +
-                sizeof(sorted_index_footer);
+        size_t estimated_size =
+            index_size_bytes +
+            index_padding_bytes +
+            meta_index_size_bytes +
+            meta_index_padding_bytes +
+            sizeof(sorted_index_footer) +
+            footer_alignment_padding_bytes;
 
-            auto maybe_ofs_sorted_index = fs::file::from_path(path, fs::file::open_mode::write_new, false, estimated_size);
-            if(!maybe_ofs_sorted_index)
-                return hedge::error("Failed to create sorted index file: " + maybe_ofs_sorted_index.error().to_string());
+        auto maybe_sorted_index_file = fs::file::from_path(path, fs::file::open_mode::read_write_new, use_odirect, estimated_size);
+        if(!maybe_sorted_index_file)
+            return hedge::error("Failed to create sorted index file: " + maybe_sorted_index_file.error().to_string());
 
-            auto fd = maybe_ofs_sorted_index.value().fd();
+        auto fd = maybe_sorted_index_file.value().fd();
 
-            std::array<iovec, 5> iovecs{
-                iovec{
-                    .iov_base = reinterpret_cast<uint8_t*>(sorted_keys.data()),
-                    .iov_len = index_size_bytes},
-                iovec{
-                    .iov_base = const_cast<uint8_t*>(PADDING_PAGE.data()),
-                    .iov_len = index_padding_bytes},
-                iovec{
-                    .iov_base = reinterpret_cast<uint8_t*>(meta_index.data()),
-                    .iov_len = meta_index_size_bytes},
-                iovec{
-                    .iov_base = const_cast<uint8_t*>(PADDING_PAGE.data()),
-                    .iov_len = meta_index_padding_bytes},
-                iovec{
-                    .iov_base = reinterpret_cast<uint8_t*>(&footer),
-                    .iov_len = sizeof(sorted_index_footer)}};
+        page_aligned_buffer<sorted_index_footer> sorted_index_footer_buf(1);
+        sorted_index_footer_buf[0] = footer;
 
-            // handling writev is cumbersome when it comes to partial writes
-            // size_t res = writev(fd, iovecs.data(), iovecs.size());
+        std::array<iovec, 3> iovecs{
+            iovec{
+                .iov_base = reinterpret_cast<uint8_t*>(sorted_keys.data()),
+                .iov_len = index_size_bytes + index_padding_bytes},
+            iovec{
+                .iov_base = reinterpret_cast<uint8_t*>(meta_index.data()),
+                .iov_len = meta_index_size_bytes + meta_index_padding_bytes},
+            iovec{
+                .iov_base = reinterpret_cast<uint8_t*>(sorted_index_footer_buf.data()),
+                .iov_len = sizeof(sorted_index_footer) + footer_alignment_padding_bytes},
+        };
 
-            for(const auto& iov : iovecs)
-            {
-                auto status = write_iovec(fd, iov);
-                if(!status)
-                    return hedge::error("Failed to write sorted index file: " + path.string() + " : " + status.error().to_string());
-            }
+        auto status = pwrite_iovec(fd, iovecs[0], 0);
+        if(!status)
+            return hedge::error("Failed to write index data to sorted index file: " + status.error().to_string());
 
-            // Sync to disk
-            if(use_odirect)
-                fsync(fd);
-        }
+        status = pwrite_iovec(fd, iovecs[1], builder.meta_index_start_offset.value());
+        if(!status)
+            return hedge::error("Failed to write meta-index data to sorted index file: " + status.error().to_string());
+
+        status = pwrite_iovec(fd, iovecs[2], builder.footer_start_offset.value());
+        if(!status)
+            return hedge::error("Failed to write footer data to sorted index file: " + status.error().to_string());
 
         // Step 3: Create the sorted_index object to represent the file.
-        OUTCOME_TRY(auto fd, fs::file::from_path(path, fs::file::open_mode::read_only, use_odirect));
-        OUTCOME_TRY(auto footer, builder.build());
         if(!use_odirect)
-            posix_fadvise(fd.fd(), 0, 0, POSIX_FADV_NOREUSE);
+            posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
 
         constexpr size_t REF_PAGE_SIZE = 4096;
         constexpr size_t KEYS_PER_META_INDEX_PAGE = REF_PAGE_SIZE / sizeof(meta_index_entry);
 
         // Super index enabled if there would be 512 * 256 = 131072 meta index entries (2MB)
         // In this case the super index would be 512 * 16 bytes = 8KB
-        std::optional<std::vector<meta_index_entry>> super_index;
+        std::optional<page_aligned_buffer<meta_index_entry>> super_index;
 
         if(meta_index.size() > KEYS_PER_META_INDEX_PAGE * SUPER_INDEX_ENABLED_THRESHOLD)
             super_index = create_meta_index<meta_index_entry, REF_PAGE_SIZE>(meta_index);
 
         // Create the final object, moving the key and meta-index data into it.
-        auto ss = sorted_index(std::move(fd), std::move(sorted_keys), std::move(meta_index), footer);
+        auto ss = sorted_index(std::move(maybe_sorted_index_file.value()), std::move(sorted_keys), std::move(meta_index), footer);
 
         ss._super_index = std::move(super_index);
 
@@ -403,7 +401,7 @@ namespace hedge::db
             return hedge::error("Failed to read sorted index footer: " + path.string());
 
         // Read meta-index using offset from the footer.
-        std::vector<meta_index_entry> meta_index(footer.meta_index_entries);
+        page_aligned_buffer<meta_index_entry> meta_index(footer.meta_index_entries);
         ifs.seekg(footer.meta_index_start_offset, std::ios::beg);
         read_from(ifs, meta_index);
         if(!ifs.good())
@@ -480,18 +478,14 @@ namespace hedge::db
             compute_alignment_padding<index_entry_t>(max_new_index_keys) +
             (max_new_meta_index_entries * sizeof(meta_index_entry)) +
             compute_alignment_padding<meta_index_entry>(max_new_meta_index_entries) +
-            sizeof(sorted_index_footer);
+            sizeof(sorted_index_footer) +
+            compute_alignment_padding<sorted_index_footer>(1);
 
-        // auto fd_maybe = co_await fs::file::from_path_async(new_path,
-        //    fs::file::open_mode::write_new,
-        //    executor,
-        //    false,
-        //    estimated_size);
-
-        auto fd_maybe = fs::file::from_path(new_path,
-                                            fs::file::open_mode::write_new,
-                                            false,
-                                            estimated_size);
+        auto fd_maybe = co_await fs::file::from_path_async(new_path,
+                                                           fs::file::open_mode::write_new,
+                                                           async::this_thread_executor(),
+                                                           false,
+                                                           estimated_size);
 
         if(!fd_maybe.has_value())
             co_return hedge::error("Failed to create file descriptor for merged index at " + new_path.string() + ": " + fd_maybe.error().to_string());
@@ -806,12 +800,15 @@ namespace hedge::db
 
         auto& footer = maybe_footer.value();
 
+        page_aligned_buffer<sorted_index_footer> page_aligned_footer(1);
+        page_aligned_footer[0] = footer;
+
         // Write footer
         {
             auto res = co_await executor->submit_request(async::write_request{
                 .fd = output_fd.fd(),
-                .data = reinterpret_cast<uint8_t*>(&footer),
-                .size = sizeof(footer),
+                .data = reinterpret_cast<uint8_t*>(page_aligned_footer.data()),
+                .size = sizeof(sorted_index_footer) + compute_alignment_padding<sorted_index_footer>(1),
                 .offset = bytes_written});
 
             if(res.error_code != 0)
@@ -856,17 +853,21 @@ namespace hedge::db
 
         // Super index enabled if there would be 512 * 256 = 131072 meta index entries (2MB)
         // In this case the super index would be 512 * 16 bytes = 8KB
-        std::optional<std::vector<meta_index_entry>> super_index;
+        std::optional<page_aligned_buffer<meta_index_entry>> super_index;
+
+        auto page_aligned_meta_index = page_aligned_buffer<meta_index_entry>(merged_meta_index.size());
+
+        std::copy(merged_meta_index.begin(), merged_meta_index.end(), page_aligned_meta_index.begin());
 
         if(merged_meta_index.size() > KEYS_PER_META_INDEX_PAGE * SUPER_INDEX_ENABLED_THRESHOLD)
-            super_index = create_meta_index<meta_index_entry, REF_PAGE_SIZE>(merged_meta_index);
+            super_index = create_meta_index<meta_index_entry, REF_PAGE_SIZE>(page_aligned_meta_index);
 
         merged_meta_index.shrink_to_fit();
 
         sorted_index result{
             std::move(read_fd.value()),
             {},
-            std::move(merged_meta_index),
+            std::move(page_aligned_meta_index),
             footer};
 
         result._super_index = std::move(super_index);

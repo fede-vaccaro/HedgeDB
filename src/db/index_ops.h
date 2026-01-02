@@ -1,11 +1,15 @@
 #pragma once
 
+#include <cstdlib>
+
 #include "mem_index.h"
 #include "sorted_index.h"
 #include "types.h"
+#include "utils.h"
 
 namespace hedge::db
 {
+
     /**
      * @brief Provides static utility functions for managing index files (mem_index and sorted_index).
      * @details This struct encapsulates the core logic for operations that involve
@@ -24,9 +28,9 @@ namespace hedge::db
          * The source mem_index instances are moved from and cleared during the process.
          * @param indices A vector of `mem_index` objects to merge (passed by rvalue reference).
          * In practice, this has always been a single mem_index, but the code supports multiple.
-         * @return A `std::vector<index_entry_t>` containing all entries from the input indices, sorted by key.
+         * @return A `page_aligned_buffer` containing all entries from the input indices, sorted by key.
          */
-        static std::vector<index_entry_t> merge_memtables_in_mem(std::vector<mem_index>&& indices);
+        static page_aligned_buffer<index_entry_t> sort_memtable(mem_index* index);
 
         /**
          * @brief Loads a `sorted_index` representation from a file on disk.
@@ -53,7 +57,7 @@ namespace hedge::db
          * @return An `expected<sorted_index>` containing the newly created `sorted_index` object (representing the file)
          * on success, or an error if file writing fails.
          */
-        static hedge::expected<sorted_index> save_as_sorted_index(const std::filesystem::path& path, std::vector<index_entry_t>&& sorted_keys, size_t upper_bound, bool use_odirect);
+        static hedge::expected<sorted_index> save_as_sorted_index(const std::filesystem::path& path, page_aligned_buffer<index_entry_t>&& sorted_keys, size_t upper_bound, bool use_odirect);
 
         /**
          * @brief Flushes one or more `mem_index` instances to disk, creating potentially multiple `sorted_index` files based on key partitioning.
@@ -71,7 +75,7 @@ namespace hedge::db
          * or an error if any step fails.
          */
         static hedge::expected<std::vector<sorted_index>> flush_mem_index(const std::filesystem::path& base_path,
-                                                                          std::vector<mem_index>&& indices,
+                                                                          mem_index* index,
                                                                           size_t num_partition_exponent,
                                                                           size_t flush_iteration,
                                                                           bool use_odirect = false);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "types.h"
+#include <tsl/robin_map.h>
 
 namespace hedge::db
 {
@@ -19,8 +20,7 @@ namespace hedge::db
          * @brief Underlying data structure mapping keys to value pointers.
          * `std::unordered_map` provides fast average-case lookups and insertions.
          */
-        using index_t = std::unordered_map<key_t, value_ptr_t>;
-        using index_buffer_t = std::vector<index_entry_t>;
+        using index_t = tsl::robin_map<key_t, value_ptr_t>;
 
         /**
          * @brief Grants `index_ops` access to the private `_index` member.
@@ -30,8 +30,7 @@ namespace hedge::db
          */
         friend struct index_ops;
 
-        index_t _index;         ///< The hash map storing the key -> value_ptr_t mappings.
-        index_buffer_t _buffer; ///< Key values are buffered here before flush to avoid iterating over the map
+        index_t _index; ///< The hash map storing the key -> value_ptr_t mappings.
 
     public:
         /**
@@ -55,25 +54,12 @@ namespace hedge::db
         mem_index(const mem_index&) = delete;
         mem_index& operator=(const mem_index&) = delete;
 
-        [[nodiscard]] index_t index() &&
-        {
-            return this->_index;
-        }
-
-        static mem_index from_index(index_t&& index)
-        {
-            mem_index mem_idx{};
-            mem_idx._index = std::move(index);
-            return mem_idx;
-        }
-
         /**
          * @brief Removes all entries from the mem_index.
          */
         void clear()
         {
             this->_index.clear();
-            this->_buffer.clear();
         }
 
         /**
@@ -89,7 +75,6 @@ namespace hedge::db
 
             const auto size_w_slack = static_cast<size_t>(size * (1.0 + SLACK));
             this->_index.reserve(size_w_slack);
-            this->_buffer.reserve(size_w_slack);
         }
 
         /**
@@ -102,13 +87,12 @@ namespace hedge::db
          * @return Always returns `true` (consistent with `std::map::insert_or_assign` which returns an iterator+bool).
          * The boolean indicates if an insertion happened, but this implementation simplifies it.
          */
-        bool put(key_t key, value_ptr_t value)
+        bool put(const key_t& key, const value_ptr_t& value)
         {
-            auto [it, inserted] = this->_index.emplace(key, value);
-            this->_buffer.emplace_back(key, value);
+            auto [it, inserted] = this->_index.try_emplace(key, value);
 
             if(!inserted)
-                it->second = value;
+                it.value() = value;
 
             return true;
         }
@@ -120,7 +104,7 @@ namespace hedge::db
          * @return An `std::optional<value_ptr_t>` containing the associated value pointer
          * if the key is found, otherwise `std::nullopt`.
          */
-        std::optional<value_ptr_t> get(key_t key) const
+        std::optional<value_ptr_t> get(const key_t& key) const
         {
             auto it = _index.find(key);
             if(it != _index.end())
@@ -136,5 +120,7 @@ namespace hedge::db
         {
             return this->_index.size();
         };
+
+        ~mem_index() {}
     };
 } // namespace hedge::db

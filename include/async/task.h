@@ -1,12 +1,11 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <coroutine>
 #include <cstdint>
 #include <utility>
-
-#include <logger.h>
 
 /*
     task<T> Implementation
@@ -23,20 +22,19 @@ namespace hedge::async
         {
             if(auto c = h.promise()._continuation)
                 return c;
-
             return std::noop_coroutine();
         }
         void await_resume() const noexcept {}
     };
 
-    template <typename TASK, typename RETURN_VALUE>
+    template <typename TASK, typename RETURN_VALUE = void>
     struct task_promise
     {
         using handle_t = std::coroutine_handle<task_promise<TASK, RETURN_VALUE>>;
 
         std::array<uint8_t, sizeof(RETURN_VALUE)> _data;
-        RETURN_VALUE* _value;
         std::coroutine_handle<> _continuation;
+        std::coroutine_handle<> _root_coro{nullptr};
 
         TASK get_return_object()
         {
@@ -56,7 +54,7 @@ namespace hedge::async
 
         void return_value(RETURN_VALUE&& value)
         {
-            this->_value = new(this->_data.data()) RETURN_VALUE{std::move(value)};
+            new(this->_data.data()) RETURN_VALUE{std::move(value)};
         }
 
         void unhandled_exception()
@@ -71,6 +69,8 @@ namespace hedge::async
         using handle_t = std::coroutine_handle<task_promise<TASK, void>>;
 
         std::coroutine_handle<> _continuation;
+        std::coroutine_handle<> _root_coro;
+        std::atomic_bool _done{false};
 
         TASK get_return_object()
         {
@@ -95,7 +95,7 @@ namespace hedge::async
         void unhandled_exception() { throw; }
     };
 
-    template <typename RETURN_VALUE>
+    template <typename RETURN_VALUE = void>
     class task
     {
         using promise_t = task_promise<task, RETURN_VALUE>;
@@ -142,9 +142,13 @@ namespace hedge::async
             return false;
         }
 
-        auto await_suspend(std::coroutine_handle<> caller_handle)
+        template <typename PROMISE_TYPE>
+        auto await_suspend(std::coroutine_handle<PROMISE_TYPE> caller_handle)
         {
             this->_handle.promise()._continuation = caller_handle;
+            this->_handle.promise()._root_coro = caller_handle.promise()._root_coro
+                                                     ? caller_handle.promise()._root_coro
+                                                     : caller_handle;
             return this->_handle;
         }
 
@@ -156,7 +160,7 @@ namespace hedge::async
             if(!this->_handle.done())
                 assert(false);
 
-            return std::move(*this->_handle.promise()._value);
+            return std::move(*reinterpret_cast<RETURN_VALUE*>(this->_handle.promise()._data.data()));
         }
 
         bool operator()()
@@ -171,6 +175,23 @@ namespace hedge::async
         {
             return this->_handle.done();
         }
+
+        [[nodiscard]] std::coroutine_handle<> handle() const
+        {
+            return this->_handle;
+        }
     };
 
 } // namespace hedge::async
+
+namespace std
+{
+    template <typename T>
+    struct hash<hedge::async::task<T>>
+    {
+        size_t operator()(const auto& task) const noexcept
+        {
+            return std::hash<std::coroutine_handle<>>{}(task.handle());
+        }
+    };
+} // namespace std

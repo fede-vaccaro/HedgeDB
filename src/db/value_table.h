@@ -89,8 +89,6 @@ namespace hedge::db
         std::atomic_size_t _current_offset{0}; ///< Current write offset within the file.
         std::optional<fs::mmap_view> _mmap;    // mmap for write only if not direct IO
 
-        size_t _buffer_capacity = PAGE_SIZE_IN_BYTES * 16;
-
         /** @brief Default constructor (private). Use factory methods. */
         value_table() = default;
         /** @brief Private constructor used by factory methods. */
@@ -109,7 +107,7 @@ namespace hedge::db
         /** @brief Maximum possible ID for a value table. */
         static constexpr size_t TABLE_MAX_ID = std::numeric_limits<uint32_t>::max();
         /** @brief Maximum practical size for a single value entry (derived constraint). */
-        static constexpr size_t MAX_FILE_SIZE = (((1UL << 17) - 1) * PAGE_SIZE_IN_BYTES) - sizeof(file_header); // TODO: Re-evaluate this limit's origin/necessity
+        static constexpr size_t MAX_VALUE_SIZE = (((1UL << 17) - 1) * PAGE_SIZE_IN_BYTES) - sizeof(file_header); // TODO: Re-evaluate this limit's origin/necessity
 
         /// Deleted constructor and assignment.
         value_table(value_table&&) = delete;
@@ -165,7 +163,7 @@ namespace hedge::db
          * @return `async::task<expected<hedge::value_ptr_t>>` resolving to the `value_ptr_t` pointing
          * to the newly written entry, or an error if the write fails.
          */
-        async::task<expected<hedge::value_ptr_t>> write_async(key_t key, const std::vector<uint8_t>& value, const write_reservation& reservation, const std::shared_ptr<async::executor_context>& executor);
+        async::task<expected<hedge::value_ptr_t>> write_async(key_t key, const std::vector<uint8_t>& value, const write_reservation& reservation);
 
         /**
          * @brief Asynchronously reads a value entry (header + data) from a specific offset and size.
@@ -176,7 +174,7 @@ namespace hedge::db
          * @return `async::task<expected<output_file>>` resolving to the read data (`output_file`) or an error
          * (e.g., `errc::DELETED` if the flag is set and not skipped, I/O errors, validation errors).
          */
-        async::task<expected<output_file>> read_async(size_t file_offset, size_t file_size, const std::shared_ptr<async::executor_context>& executor, bool skip_delete_check = false);
+        async::task<expected<output_file>> read_async(size_t file_offset, size_t file_size, bool skip_delete_check = false);
 
         /**
          * @brief Factory function to create a new, empty value table file.
@@ -211,6 +209,8 @@ namespace hedge::db
         std::shared_ptr<value_table> _reference_table{nullptr};
         size_t _file_offset{std::numeric_limits<size_t>::max()};
 
+        std::mutex _write_lock;
+
     public:
         write_buffer() = default;
         write_buffer(size_t capacity)
@@ -226,6 +226,12 @@ namespace hedge::db
             this->_reference_table = std::move(reference_table);
             this->_write_buffer_head.store(0);
             this->_file_offset = reserved_offset;
+        }
+
+        [[nodiscard]] bool is_set()
+        {
+            std::shared_lock lk(this->_flush_mutex);
+            return this->_reference_table != nullptr;
         }
 
         async::task<status> flush(const std::shared_ptr<async::executor_context>& executor);

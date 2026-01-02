@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -13,9 +12,11 @@
 
 #include "async/io_executor.h"
 #include "async/task.h"
-#include "fs/fs.hpp"
 #include "cache.h"
+#include "fs/fs.hpp"
+#include "tsl/robin_map.h"
 #include "types.h"
+#include "utils.h"
 
 #include "perf_counter.h"
 
@@ -76,16 +77,12 @@ namespace hedge::db
         // Allow index_ops to access private members for operations like merging/saving.
         friend struct index_ops;
 
-        std::vector<index_entry_t> _index;                         ///< In-memory copy of the entire main index data (optional, loaded by load_index()). Empty if using on-demand page loading.
-        std::vector<meta_index_entry> _meta_index;                 ///< In-memory copy of the meta-index (always loaded on construction/load).
-        std::optional<std::vector<meta_index_entry>> _super_index; ///< The super index can be built to facilitate lookup over the meta index.
-        sorted_index_footer _footer;                               ///< In-memory copy of the file's footer (always loaded on construction/load).
+        page_aligned_buffer<index_entry_t> _index;                         ///< In-memory copy of the entire main index data (optional, loaded by load_index()). Empty if using on-demand page loading.
+        page_aligned_buffer<meta_index_entry> _meta_index;                 ///< In-memory copy of the meta-index (always loaded on construction/load).
+        std::optional<page_aligned_buffer<meta_index_entry>> _super_index; ///< The super index can be built to facilitate lookup over the meta index.
+        sorted_index_footer _footer;                                       ///< In-memory copy of the file's footer (always loaded on construction/load).
 
     public:
-        inline static avg_stat get_write_slot_time{};
-        inline static avg_stat cache_lookup_time{};
-        inline static avg_stat find_in_page_time{};
-
         /**
          * @brief Constructs a sorted_index object.
          * @param fd An rvalue reference to an `fs::file` object managing the file descriptor.
@@ -93,7 +90,7 @@ namespace hedge::db
          * @param meta_index An rvalue reference to a vector containing the meta index entries.
          * @param footer A copy of the sorted_index_footer structure.
          */
-        sorted_index(fs::file fd, std::vector<index_entry_t> index, std::vector<meta_index_entry> meta_index, sorted_index_footer footer);
+        sorted_index(fs::file fd, page_aligned_buffer<index_entry_t> index, page_aligned_buffer<meta_index_entry> meta_index, sorted_index_footer footer);
 
         /**
          * @brief Default constructor. Creates an invalid/uninitialized sorted_index.
@@ -138,7 +135,7 @@ namespace hedge::db
          * @param executor A shared pointer to the `io_uring` executor context used for the read operation.
          * @return A `async::task` that resolves to an `expected` containing an `std::optional<value_ptr_t>`, or an error.
          */
-        [[nodiscard]] async::task<expected<std::optional<value_ptr_t>>> lookup_async(const key_t& key, const std::shared_ptr<async::executor_context>& executor, const std::shared_ptr<page_cache>& cache) const;
+        [[nodiscard]] async::task<expected<std::optional<value_ptr_t>>> lookup_async(const key_t& key, const std::shared_ptr<shared_page_cache>& cache) const;
 
         /**
          * @brief Loads the entire main index data from the associated file into the in-memory `_index` vector.
@@ -202,20 +199,7 @@ namespace hedge::db
          * @return A `async::task` that resolves to an `expected` containing a `std::unique_ptr<uint8_t>`
          * holding the page data, or an error if the read fails. The memory is allocated page-aligned.
          */
-        [[nodiscard]] async::task<hedge::status> _load_page_async(size_t offset, uint8_t* data_ptr, const std::shared_ptr<async::executor_context>& executor) const;
-
-        /**
-         * @brief [EXPERIMENTAL] Asynchronously writes a single `index_entry_t` to a specific location within a page on disk.
-         * @details Used by `try_update_async`. Calculates the exact offset and submits an `io_uring` write request.
-         * It will likely be removed in future versions.
-         * @param entry The `index_entry_t` data to write.
-         * @param page_id The ID of the page where the entry resides.
-         * @param start Pointer to the beginning of the (in-memory or mmapped) page data containing the target entry.
-         * @param end Pointer to the end of the page data.
-         * @param executor A shared pointer to the `io_uring` executor context.
-         * @return A `async::task` that resolves to a `hedge::status` indicating success or failure.
-         */
-        [[nodiscard]] async::task<hedge::status> _update_in_page(const index_entry_t& entry, size_t page_id, const index_entry_t* start, const index_entry_t* end, const std::shared_ptr<async::executor_context>& executor);
+        [[nodiscard]] async::task<hedge::status> _load_page_async(size_t offset, uint8_t* data_ptr) const;
     };
 
 } // namespace hedge::db
