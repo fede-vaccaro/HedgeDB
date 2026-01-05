@@ -70,7 +70,6 @@ namespace hedge::async
 
         std::coroutine_handle<> _continuation;
         std::coroutine_handle<> _root_coro;
-        std::atomic_bool _done{false};
 
         TASK get_return_object()
         {
