@@ -25,7 +25,7 @@ namespace hedge
     {
     private:
         // Note: The most significant bit (MSB) of _offset is used as a 'deleted' flag.
-        uint64_t _offset{};   ///< Byte offset within the value table file. MSB indicates deletion.
+        uint64_t _offset{};   ///< Byte offset within the value table file. MSB indicates a deletion operation. 
         uint32_t _size{};     ///< Size of the value data in bytes (including any header).
         uint32_t _table_id{}; ///< Identifier of the value_table file containing the value.
 

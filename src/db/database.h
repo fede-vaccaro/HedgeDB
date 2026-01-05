@@ -57,8 +57,10 @@ namespace hedge::db
         bool use_odirect_for_indices = true;
         /// Use 0 no cache is desired; the cache size in bytes otherwise
         size_t index_page_clock_cache_size_bytes = 1UL * 1024 * 1024 * 1024;
-
-        size_t index_point_cache_size_bytes = 512 * 1024 * 1024;
+        /// Experimental; it's like a giant memtable; do not use
+        size_t index_point_cache_size_bytes = 0;
+        /// Number of background workers to be used for compaction
+        size_t compaction_io_workers = 4;
     };
 
     /**
@@ -117,8 +119,10 @@ namespace hedge::db
 
         // --- Background Workers ---
         /// Worker thread dedicated to handling index compaction jobs.
-        async::worker _compaction_worker{};
-        async::worker _flush_worker{};
+        async::worker _compaction_worker{}; ///< It just controls the flow for compaction, the actual I/O is done by the pool _compaction_executor
+        async::worker _value_table_worker{}; ///< Worker thread for instantiating new value tables
+        async::worker _flush_worker{}; ///< Worker thread for flushing the memtables
+        std::vector<std::shared_ptr<async::executor_context>> _compation_executor_pool{}; ///< Pool of executors managing background compactions
 
         // Index page cache
         std::shared_ptr<shared_page_cache> _index_page_cache;

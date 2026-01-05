@@ -1,63 +1,64 @@
+#include <cstdint>
+#include <cstdlib>
 #include <format>
+#include <stdexcept>
 
 #include "file_reader.h"
 #include "fs.hpp"
+#include "io_executor.h"
 #include "types.h"
 
 namespace hedge::fs
 {
-    file_reader::file_reader(const fs::file& fd, const file_reader_config& config, std::shared_ptr<async::executor_context> executor)
-        : _fd(fd), _config(config), _current_offset(config.start_offset), _executor(std::move(executor))
+    file_reader::file_reader(const fs::file& fd, const file_reader_config& config)
+        : _fd(fd), _config(config), _current_offset(config.start_offset)
     {
+
+        size_t buffer_size = this->_config.read_ahead_size;
+
+        if(this->_fd.has_direct_access() && buffer_size % PAGE_SIZE_IN_BYTES != 0)
+            buffer_size += PAGE_SIZE_IN_BYTES - (buffer_size % PAGE_SIZE_IN_BYTES);
+
+        void* alloc = aligned_alloc(PAGE_SIZE_IN_BYTES, buffer_size);
+
+        if(alloc == nullptr)
+            throw std::runtime_error("Could not allocate memory for file reader");
+
+        this->_buffer = std::unique_ptr<uint8_t>(static_cast<uint8_t*>(alloc));
+
+        // page align read_ahead_size
+        this->_config.read_ahead_size = buffer_size;
     }
 
-    async::task<expected<std::vector<uint8_t>>> file_reader::next(size_t num_bytes_to_read, bool clamp_at_end)
+    std::optional<file_reader::awaitable_read_request_t> file_reader::next()
     {
-        if(this->_fd.has_direct_access() && (num_bytes_to_read % PAGE_SIZE_IN_BYTES != 0))
-            co_return hedge::error(std::format("Requested bytes to read ({}) from O_DIRECT file is not page aligned (page size: {}).", num_bytes_to_read, PAGE_SIZE_IN_BYTES));
-
         if(this->_current_offset >= this->_config.end_offset)
-            co_return std::vector<uint8_t>{}; // EOF
+            return std::nullopt; // EOF reached
 
-        if(this->_current_offset + num_bytes_to_read > this->_config.end_offset)
+        size_t bytes_to_read = this->_config.read_ahead_size;
+        size_t page_aligned_bytes_to_read = bytes_to_read;
+
+        // clip to end offset
+        if(this->_current_offset + this->_config.read_ahead_size > this->_config.end_offset)
         {
-            if(clamp_at_end)
-                num_bytes_to_read = this->_config.end_offset - this->_current_offset;
-            else
-                co_return hedge::error(std::format("Requested pages beyond limit: {} + {} >= {}", this->_current_offset, num_bytes_to_read, this->_config.end_offset));
+            bytes_to_read = this->_config.end_offset - this->_current_offset;
+            page_aligned_bytes_to_read = bytes_to_read;
         }
 
-        // round to page size if using direct I/O
-        auto actual_num_bytes_to_read = num_bytes_to_read;
+        // add padding to page align the request
+        if(this->_fd.has_direct_access() && page_aligned_bytes_to_read % PAGE_SIZE_IN_BYTES != 0)
+            page_aligned_bytes_to_read += PAGE_SIZE_IN_BYTES - (page_aligned_bytes_to_read % PAGE_SIZE_IN_BYTES);
 
-        size_t alignment = this->_fd.has_direct_access() ? PAGE_SIZE_IN_BYTES : 1;
-
-        if(this->_fd.has_direct_access() && num_bytes_to_read % PAGE_SIZE_IN_BYTES != 0)
-            num_bytes_to_read += PAGE_SIZE_IN_BYTES - (num_bytes_to_read % PAGE_SIZE_IN_BYTES);
-
-        auto* data_ptr = static_cast<uint8_t*>(aligned_alloc(alignment, num_bytes_to_read));
-
-        if(data_ptr == nullptr)
-            co_return hedge::error("Failed to allocate aligned memory for file read.");
-
-        auto data = std::unique_ptr<uint8_t>(data_ptr);
-
-        auto response = co_await this->_executor->submit_request(async::read_request{
+        auto awaitable_mailbox = async::this_thread_executor()->submit_request(async::read_request{
             .fd = this->_fd.fd(),
-            .data = data_ptr,
+            .data = this->_buffer.get(),
             .offset = this->_current_offset,
-            .size = num_bytes_to_read,
+            .size = page_aligned_bytes_to_read,
         });
 
-        this->_current_offset += num_bytes_to_read;
+        this->_current_offset += page_aligned_bytes_to_read;
 
-        if(response.error_code != 0)
-            co_return hedge::error(std::format("An error occurred with request fd: {}, current_offset: {}, size: {}. Error: {}", this->_fd.fd(), this->_current_offset, num_bytes_to_read, strerror(-response.error_code)));
-
-        if(response.bytes_read != num_bytes_to_read)
-            co_return hedge::error(std::format("Unexpected bytes read: {}. Expected: {}", response.bytes_read, num_bytes_to_read));
-
-        co_return std::vector<uint8_t>(data_ptr, data_ptr + actual_num_bytes_to_read);
+        return file_reader::awaitable_read_request_t{awaitable_mailbox, bytes_to_read};
     }
 
     size_t file_reader::get_current_offset() const
@@ -73,6 +74,11 @@ namespace hedge::fs
     void file_reader::reset_it(size_t it)
     {
         this->_current_offset = std::min(it, this->_config.end_offset);
+    }
+
+    uint8_t* file_reader::get_buffer_ptr() const
+    {
+        return this->_buffer.get();
     }
 
 } // namespace hedge::fs
