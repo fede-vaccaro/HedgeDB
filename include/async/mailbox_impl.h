@@ -19,7 +19,9 @@ namespace hedge::async
     template <typename Derived>
     struct mailbox_base
     {
-        std::coroutine_handle<> continuation;
+        std::coroutine_handle<> continuation{nullptr};
+        bool response_set{false};
+        bool response_consumed{false};
 
         void prepare_sqe(io_uring_sqe* sqe)
         {
@@ -28,11 +30,13 @@ namespace hedge::async
 
         void handle_cqe(io_uring_cqe* cqe)
         {
-            return static_cast<Derived*>(this)->handle_cqe(cqe);
+            static_cast<Derived*>(this)->handle_cqe(cqe);
+            this->response_set = true;
         }
 
         void* get_response() // todo: use &response as default otherwise call get_response() on the derived class (implement through SFINAE)
         {
+            this->response_consumed = true;
             return static_cast<Derived*>(this)->get_response();
         }
 
@@ -43,28 +47,10 @@ namespace hedge::async
 
         void resume()
         {
-            /*
-            TODO:
-            Use an std::atomic_bool for signaling that the response has been set.
-            This is needed for allowing:
-
-                awaitable_mailbox<read_response> future = co_await executor.submit_request(read_request{...});
-
-                // do non blocking stuff the meanwhile
-
-                auto read_response = co_await future;
-
-                At the time being, this won't work and will make the program to crash because the io_executor will try to resume it later
-                but the continuation is set only within awaitable_mailbox::await_suspend, which is called only on 'co_await future'
-                i'm not sure an atomic_bool is needed, since so far the executor is single-threaded
-            */
-
-            if(this->continuation.done())
+            if(response_consumed)
                 return;
-
+            
             this->continuation.resume();
-
-            // return this->continuation.done();
         }
     };
 

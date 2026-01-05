@@ -54,7 +54,7 @@ namespace hedge
 
         api_ptr->_db_impl = std::make_unique<db_impl>(
             std::move(maybe_db.value()),
-            std::make_shared<async::executor_context>(128));
+            async::executor_context::make_new(128));
 
         return api_ptr;
     }
@@ -70,7 +70,7 @@ namespace hedge
 
         api_ptr->_db_impl = std::make_unique<db_impl>(
             std::move(maybe_db.value()),
-            std::make_shared<async::executor_context>(128));
+            async::executor_context::make_new(128));
 
         return api_ptr;
     }
