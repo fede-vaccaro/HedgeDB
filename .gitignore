@@ -3,7 +3,7 @@ hedge_table
 hedge_db
 
 # clangd
-.cache/*
+**/.cache/*
 
 # cmake
 **/build/*
