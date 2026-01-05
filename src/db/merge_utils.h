@@ -6,40 +6,13 @@
 #include <error.hpp>
 
 #include "fs/file_reader.h"
+#include "mailbox_impl.h"
 #include "types.h"
 #include "utils.h"
 
 namespace hedge::db
 {
-    /**
-     * @brief Manages a rolling buffer for asynchronously reading chunks of data (specifically index_entry_t) from a file.
-     * @details This class is designed for external merge sort algorithms. It maintains an internal byte buffer
-     * that is filled asynchronously using an `fs::file_reader`. It provides iterators (`it()` and `end()`)
-     * that view the byte buffer as a sequence of `index_entry_t` structs. When the iterator reaches the end
-     * of the currently buffered data, the `next()` method can be called to read the next chunk from the file,
-     * discard the already processed part of the buffer, append the new data, and reset the iterator.
-     *
-     * Example:
-     * Initial buffer: {EntryA, EntryB, it() -> [EntryC], EntryD} (iterator at EntryC)
-     * Call `next()`: Reads {EntryE, EntryF}
-     * New buffer: {it() -> [EntryC], EntryD, EntryE, EntryF} (iterator reset to EntryC)
-     *
-     * Example usage scenario:
-     *
-     * while(true)
-     * {
-     *     while(rolling_buffer.it() != rolling_buffer.end())
-     *     {
-     *         do_something(*rolling_buffer.it());
-     *         rolling_buffer.it()++;
-     *     }
-     *
-     *     if(rolling_buffer.eof())
-     *         break;
-     *
-     *     co_await rolling_buffer.next(read_ahead_size);
-     * }
-     */
+
     class rolling_buffer
     {
         // Type aliases for clarity
@@ -47,8 +20,6 @@ namespace hedge::db
         using span_t = std::span<index_entry_t>;               ///< A non-owning view of the buffer interpreted as index entries.
         using iterator_t = std::span<index_entry_t>::iterator; ///< Iterator over the index entry view.
         using buffer_iterator_t = byte_buffer_t::iterator;     ///< Iterator over the underlying byte buffer.
-
-        fs::file_reader _reader; ///< The asynchronous file reader used to fetch data chunks.
 
         byte_buffer_t _buffer; ///< The internal buffer holding raw byte data read from the file.
         span_t _view;          ///< A span providing typed access (`index_entry_t`) to the current `_buffer`.
@@ -59,7 +30,7 @@ namespace hedge::db
          * @brief Constructs a rolling_buffer.
          * @param reader An rvalue reference to an `fs::file_reader` which will be used to fetch data.
          */
-        rolling_buffer(fs::file_reader&& reader) : _reader(std::move(reader))
+        rolling_buffer()
         {
             this->_init(); // Initialize the view and iterator for the (initially empty) buffer.
         }
@@ -86,64 +57,24 @@ namespace hedge::db
          * @brief Checks if the buffer is empty AND the underlying file reader has reached EOF.
          * @return `true` if all data has been read and consumed, `false` otherwise.
          */
-        bool eof()
+        bool empty()
         {
             // Only truly EOF if the buffer is empty AND the reader confirms no more data in the file.
-            return this->_buffer.empty() && this->_reader.is_eof();
+            return this->_buffer.empty();
         }
 
-        /**
-         * @brief Gets the number of remaining items in the current view.
-         * @return The count of `index_entry_t` items left to process in the buffer.
-         */
+        void consume_and_push(std::span<uint8_t> read_response)
+        {
+            // Append the newly read data to the rolling buffer.
+            this->_consume_and_push(read_response);
+        }
+
         [[nodiscard]] size_t items_left() const
         {
             return this->_view.end() - this->_it;
         }
 
-        /**
-         * @brief Asynchronously reads the next chunk of data from the file reader, updates the buffer, and resets the iterator.
-         * @param bytes_to_read The number of bytes to attempt to read in the next chunk.
-         * @return An `async::task<hedge::status>` indicating success or failure of the read and buffer update operation.
-         */
-        async::task<hedge::status> next(size_t bytes_to_read)
-        {
-            co_return co_await this->_next(bytes_to_read);
-        }
-
     private:
-        /**
-         * @brief Helper coroutine to perform the asynchronous read via the file reader.
-         * @param read_ahead_size Number of bytes to request from the reader.
-         * @return Task resolving to `expected<std::vector<uint8_t>>` containing the read data or an error.
-         */
-        async::task<hedge::expected<std::vector<uint8_t>>> _read_from_io(size_t read_ahead_size)
-        {
-            auto maybe_buffer = co_await this->_reader.next(read_ahead_size);
-            if(!maybe_buffer.has_value())
-                co_return hedge::error("Failed to read from io: " + maybe_buffer.error().to_string());
-
-            co_return std::move(maybe_buffer.value());
-        };
-
-        /**
-         * @brief Core asynchronous logic for fetching the next chunk and updating the buffer state.
-         * @param bytes_to_read Number of bytes to attempt to read.
-         * @return Task resolving to `hedge::status`.
-         */
-        async::task<hedge::status> _next(size_t bytes_to_read)
-        {
-            // 1. Asynchronously read the next chunk of data.
-            auto maybe_new_read = co_await this->_read_from_io(bytes_to_read);
-            if(!maybe_new_read)
-                co_return hedge::error("Failed to read from index view: " + maybe_new_read.error().to_string());
-
-            // 2. Update the internal buffer by discarding processed data and appending new data.
-            this->_consume_and_push(std::move(maybe_new_read.value()));
-
-            co_return hedge::ok(); // Indicate success.
-        }
-
         /**
          * @brief Calculates the corresponding iterator position in the underlying byte buffer.
          * @return `buffer_iterator_t` pointing to the start byte of the element `_it` points to.
@@ -157,7 +88,7 @@ namespace hedge::db
          * @brief Updates the internal buffer: removes consumed bytes and appends new bytes.
          * @param new_buffer An rvalue reference to the newly read byte buffer.
          */
-        void _consume_and_push(byte_buffer_t&& new_buffer)
+        void _consume_and_push(std::span<uint8_t> new_buffer_view)
         {
             /*
                 What happens here:
@@ -167,7 +98,7 @@ namespace hedge::db
                 4. Reset the read iterator `this->_it`, since this->_view has changed.
             */
             this->_buffer.erase(this->_buffer.begin(), this->_buffer_it());
-            this->_buffer.insert(this->_buffer.end(), new_buffer.begin(), new_buffer.end());
+            this->_buffer.insert(this->_buffer.end(), new_buffer_view.begin(), new_buffer_view.end());
             this->_view = view_as<index_entry_t>(this->_buffer);
             this->_it = this->_view.begin();
         }
@@ -202,14 +133,14 @@ namespace hedge::db
      *
      * This ensures correct deduplication even when key groups span across buffer boundaries handled by `rolling_buffer`.
      */
-    class entry_deduplicator
+    class merge_iterator
     {
         std::optional<index_entry_t> _to_be_checked_item{}; ///< Holds the current lowest-priority candidate for the ongoing key group.
         std::optional<index_entry_t> _ready_item{};         ///< Holds the finalized item from the *previous* key group, ready to be emitted.
 
     public:
         /** @brief Default constructor. Initializes with empty state. */
-        entry_deduplicator() = default;
+        merge_iterator() = default;
 
         /**
          * @brief Pushes a new item into the deduplicator, updating state based on key comparison.

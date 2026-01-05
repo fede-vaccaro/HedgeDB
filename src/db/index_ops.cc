@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -20,6 +21,7 @@
 #include "fs/fs.hpp"
 #include "index_ops.h"
 #include "merge_utils.h"
+#include "perf_counter.h"
 #include "sorted_index.h"
 #include "types.h"
 #include "utils.h"
@@ -200,8 +202,19 @@ namespace hedge::db
         // Step 1: Combine all memtables into one large sorted list in memory.
         auto index_sorted = sort_memtable(index);
 
-        std::vector<sorted_index> resulting_indices;                                       // To store the created sorted_index objects.
-        page_aligned_buffer<index_entry_t> current_partition_entries(index_sorted.size()); // Temp buffer for entries of the current partition.
+        std::vector<sorted_index> resulting_indices; // To store the created sorted_index objects.
+
+        constexpr double SLACK = 0.5; // Slack factor to avoid the need of reallocation.
+        size_t partition_estimated_size;
+
+        if(num_partition_exponent == 0)
+            partition_estimated_size = index_sorted.size();
+        else
+            partition_estimated_size = ((double)index_sorted.size() / (1 << num_partition_exponent) + 1.0) * (1.0 + SLACK);
+
+        partition_estimated_size = std::max(partition_estimated_size, PAGE_SIZE_IN_BYTES / sizeof(index_entry_t));
+
+        page_aligned_buffer<index_entry_t> current_partition_entries(partition_estimated_size); // Temp buffer for entries of the current partition.
         size_t curr_partition_count{0};
 
         // Calculate the range of key prefixes per partition.
@@ -241,7 +254,7 @@ namespace hedge::db
 
                 OUTCOME_TRY(auto sorted_index, index_ops::save_as_sorted_index(
                                                    path,
-                                                   std::exchange(current_partition_entries, page_aligned_buffer<index_entry_t>(index_sorted.size())),
+                                                   std::exchange(current_partition_entries, page_aligned_buffer<index_entry_t>(partition_estimated_size)),
                                                    current_partition_id,
                                                    use_odirect));
 
@@ -456,16 +469,16 @@ namespace hedge::db
             {
                 .start_offset = 0,
                 .end_offset = left._footer.index_end_offset,
-            },
-            executor);
+                .read_ahead_size = config.read_ahead_size,
+            });
 
         auto rhs_reader = fs::file_reader(
             right,
             {
                 .start_offset = 0,
                 .end_offset = right._footer.index_end_offset,
-            },
-            executor);
+                .read_ahead_size = config.read_ahead_size,
+            });
 
         // Extrapolate new index path
         auto [dir, file_name] = format_prefix(left.upper_bound());
@@ -494,18 +507,20 @@ namespace hedge::db
 
         // Create rolling buffers for both readers
         // Those will maintain a sliding window over the data read from disk
-        auto lhs_rbuf = rolling_buffer(std::move(lhs_reader));
-        auto rhs_rbuf = rolling_buffer(std::move(rhs_reader));
+        auto lhs_rbuf = rolling_buffer();
+        auto rhs_rbuf = rolling_buffer();
 
-        auto init_lhs = co_await lhs_rbuf.next(config.read_ahead_size);
+        auto unpack_mailbox = [](fs::file_reader::awaitable_read_request_t& awaitable) -> async::task<expected<async::read_response>>
+        {
+            auto response = co_await awaitable.first;
 
-        if(!init_lhs)
-            co_return hedge::error("Some error occurred while getting the first page from LHS inde: " + init_lhs.error().to_string());
+            if(response.error_code != 0)
+                co_return hedge::error("Read request failed with error code: " + std::string(strerror(-response.error_code)));
 
-        auto init_rhs = co_await rhs_rbuf.next(config.read_ahead_size);
+            response.bytes_read = awaitable.second; // actual bytes requested before padding
 
-        if(!init_rhs)
-            co_return hedge::error("Some error occurred while getting the first page from RHS inde: " + init_rhs.error().to_string());
+            co_return response;
+        };
 
         size_t indexed_keys = 0;
         [[maybe_unused]] size_t filtered_keys = 0; // TO FIX: this was used for an assert that is currently disabled
@@ -514,25 +529,60 @@ namespace hedge::db
         // Meta-index entries collected during the merge
         std::vector<meta_index_entry> merged_meta_index;
 
-        // For shortening the syntax
-        auto& lhs = lhs_rbuf;
-        auto& rhs = rhs_rbuf;
+        std::vector<fs::file_reader::awaitable_read_request_t> lhs_pending_reads;
+        std::vector<fs::file_reader::awaitable_read_request_t> rhs_pending_reads;
+
+        lhs_pending_reads.reserve(16);
+        rhs_pending_reads.reserve(16);
+
+        lhs_pending_reads.push_back(lhs_reader.next().value());
+        rhs_pending_reads.push_back(rhs_reader.next().value());
 
         // Helper lambda to refresh both buffers by reading the next chunk from each index
-        auto refresh_buffers = [&lhs, &rhs, &config]() -> async::task<hedge::status>
+        auto refresh_buffers = [&]() -> async::task<hedge::status>
         {
-            auto status = co_await lhs.next(config.read_ahead_size);
+            for(auto& read_mailbox : lhs_pending_reads)
+            {
+                auto maybe_read = co_await unpack_mailbox(read_mailbox);
+                if(!maybe_read)
+                    co_return hedge::error("Failed to read from LHS during buffer refresh: " + maybe_read.error().to_string());
 
-            if(!status)
-                co_return hedge::error("Cannot refresh LHS view: " + status.error().to_string());
+                // fetch data from LHS
+                uint8_t* data_ptr = lhs_reader.get_buffer_ptr();
+                lhs_rbuf.consume_and_push(std::span<uint8_t>(data_ptr, data_ptr + maybe_read.value().bytes_read));
+            }
 
-            status = co_await rhs.next(config.read_ahead_size);
+            for(auto& read_mailbox : rhs_pending_reads)
+            {
+                auto maybe_read = co_await unpack_mailbox(read_mailbox);
+                if(!maybe_read)
+                    co_return hedge::error("Failed to read from RHS during buffer refresh: " + maybe_read.error().to_string());
 
-            if(!status)
-                co_return hedge::error("Cannot refresh RHS view: " + status.error().to_string());
+                // fetch data from RHS
+                uint8_t* data_ptr = rhs_reader.get_buffer_ptr();
+                rhs_rbuf.consume_and_push(std::span<uint8_t>(data_ptr, data_ptr + maybe_read.value().bytes_read));
+            }
+
+            // prepare new requests
+            rhs_pending_reads.clear();
+            if(!rhs_reader.is_eof())
+                rhs_pending_reads.push_back(rhs_reader.next().value());
+            else
+                rhs_rbuf.consume_and_push({});
+
+            // prepare new requests
+            lhs_pending_reads.clear();
+            if(!lhs_reader.is_eof())
+                lhs_pending_reads.push_back(lhs_reader.next().value());
+            else
+                lhs_rbuf.consume_and_push({});
 
             co_return hedge::ok();
         };
+
+        auto initial_refresh_status = co_await refresh_buffers();
+        if(!initial_refresh_status)
+            co_return hedge::error("Failed to perform initial buffer refresh: " + initial_refresh_status.error().to_string());
 
         // Needed to handle possible entry with duplicated keys (but different value_ptr) between LHS and RHS
         // In different sorted indices, there might be duplicated keys with different value_ptr because this
@@ -543,33 +593,39 @@ namespace hedge::db
         // When pushing a new item:
         // - If its key is the same as the last pushed one, the internal buffer keeps only the one with the highest value_ptr (most recent entry).
         // - If its key is different from the last pushed one, the last pushed is rotate to the output (ready to be popped), and the new item is stored as the current one.
-        entry_deduplicator dedup{};
+        merge_iterator dedup{};
 
         // Keep track of the last written key for building the meta-index
         uuids::uuid last_written_key{};
+
+        [[maybe_unused]] uint64_t compute_duration{0};
+        [[maybe_unused]] size_t merge_iterations{0};
 
         /*
         -- Step 1: Main merge loop. Here happen the comparisons between the two buffer --
         */
         while(true)
         {
+            auto t0 = std::chrono::high_resolution_clock::now();
+            prof::DoNotOptimize(t0);
+
             [[maybe_unused]] size_t iteration_count{0};
             std::vector<uint8_t> merged_keys(config.read_ahead_size * 2);
             auto merged_keys_span = view_as<index_entry_t>(merged_keys);
             auto merged_keys_it = merged_keys_span.begin();
 
             // Loop until one of the two views is exhausted
-            while(lhs.it() != lhs.end() && rhs.it() != rhs.end())
+            while(lhs_rbuf.it() != lhs_rbuf.end() && rhs_rbuf.it() != rhs_rbuf.end())
             {
-                if(*lhs.it() < *rhs.it())
+                if(*lhs_rbuf.it() < *rhs_rbuf.it())
                 {
-                    dedup.push(*lhs.it());
-                    ++lhs.it();
+                    dedup.push(*lhs_rbuf.it());
+                    ++lhs_rbuf.it();
                 }
                 else
                 {
-                    dedup.push(*rhs.it());
-                    ++rhs.it();
+                    dedup.push(*rhs_rbuf.it());
+                    ++rhs_rbuf.it();
                 }
 
                 if(dedup.ready()) // For getting ready, we need to have pushed at least two entries
@@ -595,15 +651,20 @@ namespace hedge::db
                         break; // The output buffer is full, exit loop to write to disk
                 }
             }
-
             // Resize the merged keys buffer to the actual number of bytes written
-            auto bytes_in_chunk = std::distance(merged_keys_span.begin(), merged_keys_it) * sizeof(index_entry_t);
-            merged_keys.resize(bytes_in_chunk);
+            auto merged_keys_bytes = std::distance(merged_keys_span.begin(), merged_keys_it) * sizeof(index_entry_t);
+            merged_keys.resize(merged_keys_bytes);
 
             // Reminder that the `entry_deduplicator` is strictly necessary when reading chunks from disk:
             // The easiest solution would be to filter the duplicates from the `merged_keys` when full,
             // just before writing it to disk; however, this might lead to a subtle bug: a entry duplicate
             // might just be in the of the two forecoming chunks
+
+            auto t1 = std::chrono::high_resolution_clock::now();
+            prof::DoNotOptimize(t1);
+            compute_duration += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+            merge_iterations++;
+
             auto res = co_await executor->submit_request(async::write_request{
                 .fd = output_fd.fd(),
                 .data = merged_keys.data(),
@@ -619,8 +680,8 @@ namespace hedge::db
             if(!status)
                 co_return hedge::error("Failed to refresh views: " + status.error().to_string());
 
-            // One of the two data stream has been consumed
-            if(lhs.eof() || rhs.eof())
+            // One of the two data stream has been exhausted
+            if(lhs_rbuf.empty() || rhs_rbuf.empty())
                 break;
 
             iteration_count++;
@@ -633,7 +694,7 @@ namespace hedge::db
         */
 
         // Handle remaining keys from the non exhausted-view
-        auto& non_empty_view = !lhs.eof() ? lhs : rhs;
+        auto& non_empty_view = !lhs_rbuf.empty() ? lhs_rbuf : rhs_rbuf;
 
         std::vector<index_entry_t> remaining_keys;           // Buffer for remaining keys to be written
         remaining_keys.reserve(non_empty_view.items_left()); // Estimate capacity
@@ -641,7 +702,7 @@ namespace hedge::db
         // Push the next item (if any) to the deduplicator.
         // Remember that there is necessary an item left from the previous loop (because of the 1-item lag)
         // This item, is sitting there waiting to get ready
-        if(!non_empty_view.eof() && non_empty_view.it() != non_empty_view.end())
+        if(!non_empty_view.empty() && non_empty_view.it() != non_empty_view.end())
         {
             dedup.push(*non_empty_view.it());
             ++non_empty_view.it();
@@ -681,7 +742,8 @@ namespace hedge::db
         */
 
         // In this loop, we just read all (in chunks) remaining items from the non_empty_view
-        while(!non_empty_view.eof())
+
+        while(!non_empty_view.empty())
         {
             // Read all items from the current buffer
             while(non_empty_view.it() != non_empty_view.end())
@@ -720,7 +782,7 @@ namespace hedge::db
             }
 
             // Refresh the view to get the next chunk
-            auto refresh_status = co_await non_empty_view.next(config.read_ahead_size);
+            auto refresh_status = co_await refresh_buffers();
 
             if(!refresh_status)
                 co_return hedge::error("Failed to refresh view: " + refresh_status.error().to_string());
@@ -836,9 +898,10 @@ namespace hedge::db
         /*
         -- Step 5: Create sorted_index object for the merged file and return it --
         */
-        auto read_fd = fs::file::from_path(
+        auto read_fd = co_await fs::file::from_path_async(
             output_fd.path(),
             fs::file::open_mode::read_only,
+            async::this_thread_executor(),
             config.create_new_with_odirect,
             bytes_written);
 

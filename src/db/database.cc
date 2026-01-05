@@ -33,6 +33,7 @@ namespace hedge::db
         db->_values_path = base_path / "values";
         db->_config = config;
 
+        // Minimal config validation
         if(config.num_partition_exponent > db_config::MAX_PARTITION_EXPONENT)
             return hedge::error("num_partition_exponent must be <= " + std::to_string(db_config::MAX_PARTITION_EXPONENT));
 
@@ -42,15 +43,21 @@ namespace hedge::db
         if(std::filesystem::exists(db->_base_path))
             return hedge::error("Database path already exists: " + db->_base_path.string());
 
+        // Create necessary directories
         std::filesystem::create_directories(db->_base_path);
         std::filesystem::create_directories(db->_indices_path);
         std::filesystem::create_directories(db->_values_path);
+
+        db->_compation_executor_pool.resize(config.compaction_io_workers);
+        for(auto& ex : db->_compation_executor_pool)
+            ex = async::executor_context::make_new(32);
 
         // TODO: Write a manifest file to store configuration and database state (e.g., last table ID).
         // This might be relevant for correctly loading the database later.
 
         db->_mem_index.reserve(config.keys_in_mem_before_flush);
 
+        // Create first value table
         auto first_value_table = value_table::make_new(db->_values_path, 0);
         if(!first_value_table)
             return hedge::error("Failed to create initial value table: " + first_value_table.error().to_string());
@@ -58,20 +65,25 @@ namespace hedge::db
         db->_current_value_table = std::move(first_value_table.value());
         db->_last_table_id = 0;
 
+        // Create pipelined value table
         auto pipelined_value_table = value_table::make_new(db->_values_path, 1);
         if(!pipelined_value_table)
             return hedge::error("Failed to create next in pipeline value table: " + pipelined_value_table.error().to_string());
 
         db->_pipelined_value_table = std::move(pipelined_value_table.value());
 
+        // Init clock cache
         if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB page cache
             db->_index_page_cache = std::make_shared<shared_page_cache>(config.index_page_clock_cache_size_bytes, async::executor_pool::static_pool().size() * 4);
 
+        // Init point cache (avoid this)
         if(config.index_point_cache_size_bytes > 1024 * 1024 * 1) // Mininum 1MB entry cache
             db->_index_point_cache = std::make_shared<point_cache>(config.index_point_cache_size_bytes);
 
+        // reserve value tables map
         db->_value_tables.reserve(4096);
 
+        // init write buffers
         db->_write_buffers.resize(async::executor_pool::static_pool().size());
 
         for(auto& write_buffer_ptr : db->_write_buffers)
@@ -201,7 +213,7 @@ namespace hedge::db
                     flushing_mem_index = &this->_pending_flushes[curr_flush_iteration];
                 }
 
-                this->_compaction_worker.submit(
+                this->_flush_worker.submit(
                     [this, flushing_mem_index, curr_flush_iteration]()
                     {
                         if(auto status = this->_flush_mem_index(flushing_mem_index, curr_flush_iteration); !status)
@@ -211,13 +223,7 @@ namespace hedge::db
                         }
 
                         if(this->_config.auto_compaction)
-                        {
-                            auto t0 = std::chrono::high_resolution_clock::now();
                             (void)this->compact_sorted_indices(false);
-                            auto t1 = std::chrono::high_resolution_clock::now();
-                            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-                            this->_logger.log("Compaction completed in ", (double)duration.count() / 1000.0, " ms");
-                        }
                     });
             }
         }
@@ -485,7 +491,7 @@ namespace hedge::db
             this->_value_tables[rotating->id()] = rotating;
         }
 
-        this->_flush_worker.submit(
+        this->_value_table_worker.submit(
             [this, next_id]()
             {
                 auto t0 = std::chrono::high_resolution_clock::now();
@@ -588,7 +594,6 @@ namespace hedge::db
                                              &errors,
                                              this_iteration_id = this->_flush_iteration.fetch_add(1)](
                                                 std::vector<sorted_index_ptr_t>& ordered_indices_vec,
-                                                const std::shared_ptr<async::executor_context>& executor,
                                                 std::shared_ptr<async::wait_group> wg) -> async::task<void>
             {
                 auto smallest_index_it = ordered_indices_vec.begin() + (ordered_indices_vec.size() - 1);
@@ -606,7 +611,7 @@ namespace hedge::db
                     merge_config,
                     **second_smallest_index_it,
                     **smallest_index_it,
-                    executor);
+                    async::this_thread_executor());
 
                 if(!maybe_compacted_table)
                 {
@@ -632,6 +637,7 @@ namespace hedge::db
                 wg->decr();
             };
 
+            size_t compaction_executor_id = 0;
             for(auto& [prefix, partition_vec] : indices_local_copy)
             {
                 if(partition_vec.size() <= 1) // Nothing to compact
@@ -666,8 +672,8 @@ namespace hedge::db
                 // - filter_delete_keys is `true`
                 // - A key is in more than two sorted indices and is deleted in one of them
                 // The key would appear again, because we lost track of it after merging the first two indices
-                const auto& executor = async::executor_pool::executor_from_static_pool();
-                executor->submit_io_task(make_compaction_sub_task(partition_vec, executor, wg));
+                const auto& executor = this->_compation_executor_pool[compaction_executor_id++ % this->_compation_executor_pool.size()];
+                executor->submit_io_task(make_compaction_sub_task(partition_vec, wg));
             }
 
             // Barrier waiting for this round of compaction sub-tasks to complete

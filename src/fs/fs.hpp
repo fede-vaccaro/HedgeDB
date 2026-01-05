@@ -263,6 +263,7 @@ namespace hedge::fs
             if(this->_fd < 0)
                 return;
 
+            // TODO: syscalls should be directed through io_uring/async executor
             close(this->_fd);
 
             if(this->_deletion_triggered.load())
