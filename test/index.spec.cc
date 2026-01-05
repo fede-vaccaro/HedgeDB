@@ -8,9 +8,9 @@
 
 #include "async/io_executor.h"
 #include "async/wait_group.h"
+#include "db/cache.h"
 #include "db/index_ops.h"
 #include "db/mem_index.h"
-#include "db/cache.h"
 #include "db/sorted_index.h"
 #include "utils.h"
 
@@ -27,6 +27,9 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
         this->N_KEYS_PER_RUN = std::get<0>(GetParam());
         this->NUM_PARTITION_EXPONENT = std::get<1>(GetParam());
         this->READ_AHEAD_SIZE_BYTES = std::get<2>(GetParam());
+
+        if(this->N_KEYS_PER_RUN <= (1UL << this->NUM_PARTITION_EXPONENT))
+            GTEST_SKIP() << "Skipping async merge test for large number of keys and small number of partitions";
 
         if(this->NUM_PARTITION_EXPONENT <= 4 && this->N_KEYS_PER_RUN > 1'000'000)
         {
@@ -76,7 +79,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
             }
         }
 
-        this->_executor = std::make_shared<hedge::async::executor_context>(128);
+        this->_executor = hedge::async::executor_context::make_new(128);
     }
 
     void TearDown() override
