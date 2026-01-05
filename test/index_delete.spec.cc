@@ -128,7 +128,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
             }
         }
 
-        this->_executor = std::make_shared<hedge::async::executor_context>(128);
+        this->_executor = hedge::async::executor_context::make_new(128);
     }
 
     void TearDown() override

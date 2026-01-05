@@ -18,7 +18,7 @@ struct test_executor : public ::testing::Test
     {
         constexpr uint32_t QUEUE_DEPTH = 32;
 
-        this->_executor = std::make_shared<executor_context>(QUEUE_DEPTH);
+        this->_executor = executor_context::make_new(QUEUE_DEPTH);
     }
 
     void TearDown() override

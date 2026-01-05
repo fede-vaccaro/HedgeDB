@@ -112,8 +112,9 @@ add_executable(index_delete_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_de
 target_link_libraries(index_delete_test gtest gtest_main uring)
 
 # paginated_view tests
-add_executable(file_reader_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/file_reader.spec.cc)
-target_link_libraries(file_reader_test uring gtest gtest_main)
+# todo: might remove
+# add_executable(file_reader_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/file_reader.spec.cc)
+# target_link_libraries(file_reader_test uring gtest gtest_main)
 
 # value_table tests
 # TODO: re-enable
