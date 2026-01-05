@@ -53,8 +53,12 @@ namespace std
         {
             size_t h;
 
-            h = std::hash<uint32_t>{}(page_id.fd) << 32;
-            h |= std::hash<uint32_t>{}(page_id.page_index);
+            h = (static_cast<size_t>(page_id.fd) << 32);
+            h |= page_id.page_index;
+
+            h ^= h >> 33;
+            h *= 0xff51afd7ed558ccdULL;
+            h ^= h >> 33;
 
             return h;
         }
