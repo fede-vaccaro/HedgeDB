@@ -77,6 +77,9 @@ namespace hedge::async
         size_t _queue_depth;
         size_t _max_buffered_requests;
 
+        static constexpr int32_t CYCLES_BEFORE_SLEEP = 16;
+        int32_t _count_before_sleep{0};
+
         io_uring _ring;
 
         std::atomic_bool _running{true};
@@ -85,13 +88,13 @@ namespace hedge::async
         uint64_t _current_request_id{0};
 
         tsl::robin_map<uint64_t, std::unique_ptr<mailbox>> _in_flight_requests;
-        // tsl::robin_map<std::coroutine_handle<>, task<void>> _in_progress_tasks;
         std::unordered_map<std::coroutine_handle<>, task<void>> _in_progress_tasks;
 
         std::deque<std::unique_ptr<mailbox>> _waiting_for_io_queue;
         std::deque<std::unique_ptr<mailbox>> _io_ready_queue;
 
-        std::condition_variable _cv;
+        std::condition_variable _sleep_cv;
+        std::condition_variable _pending_requests_cv;
         std::mutex _pending_requests_mutex;
         std::deque<task<void>> _pending_requests;
 
@@ -99,7 +102,6 @@ namespace hedge::async
 
     public:
         executor_context() = default;
-        explicit executor_context(uint32_t queue_depth);
         ~executor_context();
 
         executor_context(const executor_context&) = delete;
@@ -124,7 +126,8 @@ namespace hedge::async
             return future.get();
         }
 
-        void submit_io_task(task<void> task); // do NOT call this from a task, otherwise it will deadlock! TODO: address this
+        void submit_io_task(task<void> task);          // do NOT call this from a task, otherwise it will deadlock! TODO: address this
+        void submit_io_task_high_pri(task<void> task); // do NOT call this from a task, otherwise it will deadlock! TODO: address this
 
         void shutdown();
 
@@ -135,13 +138,14 @@ namespace hedge::async
 
             std::unique_ptr<mailbox> new_mailbox = from_request(std::move(request));
 
-            auto awaitable = awaitable_mailbox<typename request_t::response_t>{*new_mailbox};
+            auto awaitable = awaitable_mailbox<typename request_t::response_t>{new_mailbox.get()};
 
             this->_waiting_for_io_queue.emplace_back(std::move(new_mailbox));
 
             return awaitable;
         }
 
+        // TODO: enforce that this is callable only from this_thread_executor()
         task<void> extract_task(std::coroutine_handle<> root_coro)
         {
             auto it = this->_in_progress_tasks.find(root_coro);
@@ -155,6 +159,7 @@ namespace hedge::async
             return extracted;
         }
 
+        // TODO: enforce that this is callable only from this_thread_executor()
         void transfer_task(task<void> task, std::coroutine_handle<> continuation)
         {
             auto [it, ok] = this->_in_progress_tasks.emplace(task.handle(), std::move(task));
@@ -166,6 +171,7 @@ namespace hedge::async
             this->_io_ready_queue.push_front(std::move(continuation_mailbox));
         }
 
+        // TODO: enforce that this is callable only from this_thread_executor()
         auto yield()
         {
             return this->submit_request(yield_request{});
@@ -173,9 +179,13 @@ namespace hedge::async
 
         void register_fd(int32_t fd);
 
+        static std::shared_ptr<executor_context> make_new(uint32_t queue_depth);
+
         static const std::shared_ptr<executor_context>& this_thread_executor();
 
     private:
+        explicit executor_context(uint32_t queue_depth); // use executor_context::make_new instead
+
         static thread_local std::shared_ptr<executor_context> _this_thread_executor;
 
         void _submit_sqe();
@@ -183,6 +193,8 @@ namespace hedge::async
         void _wait_for_cqe();
         void _event_loop();
         void _gc_tasks();
+
+        bool _should_sleep();
         std::vector<io_uring_sqe*>& _fill_sqes(size_t sqes_requested);
     };
 

@@ -65,6 +65,12 @@ namespace hedge::async
             return std::visit([](auto& impl)
                               { return impl.resume(); }, _mailbox_impl);
         }
+
+        bool response_set()
+        {
+            return std::visit([](auto& impl)
+                              { return impl.response_set; }, _mailbox_impl);
+        }
     };
 
     template <typename REQUEST_T>
@@ -76,25 +82,21 @@ namespace hedge::async
     template <typename RESPONSE_T>
     struct awaitable_mailbox
     {
-        mailbox& mbox;
+        mailbox* mbox; // Pointer stability is needed here, hence the std::make_unique in from_request
 
         bool await_ready() noexcept
         {
-            return false;
+            return mbox->response_set();
         }
 
         void await_suspend(std::coroutine_handle<> handle) noexcept
         {
-            mbox.set_continuation(handle);
+            mbox->set_continuation(handle);
         }
 
         auto await_resume() noexcept
         {
-            return std::move(*reinterpret_cast<RESPONSE_T*>(mbox.get_response()));
-        }
-
-        awaitable_mailbox(auto& m) : mbox(m)
-        {
+            return std::move(*reinterpret_cast<RESPONSE_T*>(mbox->get_response()));
         }
     };
 

@@ -10,6 +10,7 @@
 #include <iostream>
 #include <iterator>
 #include <liburing/io_uring.h>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -167,15 +168,26 @@ namespace hedge::async
 
     void executor_context::_do_work()
     {
+        thread_local std::deque<std::unique_ptr<mailbox>> requeued;
+
         while(!this->_io_ready_queue.empty())
         {
             auto mailbox = std::move(this->_io_ready_queue.front());
             this->_io_ready_queue.pop_front();
 
-            mailbox->resume();
+            if(mailbox->get_continuation() == nullptr)
+                requeued.emplace_back(std::move(mailbox));
+            else
+                mailbox->resume();
 
             if(io_uring_cq_ready(&this->_ring) > 0)
                 break;
+        }
+
+        while(!requeued.empty())
+        {
+            this->_waiting_for_io_queue.emplace_back(std::move(requeued.front()));
+            requeued.pop_front();
         }
     }
 
@@ -190,11 +202,30 @@ namespace hedge::async
         {
             std::unique_lock lk(this->_pending_requests_mutex);
 
-            this->_cv.wait(lk, [this]()
-                           { return this->_pending_requests.size() < this->_max_buffered_requests; });
+            this->_pending_requests_cv.wait(lk, [this]()
+                                            { return this->_pending_requests.size() < this->_max_buffered_requests; });
 
             this->_pending_requests.emplace_back(std::move(task));
         }
+
+        this->_sleep_cv.notify_one();
+    };
+
+    void executor_context::submit_io_task_high_pri(task<void> task)
+    {
+        if(!this->_running.load(std::memory_order_relaxed))
+        {
+            std::cerr << "cannot submit task: context closed" << std::endl;
+            return;
+        }
+
+        {
+            std::unique_lock lk(this->_pending_requests_mutex);
+
+            this->_pending_requests.emplace_front(std::move(task));
+        }
+
+        this->_sleep_cv.notify_one();
     };
 
     void executor_context::shutdown()
@@ -206,10 +237,28 @@ namespace hedge::async
 
         this->_running.store(false, std::memory_order_relaxed);
 
-        this->_cv.notify_all();
+        this->_pending_requests_cv.notify_all();
 
         if(this->_worker.joinable())
             this->_worker.join();
+    }
+
+    bool executor_context::_should_sleep()
+    {
+        if(!this->_in_flight_requests.empty() ||
+           !this->_in_progress_tasks.empty() ||
+           !this->_waiting_for_io_queue.empty() ||
+           !this->_io_ready_queue.empty())
+            return false;
+
+        size_t pending;
+
+        {
+            std::unique_lock lk(this->_pending_requests_mutex);
+            pending = this->_pending_requests.size();
+        }
+
+        return pending == 0 && this->_running.load(std::memory_order_relaxed);
     }
 
     void executor_context::_event_loop()
@@ -224,6 +273,13 @@ namespace hedge::async
             {
                 std::unique_lock lk(this->_pending_requests_mutex); // should have priority over submit
 
+                if(this->_count_before_sleep == CYCLES_BEFORE_SLEEP)
+                {
+                    this->_sleep_cv.wait(lk, [this]()
+                                         { return !this->_pending_requests.empty(); });
+                    this->_count_before_sleep = 0;
+                }
+
                 while(!this->_pending_requests.empty() && this->_in_progress_tasks.size() < this->_queue_depth)
                 {
                     auto task = std::move(this->_pending_requests.front());
@@ -232,10 +288,10 @@ namespace hedge::async
                     new_tasks.emplace_back(std::move(task));
                 }
 
-                if(!this->_running.load(std::memory_order_relaxed) && this->_pending_requests.empty())
+                if(!this->_running.load(std::memory_order_relaxed) && this->_pending_requests.empty()) // && this->_in_progress_tasks.empty() && this->_in_flight_requests.empty() && new_tasks.empty()
                     break;
             }
-            this->_cv.notify_all();
+            this->_pending_requests_cv.notify_all();
 
             this->_submit_sqe();
 
@@ -256,6 +312,9 @@ namespace hedge::async
             this->_do_work();
 
             this->_wait_for_cqe();
+
+            if(this->_should_sleep())
+                this->_count_before_sleep++;
         }
     }
 
@@ -290,6 +349,21 @@ namespace hedge::async
         }
     }
 
+    std::shared_ptr<executor_context> executor_context::make_new(uint32_t queue_depth)
+    {
+        auto new_executor = std::shared_ptr<executor_context>(new executor_context(queue_depth));
+
+        auto task_generator = [&new_executor]() -> async::task<int>
+        {
+            executor_context::_this_thread_executor = new_executor;
+            co_return 0; // At the moment, sync_submit requires a return value
+        };
+
+        [[maybe_unused]] auto r = new_executor->sync_submit(task_generator());
+
+        return new_executor;
+    }
+
     //
     // Static I/O Thread Pool
     //
@@ -320,15 +394,8 @@ namespace hedge::async
     {
         for(size_t i = 0; i < pool_size; ++i)
         {
-            auto new_executor = std::make_shared<executor_context>(queue_depth);
+            auto new_executor = executor_context::make_new(queue_depth);
 
-            auto task_generator = [&new_executor]() -> async::task<int>
-            {
-                executor_context::_this_thread_executor = new_executor;
-                co_return 0; // At the moment, sync_submit requires a return value
-            };
-
-            [[maybe_unused]] auto r = new_executor->sync_submit(task_generator());
             this->_executors.emplace_back(std::move(new_executor));
         }
     }
