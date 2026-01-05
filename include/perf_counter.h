@@ -23,11 +23,17 @@ sudo sh -c 'echo 0 >/proc/sys/kernel/kptr_restrict'
 namespace hedge::prof
 {
 
-    static int open_perf_counter(uint32_t type, uint64_t config);
+    template <typename Tp>
+    inline __attribute__((always_inline)) void DoNotOptimize(Tp const& value)
+    {
+        asm volatile("" : : "r,m"(value) : "memory");
+    }
 
-    static void start_counter(int fd);
+    int open_perf_counter(uint32_t type, uint64_t config);
 
-    static long long stop_counter(int fd);
+    void start_counter(int fd);
+
+    long long stop_counter(int fd);
 
     struct avg_stat
     {
