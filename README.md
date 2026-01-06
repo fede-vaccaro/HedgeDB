@@ -104,56 +104,70 @@ ulimit -n 1048576
 For starting a benchmark with 80M key (16 bytes) values (1024 bytes):
 
 ```bash
-$ ./build/database_test
+Running main() from /home/federico/db/HedgeDB/build/_deps/googletest-src/googletest/src/gtest_main.cc
 [==========] Running 1 test from 1 test suite.
 [----------] Global test environment set-up.
 [----------] 1 test from test_suite/database_test
-[ RUN      ] test_suite/database_test.database_comprehensive_test/N_80000000_P_1024_C_1000000
-Total duration for key/value generation: 4204.69 ms
-[LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
-[LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
-[LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
-[LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
-[LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
-[LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
-[LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
-[LOGGER] Launching io executor. Queue depth: 128 Max buffered tasks: 512
-[database] ... 
-Total duration for insertion: 150840 ms
-Average duration per insertion: 1.8855 us
-Insertion bandwidth: 517.933 MB/s
-Insertion throughput: 530363 items/s
+[LOGGER] Launching io executor. Queue depth: 64 Max buffered tasks: 256
+[LOGGER] Launching io executor. Queue depth: 64 Max buffered tasks: 256
+[LOGGER] Launching io executor. Queue depth: 64 Max buffered tasks: 256
+[LOGGER] Launching io executor. Queue depth: 64 Max buffered tasks: 256
+[LOGGER] Launching io executor. Queue depth: 64 Max buffered tasks: 256
+[LOGGER] Launching io executor. Queue depth: 64 Max buffered tasks: 256
+[LOGGER] Launching io executor. Queue depth: 64 Max buffered tasks: 256
+[LOGGER] Launching io executor. Queue depth: 64 Max buffered tasks: 256
+[LOGGER] Launching io executor. Queue depth: 64 Max buffered tasks: 256
+[LOGGER] Launching io executor. Queue depth: 64 Max buffered tasks: 256
+[LOGGER] Launching io executor. Queue depth: 64 Max buffered tasks: 256
+[LOGGER] Launching io executor. Queue depth: 64 Max buffered tasks: 256
+[ RUN      ] test_suite/database_test.database_comprehensive_test/N_80000000_P_1024_C_2000000
+Using CLOCK cache. Allocated space: 3072MB
+[LOGGER] Launching io executor. Queue depth: 32 Max buffered tasks: 128
+[LOGGER] Launching io executor. Queue depth: 32 Max buffered tasks: 128
+[LOGGER] Launching io executor. Queue depth: 32 Max buffered tasks: 128
+[LOGGER] Launching io executor. Queue depth: 32 Max buffered tasks: 128
+Total duration for key generation: 2573.61 ms
+Generated 1220.7 MB of keys. This data will be held in memory.
+[database] Flushing mem index to "/tmp/db/indices"
+[database] Mem index flushed in 466.112 ms
+[database] Starting compaction job
+[...]
+Total duration for insertion: 112339 ms
+Average duration per insertion: 1.40423 us
+Insertion bandwidth: 695.441 MB/s
+Insertion throughput: 712131 items/s
 Deleted keys: 0
 [database] Starting compaction job
 [database] Compaction job completed successfully
-[database] Total duration for compaction: 67242.1 ms
-Total duration for a full compaction: 67242.1 ms
-syncing...
+[database] Total duration for compaction: 2478.88 ms
+Total duration for a full compaction: 2478.91 ms
+Shufflin keys for randread test...
+Syncing FDs...
 Sleeping 1 seconds before starting retrieval to cool down...
 Read test - before cache warm up
 Starting readback now with 10000000 keys.
-Total duration for retrieval: 14732.6 ms
-Average duration per retrieval: 1.47326 us
-Retrieval throughput: 678766 items/s
-Retrieval bandwidth: 678.767 MB/s
+Total duration for retrieval: 12112.1 ms
+Average duration per retrieval: 1.21121 us
+Retrieval throughput: 825619 items/s
+Retrieval bandwidth: 825.619 MB/s
 Read test - after cache warm up
 Starting readback now with 10000000 keys.
-Total duration for retrieval: 12420.5 ms
-Average duration per retrieval: 1.24205 us
-Retrieval throughput: 805118 items/s
-Retrieval bandwidth: 805.118 MB/s
-[       OK ] test_suite/database_test.database_comprehensive_test/N_80000000_P_1024_C_1000000 (256117 ms)
-[----------] 1 test from test_suite/database_test (256117 ms total)
+Total duration for retrieval: 12011.1 ms
+Average duration per retrieval: 1.20111 us
+Retrieval throughput: 832565 items/s
+Retrieval bandwidth: 832.566 MB/s
+[       OK ] test_suite/database_test.database_comprehensive_test/N_80000000_P_1024_C_2000000 (147868 ms)
+[----------] 1 test from test_suite/database_test (147868 ms total)
 
 [----------] Global test environment tear-down
-[==========] 1 test from 1 test suite ran. (256117 ms total)
+[==========] 1 test from 1 test suite ran. (147870 ms total)
 [  PASSED  ] 1 test.
 ```
 
 To summarize, running on a `13th Gen Intel(R) Core(TM) i7-13700H` with 8 threads, 32GB of ram and a `SAMSUNG MZVL21T0HDLU-00BLL` SSD:
 
-- **~805.000** reads/s (3GB for index cache)
-- **~530.000** write/s
+- **~825.000** reads/s (3GB for index cache)
+- **~712.000** write/s
 
 For comparison, here's a single threaded `fio` 30-seconds run on my machine: it records
 **841k IOPS** on my device.
