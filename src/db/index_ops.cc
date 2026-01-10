@@ -636,6 +636,41 @@ namespace hedge::db
         [[maybe_unused]] uint64_t compute_duration{0};
         [[maybe_unused]] size_t merge_iterations{0};
 
+        page_aligned_buffer<index_entry_t> write_buffer((config.read_ahead_size * 2) / sizeof(index_entry_t));
+        auto* write_it = write_buffer.begin();
+
+        auto buffer_full = [&write_buffer, &write_it]()
+        {
+            return write_it == write_buffer.end();
+        };
+
+        auto buffer_empty = [&write_buffer, &write_it]()
+        {
+            return write_it == write_buffer.begin();
+        };
+
+        auto reset_write_buffer = [&write_buffer, &write_it]()
+        {
+            write_it = write_buffer.begin();
+            write_buffer.zero();
+        };
+
+        auto flush_buffer = [&write_buffer, &executor, &output_fd, &write_it](size_t offset) -> async::task<expected<async::write_response>>
+        {
+            auto awaitable_write_response = executor->submit_request(async::write_request{
+                .fd = output_fd.fd(),
+                .data = reinterpret_cast<uint8_t*>(write_buffer.data()),
+                .size = std::distance(write_buffer.begin(), write_it) * sizeof(index_entry_t),
+                .offset = offset});
+
+            auto res = co_await awaitable_write_response;
+
+            if(res.error_code != 0)
+                co_return hedge::error("Failed to write merged keys to file: " + std::string(strerror(-res.error_code)));
+
+            co_return res;
+        };
+
         /*
         -- Step 1: Main merge loop. Here happen the comparisons between the two buffer --
         */
@@ -645,9 +680,6 @@ namespace hedge::db
             prof::DoNotOptimize(t0);
 
             [[maybe_unused]] size_t iteration_count{0};
-            std::vector<uint8_t> merged_keys(config.read_ahead_size * 2);
-            auto merged_keys_span = view_as<index_entry_t>(merged_keys);
-            auto merged_keys_it = merged_keys_span.begin();
 
             // Loop until one of the two views is exhausted
             while(lhs_rbuf.it() != lhs_rbuf.end() && rhs_rbuf.it() != rhs_rbuf.end())
@@ -675,21 +707,19 @@ namespace hedge::db
                         continue;
                     }
 
-                    *merged_keys_it = new_item;
+                    *write_it = new_item;
+                    ++write_it;
+
                     last_written_key = new_item.key;
 
                     indexed_keys++;
                     if(indexed_keys % INDEX_PAGE_NUM_ENTRIES == 0)
                         merged_meta_index.emplace_back(last_written_key);
 
-                    if(++merged_keys_it == merged_keys_span.end())
+                    if(buffer_full())
                         break; // The output buffer is full, exit loop to write to disk
                 }
             }
-            // Resize the merged keys buffer to the actual number of bytes written
-            auto merged_keys_bytes = std::distance(merged_keys_span.begin(), merged_keys_it) * sizeof(index_entry_t);
-            merged_keys.resize(merged_keys_bytes);
-
             // Reminder that the `entry_deduplicator` is strictly necessary when reading chunks from disk:
             // The easiest solution would be to filter the duplicates from the `merged_keys` when full,
             // just before writing it to disk; however, this might lead to a subtle bug: a entry duplicate
@@ -700,25 +730,38 @@ namespace hedge::db
             compute_duration += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
             merge_iterations++;
 
-            auto awaitable_write_response = executor->submit_request(async::write_request{
-                .fd = output_fd.fd(),
-                .data = merged_keys.data(),
-                .size = merged_keys.size(),
-                .offset = bytes_written});
-
-            auto res = co_await awaitable_write_response;
-
-            if(res.error_code != 0)
-                co_return hedge::error("Failed to write merged keys to file: " + std::string(strerror(-res.error_code)));
-
-            // Cache newly written items
-            if(config.precache_output_vec)
+            if(buffer_full())
             {
-                size_t num_page_to_request = merged_keys_bytes / PAGE_SIZE_IN_BYTES; // Ignore last page for now
-                auto cache_pages = cache->get_write_slots_range(read_fd.value().fd(), bytes_written / PAGE_SIZE_IN_BYTES, num_page_to_request);
-            }
+                auto write_res = co_await flush_buffer(bytes_written);
+                if(!write_res)
+                    co_return write_res.error();
 
-            bytes_written += res.bytes_written;
+                if(cache != nullptr)
+                {
+                    // Copy new pages to cache
+                    size_t num_written_pages = write_res.value().bytes_written / PAGE_SIZE_IN_BYTES;
+
+                    assert(bytes_written % PAGE_SIZE_IN_BYTES == 0);
+                    assert(num_written_pages % PAGE_SIZE_IN_BYTES == 0);
+
+                    auto page_guards = cache->get_write_slots_range(read_fd.value().fd(), bytes_written / PAGE_SIZE_IN_BYTES, num_written_pages);
+
+                    size_t cur_page = 0;
+                    for(auto& page : page_guards)
+                    {
+                        auto* dst = page.data + (page.idx * PAGE_SIZE_IN_BYTES);
+                        auto* src_begin = reinterpret_cast<uint8_t*>(write_buffer.begin()) + (cur_page * PAGE_SIZE_IN_BYTES);
+                        auto* src_end = reinterpret_cast<uint8_t*>(write_buffer.begin()) + ((cur_page + 1) * PAGE_SIZE_IN_BYTES);
+
+                        std::copy(src_begin, src_end, dst);
+
+                        ++cur_page;
+                    }
+                }
+
+                bytes_written += write_res.value().bytes_written;
+                reset_write_buffer();
+            }
 
             auto status = co_await refresh_buffers();
             if(!status)
@@ -739,9 +782,6 @@ namespace hedge::db
 
         // Handle remaining keys from the non exhausted-view
         auto& non_empty_view = !lhs_rbuf.empty() ? lhs_rbuf : rhs_rbuf;
-
-        std::vector<index_entry_t> remaining_keys;           // Buffer for remaining keys to be written
-        remaining_keys.reserve(non_empty_view.items_left()); // Estimate capacity
 
         // Push the next item (if any) to the deduplicator.
         // Remember that there is necessary an item left from the previous loop (because of the 1-item lag)
@@ -771,12 +811,24 @@ namespace hedge::db
             }
             else
             {
-                remaining_keys.push_back(new_item);
+                *write_it = new_item;
+                ++write_it;
+
+                if(buffer_full())
+                {
+                    auto write_res = co_await flush_buffer(bytes_written);
+                    if(!write_res)
+                        co_return write_res.error();
+
+                    bytes_written += write_res.value().bytes_written;
+                    reset_write_buffer();
+                }
+
                 last_written_key = new_item.key;
                 indexed_keys++;
 
                 if(indexed_keys % INDEX_PAGE_NUM_ENTRIES == 0)
-                    merged_meta_index.emplace_back(remaining_keys.back().key);
+                    merged_meta_index.emplace_back(new_item.key);
             }
         }
 
@@ -804,25 +856,25 @@ namespace hedge::db
                     merged_meta_index.emplace_back(non_empty_view.it()->key);
 
                 last_written_key = non_empty_view.it()->key;
-                remaining_keys.push_back(*non_empty_view.it());
+
+                *write_it = *non_empty_view.it();
+                ++write_it;
+
+                if(buffer_full())
+                    break;
+
                 non_empty_view.it()++;
             }
 
             // When the buffer is consumed, write remaining keys to disk
-            if(!remaining_keys.empty())
+            if(!buffer_empty() && buffer_full())
             {
-                auto res = co_await executor->submit_request(async::write_request{
-                    .fd = output_fd.fd(),
-                    .data = reinterpret_cast<uint8_t*>(remaining_keys.data()),
-                    .size = remaining_keys.size() * sizeof(index_entry_t),
-                    .offset = bytes_written});
+                auto write_res = co_await flush_buffer(bytes_written);
+                if(!write_res)
+                    co_return write_res.error();
 
-                remaining_keys.clear();
-
-                if(res.error_code != 0)
-                    co_return hedge::error("Failed to write remaining keys to file: " + std::string(strerror(res.error_code)));
-
-                bytes_written += res.bytes_written;
+                bytes_written += write_res.value().bytes_written;
+                reset_write_buffer();
             }
 
             // Refresh the view to get the next chunk
@@ -837,35 +889,31 @@ namespace hedge::db
         if(indexed_keys % INDEX_PAGE_NUM_ENTRIES != 0)
             merged_meta_index.emplace_back(last_written_key);
 
+        // Final buffer flush
+        // align write_it to page size
+        size_t written_keys = std::distance(write_buffer.begin(), write_it);
+        size_t remaining_keys_to_fill_page = INDEX_PAGE_NUM_ENTRIES - (written_keys % INDEX_PAGE_NUM_ENTRIES);
+        if(remaining_keys_to_fill_page != INDEX_PAGE_NUM_ENTRIES)
+            write_it += remaining_keys_to_fill_page;
+
+        auto write_res = co_await flush_buffer(bytes_written);
+        if(!write_res)
+            co_return write_res.error();
+
+        bytes_written += write_res.value().bytes_written;
+
         // THIS CHECK WAS COMMENTED OUT DUE TO INCONSISTENT BEHAVIOR DURING DELETION MERGES
         // assert(indexed_keys == (left._footer.indexed_keys + right._footer.indexed_keys - filtered_keys) && "Item count does not match footer indexed keys");
         fb.indexed_keys = indexed_keys;
-        fb.index_end_offset = bytes_written;
+        fb.index_end_offset = bytes_written - (remaining_keys_to_fill_page * sizeof(index_entry_t));
 
         /*
         -- Step 4: Write meta-index and footer --
         */
-        // Write index padding if any
-        size_t padding_size = compute_alignment_padding<index_entry_t>(indexed_keys);
-        if(padding_size > 0)
-        {
-            auto padding = std::vector<uint8_t>(padding_size, 0);
-            auto res = co_await executor->submit_request(async::write_request{
-                .fd = output_fd.fd(),
-                .data = padding.data(),
-                .size = padding.size(),
-                .offset = bytes_written});
-
-            if(res.error_code != 0)
-                co_return hedge::error("Failed to write padding to file: " + std::string(strerror(res.error_code)));
-
-            bytes_written += res.bytes_written;
-        }
-
+        // Write meta-index
         fb.meta_index_start_offset = bytes_written;
         fb.meta_index_entries = merged_meta_index.size();
 
-        // Write meta-index
         {
             auto res = co_await executor->submit_request(async::write_request{
                 .fd = output_fd.fd(),
