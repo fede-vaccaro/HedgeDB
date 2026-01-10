@@ -217,7 +217,8 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
             merge_config,
             left,
             right,
-            _this->_executor);
+            _this->_executor,
+            nullptr);
 
         if(!new_index.has_value())
             promise.set_value(new_index.error());

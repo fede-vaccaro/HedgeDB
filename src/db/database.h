@@ -16,7 +16,7 @@
 #include "async/spinlock.h"
 #include "async/task.h"
 #include "async/worker.h"
-#include "db/cache.h"
+#include "cache.h"
 #include "mem_index.h"
 #include "sorted_index.h"
 #include "types.h"
@@ -125,7 +125,7 @@ namespace hedge::db
         std::vector<std::shared_ptr<async::executor_context>> _compation_executor_pool{}; ///< Pool of executors managing background compactions
 
         // Index page cache
-        std::shared_ptr<shared_page_cache> _index_page_cache;
+        std::shared_ptr<shared_page_cache> _page_cache;
         std::shared_ptr<point_cache> _index_point_cache;
 
         // --- Utilities ---

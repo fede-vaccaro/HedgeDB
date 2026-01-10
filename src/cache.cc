@@ -127,7 +127,7 @@ namespace hedge::db
         }
     }
 
-    std::optional<page_cache::awaitable_page_guard> page_cache::lookup(page_tag page)
+    std::optional<page_cache::awaitable_page_guard> page_cache::lookup(page_tag page, bool hint_evict)
     {
         size_t idx = 0;
         _metadata* frame_ptr = nullptr;
@@ -143,11 +143,77 @@ namespace hedge::db
 
             frame_ptr = &this->_frames[idx];
 
-            frame_ptr->flags.fetch_or(PAGE_FLAG_RECENTLY_USED);
+            if(hint_evict)
+                frame_ptr->flags.fetch_and(~PAGE_FLAG_RECENTLY_USED);
+            else
+                frame_ptr->flags.fetch_or(PAGE_FLAG_RECENTLY_USED);
+
             frame_ptr->flags.fetch_add(1); // increase reference count
         }
 
         return awaitable_page_guard{.pg = page_guard{this->_data.get(), idx * 4096, frame_ptr}};
+    }
+
+    std::optional<page_cache::awaitable_page_guard> page_cache::try_lookup(page_tag page, bool hint_evict)
+    {
+        size_t idx = 0;
+        _metadata* frame_ptr = nullptr;
+
+        {
+            std::shared_lock lk(this->_m);
+
+            auto it = this->_lut.find(page);
+            if(it == this->_lut.end())
+                return std::nullopt;
+
+            idx = it.value();
+
+            frame_ptr = &this->_frames[idx];
+
+            // avoid co-awaiting on the page and transferring coroutine to an external executor
+            if((frame_ptr->flags.load() & PAGE_FLAG_READY) == 0)
+                return std::nullopt;
+
+            if(hint_evict)
+                frame_ptr->flags.fetch_and(~PAGE_FLAG_RECENTLY_USED);
+            else
+                frame_ptr->flags.fetch_or(PAGE_FLAG_RECENTLY_USED);
+
+            frame_ptr->flags.fetch_add(1); // increase reference count
+        }
+
+        return awaitable_page_guard{.pg = page_guard{this->_data.get(), idx * 4096, frame_ptr}};
+    }
+
+    std::vector<std::optional<page_cache::awaitable_page_guard>> shared_page_cache::lookup_range(uint32_t fd, size_t start_page_index, size_t num_pages, bool hint_evict)
+    {
+        std::vector<std::optional<page_cache::awaitable_page_guard>> results;
+        results.reserve(num_pages);
+
+        for(size_t i = 0; i < start_page_index; ++i)
+        {
+            auto tag = page_tag{.fd = fd, .page_index = static_cast<uint32_t>(start_page_index + i)};
+
+            size_t hash = std::hash<page_tag>{}(tag);
+
+            results.emplace_back(this->_caches.get()[hash % this->_num_caches].try_lookup(tag, hint_evict));
+        }
+
+        return results;
+    }
+
+    std::vector<page_cache::page_guard> shared_page_cache::get_write_slots_range(uint32_t fd, size_t start_page_index, size_t num_pages)
+    {
+        std::vector<page_cache::page_guard> results;
+        results.reserve(num_pages);
+
+        for(size_t i = 0; i < start_page_index; ++i)
+        {
+            auto tag = page_tag{.fd = fd, .page_index = static_cast<uint32_t>(start_page_index + i)};
+            results.emplace_back(this->get_write_slot(tag));
+        }
+
+        return results;
     }
 
     size_t page_cache::_find_frame()
