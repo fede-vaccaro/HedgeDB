@@ -73,7 +73,7 @@ namespace hedge::db
 
     // Page cache
     // Implemented using a reference-counted CLOCK algorithm;
-    class page_cache
+    class alignas(64) page_cache
     {
         async::rw_spinlock _m{};
         std::atomic_size_t _clock_hand{};
@@ -104,7 +104,7 @@ namespace hedge::db
             page_guard() = default;
             page_guard(uint8_t* data, size_t idx, _metadata* frame);
 
-            explicit page_guard(page_guard&& other) noexcept;
+            page_guard(page_guard&& other) noexcept;
 
             page_guard& operator=(page_guard&& other) noexcept;
 
@@ -156,8 +156,8 @@ namespace hedge::db
         };
 
         page_guard get_write_slot(page_tag page);
-
-        std::optional<awaitable_page_guard> lookup(page_tag page);
+        std::optional<awaitable_page_guard> lookup(page_tag page, bool hint_evict = false);
+        std::optional<awaitable_page_guard> try_lookup(page_tag page, bool hint_evict = false);
 
     private:
         size_t _find_frame();
@@ -165,29 +165,40 @@ namespace hedge::db
 
     class shared_page_cache
     {
-        std::vector<std::unique_ptr<page_cache>> _caches;
+        std::unique_ptr<page_cache> _caches;
         size_t _num_caches;
 
     public:
         explicit shared_page_cache(size_t bytes, size_t num_caches)
         {
+            void* caches = aligned_alloc(alignof(page_cache), sizeof(page_cache) * num_caches);
+
+            if(caches == nullptr)
+                throw std::runtime_error("Could not allocate memory for shared_page_cache caches");
+
+            this->_caches = std::unique_ptr<page_cache>(static_cast<page_cache*>(caches));
+
             this->_num_caches = num_caches;
             size_t per_cache_bytes = hedge::ceil(bytes, num_caches);
+
             for(size_t i = 0; i < num_caches; ++i)
-                this->_caches.emplace_back(std::make_unique<page_cache>(per_cache_bytes));
+                new(this->_caches.get() + i) page_cache(per_cache_bytes);
         }
 
         page_cache::page_guard get_write_slot(page_tag page)
         {
             size_t hash = std::hash<page_tag>{}(page) % this->_num_caches;
-            return this->_caches[hash]->get_write_slot(page);
+            return this->_caches.get()[hash].get_write_slot(page);
         }
 
         std::optional<page_cache::awaitable_page_guard> lookup(page_tag page)
         {
             size_t hash = std::hash<page_tag>{}(page) % this->_num_caches;
-            return this->_caches[hash]->lookup(page);
+            return this->_caches.get()[hash].lookup(page);
         }
+
+        std::vector<page_cache::page_guard> get_write_slots_range(uint32_t fd, size_t start_page_index, size_t num_pages);
+        std::vector<std::optional<page_cache::awaitable_page_guard>> lookup_range(uint32_t fd, size_t start_page_index, size_t num_pages, bool hint_evict);
     };
 
     class point_cache

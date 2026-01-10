@@ -12,8 +12,8 @@
 #include <error.hpp>
 
 #include "async/wait_group.h"
+#include "cache.h"
 #include "database.h"
-#include "db/cache.h"
 #include "db/mem_index.h"
 #include "index_ops.h"
 #include "io_executor.h"
@@ -74,7 +74,7 @@ namespace hedge::db
 
         // Init clock cache
         if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB page cache
-            db->_index_page_cache = std::make_shared<shared_page_cache>(config.index_page_clock_cache_size_bytes, async::executor_pool::static_pool().size() * 4);
+            db->_page_cache = std::make_shared<shared_page_cache>(config.index_page_clock_cache_size_bytes, async::executor_pool::static_pool().size() * 4);
 
         // Init point cache (avoid this)
         if(config.index_point_cache_size_bytes > 1024 * 1024 * 1) // Mininum 1MB entry cache
@@ -169,7 +169,7 @@ namespace hedge::db
         db->_last_table_id = max_last_table_id + 1; // pipelined table is last_table_id + 1
 
         if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB page cache
-            db->_index_page_cache = std::make_shared<shared_page_cache>(config.index_page_clock_cache_size_bytes, async::executor_pool::static_pool().size() * 4);
+            db->_page_cache = std::make_shared<shared_page_cache>(config.index_page_clock_cache_size_bytes, async::executor_pool::static_pool().size() * 4);
 
         if(config.index_point_cache_size_bytes > 1024 * 1024 * 1) // Mininum 1MB entry cache
             db->_index_point_cache = std::make_shared<point_cache>(config.index_point_cache_size_bytes);
@@ -351,7 +351,7 @@ namespace hedge::db
             // TODO: Add bloom filter support to skip unnecessary lookups.
             for(const auto& sorted_index_ptr : sorted_indices_local)
             {
-                auto maybe_value_ptr = co_await sorted_index_ptr->lookup_async(key, this->_index_page_cache);
+                auto maybe_value_ptr = co_await sorted_index_ptr->lookup_async(key, this->_page_cache);
                 if(!maybe_value_ptr.has_value())
                     co_return hedge::error(std::format("An error occurred while reading index at path {}: {}", sorted_index_ptr->path().string(), maybe_value_ptr.error().to_string()));
 
@@ -611,7 +611,8 @@ namespace hedge::db
                     merge_config,
                     **second_smallest_index_it,
                     **smallest_index_it,
-                    async::this_thread_executor());
+                    async::this_thread_executor(),
+                    this->_page_cache);
 
                 if(!maybe_compacted_table)
                 {

@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 
+#include "cache.h"
 #include "mem_index.h"
 #include "sorted_index.h"
 #include "types.h"
@@ -92,6 +93,7 @@ namespace hedge::db
                                                  ///< Set `false` if there are more indices belonging to the same partition to be merged later, to preserve delete markers until the final merge.
                                                  ///< Set `true` when this is the final merge for the partition to eliminate deleted entries from the final index.
             bool create_new_with_odirect{false}; ///< If `true`, opens the output file with O_DIRECT flag for direct I/O access.
+            bool precache_output_vec{true};      ///< If `true`, tries to fill the cache with the resulting sorted index
         };
 
         /**
@@ -106,7 +108,7 @@ namespace hedge::db
          * @return A `async::task` that resolves to an `expected<sorted_index>` containing the newly created merged `sorted_index`
          * object on success, or an error if the merge fails.
          */
-        static async::task<hedge::expected<sorted_index>> two_way_merge_async(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
+        static async::task<hedge::expected<sorted_index>> two_way_merge_async(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor, const std::shared_ptr<db::shared_page_cache>& cache);
 
         /**
          * @brief Synchronously merges two `sorted_index` files by running and waiting for `two_way_merge_async`.

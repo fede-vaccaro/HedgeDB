@@ -10,6 +10,17 @@
 
 namespace hedge
 {
+
+    // for std::variant
+    template <class... Ts>
+    struct overloaded : Ts...
+    {
+        using Ts::operator()...;
+    };
+
+    template <class... Ts>
+    overloaded(Ts...) -> overloaded<Ts...>;
+
     inline std::filesystem::path with_extension(const std::filesystem::path& path, std::string_view ext)
     {
         return path.string() + ext.data();

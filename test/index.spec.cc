@@ -8,7 +8,7 @@
 
 #include "async/io_executor.h"
 #include "async/wait_group.h"
-#include "db/cache.h"
+#include "cache.h"
 #include "db/index_ops.h"
 #include "db/mem_index.h"
 #include "db/sorted_index.h"
@@ -237,7 +237,8 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
             merge_config,
             left,
             right,
-            _this->_executor);
+            _this->_executor,
+            nullptr);
 
         if(!new_index.has_value())
             promise.set_value(new_index.error());

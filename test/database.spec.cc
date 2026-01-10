@@ -125,7 +125,7 @@ namespace hedge::db
         config.keys_in_mem_before_flush = this->MEMTABLE_CAPACITY;
         config.compaction_read_ahead_size_bytes = 16 * 1024 * 1024;
         config.num_partition_exponent = 4;
-        config.target_compaction_size_ratio = 0.85;
+        config.target_compaction_size_ratio = 0.90;
         config.use_odirect_for_indices = false;
         config.index_page_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024;
         config.index_point_cache_size_bytes = 0;
@@ -192,14 +192,14 @@ namespace hedge::db
         // std::cout << "Total duration for flush: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
 
         // compaction
-        // t0 = std::chrono::high_resolution_clock::now();
-        // auto compaction_status_future = db->compact_sorted_indices(true);
-        // ASSERT_TRUE(compaction_status_future.get()) << "An error occurred during compaction: " << compaction_status_future.get().error().to_string();
-        // t1 = std::chrono::high_resolution_clock::now();
-        // duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-        // std::cout << "Total duration for a full compaction: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
+        t0 = std::chrono::high_resolution_clock::now();
+        auto compaction_status_future = db->compact_sorted_indices(true);
+        ASSERT_TRUE(compaction_status_future.get()) << "An error occurred during compaction: " << compaction_status_future.get().error().to_string();
+        t1 = std::chrono::high_resolution_clock::now();
+        duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+        std::cout << "Total duration for a full compaction: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
 
-        // EXPECT_DOUBLE_EQ(db->read_amplification_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
+        EXPECT_DOUBLE_EQ(db->read_amplification_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
 
         // shuffle keys before reading
         auto* begin = this->_keys_mmap.get_ptr<key_t>();

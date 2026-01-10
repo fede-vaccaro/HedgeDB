@@ -1,4 +1,5 @@
 #include <functional>
+#include <iostream>
 #include <pthread.h>
 
 #include "worker.h"
@@ -79,7 +80,16 @@ namespace hedge::async
             this->_cv.notify_all();
 
             while(!fetched_tasks.empty())
+            {
+                // size_t remaining = 0;
+                // {
+                //     std::unique_lock lk(this->_queue_m);
+                //     remaining = this->_job_queue.size();
+                // }
+
+                // std::cout << "Worker executing job, remaining from fetched (including current): " << fetched_tasks.size() + remaining << std::endl;
                 pop(fetched_tasks)();
+            }
 
             {
                 std::unique_lock lk(this->_queue_m);

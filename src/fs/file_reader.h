@@ -4,10 +4,11 @@
 #include <error.hpp>
 #include <sys/types.h>
 
-#include "async/io_executor.h"
 #include "fs.hpp"
 #include "mailbox.h"
 #include "mailbox_impl.h"
+
+#include "cache.h"
 
 /*
     HedgeFS File Reader
@@ -33,9 +34,12 @@ namespace hedge::fs
     public:
         file_reader(const fs::file& fd, const file_reader_config& config);
         
-        using awaitable_read_request_t = std::pair<async::awaitable_mailbox<async::read_response>, size_t>; // size_t is bytes requested before padding
+        using awaitable_read_request_t = std::pair<async::awaitable_mailbox<async::read_response>, std::span<uint8_t>>; // size_t is bytes requested before padding
 
         std::optional<awaitable_read_request_t> next();
+
+        using awaitable_from_cache_or_fs_t = std::variant<awaitable_read_request_t, db::page_cache::awaitable_page_guard>;
+        std::vector<awaitable_from_cache_or_fs_t> next(const std::shared_ptr<db::shared_page_cache>& cache);
 
         [[nodiscard]] size_t get_current_offset() const;
         [[nodiscard]] bool is_eof() const;

@@ -17,7 +17,9 @@
 #include "async/io_executor.h"
 #include "async/mailbox_impl.h"
 #include "async/task.h"
+#include "cache.h"
 #include "db/mem_index.h"
+#include "fs/file_reader.h"
 #include "fs/fs.hpp"
 #include "index_ops.h"
 #include "merge_utils.h"
@@ -440,7 +442,8 @@ namespace hedge::db
         const merge_config& config,
         const sorted_index& left,
         const sorted_index& right,
-        const std::shared_ptr<async::executor_context>& executor)
+        const std::shared_ptr<async::executor_context>& executor,
+        const std::shared_ptr<db::shared_page_cache>& cache)
     {
         /*
         -- Step 0: Validate preconditions and init all the necessary structures --
@@ -505,21 +508,56 @@ namespace hedge::db
 
         auto output_fd = std::move(fd_maybe.value());
 
+        auto read_fd = co_await fs::file::from_path_async(
+            output_fd.path(),
+            fs::file::open_mode::read_only,
+            async::this_thread_executor(),
+            config.create_new_with_odirect,
+            std::nullopt);
+
+        if(!read_fd.has_value())
+            co_return hedge::error("Failed to open merged index file for reading: " + read_fd.error().to_string());
+
+        if(read_fd.value().has_direct_access())
+            posix_fadvise(read_fd.value().fd(), 0, 0, POSIX_FADV_RANDOM);
+
         // Create rolling buffers for both readers
         // Those will maintain a sliding window over the data read from disk
         auto lhs_rbuf = rolling_buffer();
         auto rhs_rbuf = rolling_buffer();
 
-        auto unpack_mailbox = [](fs::file_reader::awaitable_read_request_t& awaitable) -> async::task<expected<async::read_response>>
+        using read_response_with_buffer_span_t = std::pair<async::read_response, std::span<uint8_t>>;
+        using unpacked_t = std::variant<db::page_cache::page_guard, read_response_with_buffer_span_t>;
+
+        auto span_from_unpacked = hedge::overloaded{
+            [](const db::page_cache::page_guard& page_guard)
+            {
+                return std::span<uint8_t>(page_guard.data + (page_guard.idx * PAGE_SIZE_IN_BYTES), page_guard.data + ((page_guard.idx + 1) * PAGE_SIZE_IN_BYTES));
+            },
+            [](const read_response_with_buffer_span_t& read_response)
+            {
+                return read_response.second;
+            }};
+
+        auto unpack_mailbox = [](fs::file_reader::awaitable_from_cache_or_fs_t& v) -> async::task<expected<unpacked_t>>
         {
-            auto response = co_await awaitable.first;
+            co_return co_await std::visit(
+                hedge::overloaded{
+                    [](db::page_cache::awaitable_page_guard& awaitable) -> async::task<expected<unpacked_t>>
+                    {
+                        co_return unpacked_t{db::page_cache::page_guard(co_await awaitable)};
+                    },
+                    [](fs::file_reader::awaitable_read_request_t& awaitable) -> async::task<expected<unpacked_t>>
+                    {
+                        auto response = co_await awaitable.first;
 
-            if(response.error_code != 0)
-                co_return hedge::error("Read request failed with error code: " + std::string(strerror(-response.error_code)));
+                        if(response.error_code != 0)
+                            co_return hedge::error("Read request failed with error code: " + std::string(strerror(-response.error_code)));
 
-            response.bytes_read = awaitable.second; // actual bytes requested before padding
-
-            co_return response;
+                        co_return unpacked_t{read_response_with_buffer_span_t{response, awaitable.second}};
+                    },
+                },
+                v);
         };
 
         size_t indexed_keys = 0;
@@ -529,14 +567,11 @@ namespace hedge::db
         // Meta-index entries collected during the merge
         std::vector<meta_index_entry> merged_meta_index;
 
-        std::vector<fs::file_reader::awaitable_read_request_t> lhs_pending_reads;
-        std::vector<fs::file_reader::awaitable_read_request_t> rhs_pending_reads;
+        std::vector<fs::file_reader::awaitable_from_cache_or_fs_t> lhs_pending_reads;
+        std::vector<fs::file_reader::awaitable_from_cache_or_fs_t> rhs_pending_reads;
 
-        lhs_pending_reads.reserve(16);
-        rhs_pending_reads.reserve(16);
-
-        lhs_pending_reads.push_back(lhs_reader.next().value());
-        rhs_pending_reads.push_back(rhs_reader.next().value());
+        lhs_pending_reads = lhs_reader.next(cache);
+        rhs_pending_reads = rhs_reader.next(cache);
 
         // Helper lambda to refresh both buffers by reading the next chunk from each index
         auto refresh_buffers = [&]() -> async::task<hedge::status>
@@ -548,9 +583,10 @@ namespace hedge::db
                     co_return hedge::error("Failed to read from LHS during buffer refresh: " + maybe_read.error().to_string());
 
                 // fetch data from LHS
-                uint8_t* data_ptr = lhs_reader.get_buffer_ptr();
-                lhs_rbuf.consume_and_push(std::span<uint8_t>(data_ptr, data_ptr + maybe_read.value().bytes_read));
+                auto span = std::visit(span_from_unpacked, maybe_read.value());
+                lhs_rbuf.consume_and_push(span);
             }
+            lhs_pending_reads.clear();
 
             for(auto& read_mailbox : rhs_pending_reads)
             {
@@ -559,23 +595,22 @@ namespace hedge::db
                     co_return hedge::error("Failed to read from RHS during buffer refresh: " + maybe_read.error().to_string());
 
                 // fetch data from RHS
-                uint8_t* data_ptr = rhs_reader.get_buffer_ptr();
-                rhs_rbuf.consume_and_push(std::span<uint8_t>(data_ptr, data_ptr + maybe_read.value().bytes_read));
+                auto span = std::visit(span_from_unpacked, maybe_read.value());
+                rhs_rbuf.consume_and_push(span);
             }
-
-            // prepare new requests
             rhs_pending_reads.clear();
-            if(!rhs_reader.is_eof())
-                rhs_pending_reads.push_back(rhs_reader.next().value());
-            else
-                rhs_rbuf.consume_and_push({});
 
             // prepare new requests
-            lhs_pending_reads.clear();
             if(!lhs_reader.is_eof())
-                lhs_pending_reads.push_back(lhs_reader.next().value());
+                lhs_pending_reads = lhs_reader.next(cache);
             else
                 lhs_rbuf.consume_and_push({});
+
+            // prepare new requests
+            if(!rhs_reader.is_eof())
+                rhs_pending_reads = rhs_reader.next(cache);
+            else
+                rhs_rbuf.consume_and_push({});
 
             co_return hedge::ok();
         };
@@ -665,14 +700,23 @@ namespace hedge::db
             compute_duration += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
             merge_iterations++;
 
-            auto res = co_await executor->submit_request(async::write_request{
+            auto awaitable_write_response = executor->submit_request(async::write_request{
                 .fd = output_fd.fd(),
                 .data = merged_keys.data(),
                 .size = merged_keys.size(),
                 .offset = bytes_written});
 
+            auto res = co_await awaitable_write_response;
+
             if(res.error_code != 0)
                 co_return hedge::error("Failed to write merged keys to file: " + std::string(strerror(-res.error_code)));
+
+            // Cache newly written items
+            if(config.precache_output_vec)
+            {
+                size_t num_page_to_request = merged_keys_bytes / PAGE_SIZE_IN_BYTES; // Ignore last page for now
+                auto cache_pages = cache->get_write_slots_range(read_fd.value().fd(), bytes_written / PAGE_SIZE_IN_BYTES, num_page_to_request);
+            }
 
             bytes_written += res.bytes_written;
 
@@ -895,22 +939,6 @@ namespace hedge::db
                 co_return hedge::error("Failed to fsync merged index file: " + std::string(strerror(-fsync_res.error_code)));
         }
 
-        /*
-        -- Step 5: Create sorted_index object for the merged file and return it --
-        */
-        auto read_fd = co_await fs::file::from_path_async(
-            output_fd.path(),
-            fs::file::open_mode::read_only,
-            async::this_thread_executor(),
-            config.create_new_with_odirect,
-            bytes_written);
-
-        if(!read_fd.has_value())
-            co_return hedge::error("Failed to open merged index file for reading: " + read_fd.error().to_string());
-
-        if(read_fd.value().has_direct_access())
-            posix_fadvise(read_fd.value().fd(), 0, 0, POSIX_FADV_RANDOM);
-
         constexpr size_t REF_PAGE_SIZE = 4096;
         constexpr size_t KEYS_PER_META_INDEX_PAGE = REF_PAGE_SIZE / sizeof(meta_index_entry);
 
@@ -943,7 +971,7 @@ namespace hedge::db
         if(!executor)
             return hedge::error("Executor context is null");
 
-        auto result = executor->sync_submit(two_way_merge_async(config, left, right, executor));
+        auto result = executor->sync_submit(two_way_merge_async(config, left, right, executor, nullptr));
 
         if(!result.has_value())
             return hedge::error("Failed to merge sorted indices: " + result.error().to_string());

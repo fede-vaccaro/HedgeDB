@@ -84,8 +84,8 @@ set(DB_SOURCES
     src/db/value_table.h
     src/db/database.cc
     src/db/database.h
-    src/db/cache.h
-    src/db/cache.cc
+    src/cache.h
+    src/cache.cc
 )
 
 set(IO_EXECUTOR_SRCS 
