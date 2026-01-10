@@ -156,6 +156,11 @@ namespace hedge
             std::fill(this->data() + size, this->data() + this->_size, T{});
             this->_size = size;
         }
+
+        void zero()
+        {
+        std::fill(this->data(), this->data() + this->_size, T{});
+        }
     };
 
 } // namespace hedge
