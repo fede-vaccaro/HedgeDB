@@ -37,8 +37,7 @@ namespace hedge::db
 
     inline page_tag to_page_tag(uint32_t fd, size_t offset)
     {
-        if(offset % PAGE_SIZE_IN_BYTES != 0)
-            throw std::runtime_error("Offset is not aligned to page size");
+        assert(offset % PAGE_SIZE_IN_BYTES == 0);
 
         return page_tag{.fd = fd, .page_index = static_cast<uint32_t>(offset / PAGE_SIZE_IN_BYTES)};
     }
@@ -108,6 +107,11 @@ namespace hedge::db
 
             page_guard& operator=(page_guard&& other) noexcept;
 
+            const auto* frame() const
+            {
+                return this->_frame;
+            }
+
             uint8_t* data;
             size_t idx;
 
@@ -115,6 +119,8 @@ namespace hedge::db
 
         private:
             _metadata* _frame;
+
+            void _on_destruction();
 
             friend awaitable_page_guard;
         };
@@ -131,7 +137,6 @@ namespace hedge::db
             template <typename PROMISE_TYPE>
             std::coroutine_handle<> await_suspend(std::coroutine_handle<PROMISE_TYPE> continuation) noexcept
             {
-
                 prof::avg_stat::PERF_STATS["push_coro"].start();
 
                 std::lock_guard lk(pg._frame->waiters_mutex);

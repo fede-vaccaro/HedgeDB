@@ -60,7 +60,12 @@ namespace hedge::db
     {
         this->data = std::exchange(other.data, nullptr);
         this->idx = std::exchange(other.idx, 0);
-        this->_frame = std::exchange(other._frame, nullptr);
+
+        if(this->_frame != nullptr)
+        {
+            this->_on_destruction();
+            this->_frame = nullptr;
+        }
 
         return *this;
     }
@@ -72,8 +77,12 @@ namespace hedge::db
         if(this->_frame == nullptr)
             return;
 
-        // Enter only if ready bit == 0, meaning that the page_guard owner is a writer
+        this->_on_destruction();
+    }
 
+    void page_cache::page_guard::_on_destruction()
+    {
+        // Enter only if ready bit == 0, meaning that the page_guard owner is a writer
         if((this->_frame->flags.fetch_or(PAGE_FLAG_READY) & PAGE_FLAG_READY) == 0)
         {
             assert((this->_frame->flags.load() & PAGE_FLAG_READY) != 0);
@@ -109,7 +118,10 @@ namespace hedge::db
 
                 // still the only one watching it!
                 if((frame_ptr->flags.load() & PAGE_FLAG_REFERENCE_COUNT_MASK) != 1)
-                    continue; // otherwise, look for another one
+                {
+                    frame_ptr->flags.fetch_sub(1); // Release counter
+                    continue;                      // otherwise, look for another one
+                }
 
                 this->_lut.erase(frame_ptr->key);
                 this->_lut[page] = idx;
@@ -171,15 +183,15 @@ namespace hedge::db
             frame_ptr = &this->_frames[idx];
 
             // avoid co-awaiting on the page and transferring coroutine to an external executor
-            if((frame_ptr->flags.load() & PAGE_FLAG_READY) == 0)
+            if((frame_ptr->flags.load() & PAGE_FLAG_READY) == 0UL)
                 return std::nullopt;
+
+            frame_ptr->flags.fetch_add(1); // increase reference count
 
             if(hint_evict)
                 frame_ptr->flags.fetch_and(~PAGE_FLAG_RECENTLY_USED);
             else
                 frame_ptr->flags.fetch_or(PAGE_FLAG_RECENTLY_USED);
-
-            frame_ptr->flags.fetch_add(1); // increase reference count
         }
 
         return awaitable_page_guard{.pg = page_guard{this->_data.get(), idx * 4096, frame_ptr}};
@@ -190,13 +202,14 @@ namespace hedge::db
         std::vector<std::optional<page_cache::awaitable_page_guard>> results;
         results.reserve(num_pages);
 
-        for(size_t i = 0; i < start_page_index; ++i)
+        for(size_t i = 0; i < num_pages; ++i)
         {
             auto tag = page_tag{.fd = fd, .page_index = static_cast<uint32_t>(start_page_index + i)};
 
             size_t hash = std::hash<page_tag>{}(tag);
 
             results.emplace_back(this->_caches.get()[hash % this->_num_caches].try_lookup(tag, hint_evict));
+            // results.emplace_back(std::nullopt);
         }
 
         return results;
@@ -207,7 +220,7 @@ namespace hedge::db
         std::vector<page_cache::page_guard> results;
         results.reserve(num_pages);
 
-        for(size_t i = 0; i < start_page_index; ++i)
+        for(size_t i = 0; i < num_pages; ++i)
         {
             auto tag = page_tag{.fd = fd, .page_index = static_cast<uint32_t>(start_page_index + i)};
             results.emplace_back(this->get_write_slot(tag));
@@ -221,7 +234,10 @@ namespace hedge::db
         size_t cur_pos = this->_clock_hand.fetch_add(1);
 
         if(cur_pos < this->_max_page_capacity)
+        {
+            this->_frames[cur_pos].flags.fetch_add(1);
             return cur_pos;
+        }
 
         // Search for an evictable page
         // If no page is found, this procedure behaves basically as a spin-lock

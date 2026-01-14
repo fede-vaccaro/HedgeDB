@@ -15,6 +15,7 @@ Diagnostics:
     Remove:
       [
         clang-analyzer-*,
+        "modernize-avoid-c-arrays",
         "modernize-use-trailing-return-type",
         "readability-braces-around-statements",
         "readability-magic-numbers",

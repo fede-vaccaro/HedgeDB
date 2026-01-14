@@ -237,6 +237,7 @@ namespace hedge::async
 
         this->_running.store(false, std::memory_order_relaxed);
 
+        this->_sleep_cv.notify_one();
         this->_pending_requests_cv.notify_all();
 
         if(this->_worker.joinable())
@@ -276,7 +277,7 @@ namespace hedge::async
                 if(this->_count_before_sleep == CYCLES_BEFORE_SLEEP)
                 {
                     this->_sleep_cv.wait(lk, [this]()
-                                         { return !this->_pending_requests.empty(); });
+                                         { return !this->_pending_requests.empty() || !this->_running.load(std::memory_order::relaxed); });
                     this->_count_before_sleep = 0;
                 }
 

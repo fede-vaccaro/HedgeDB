@@ -26,7 +26,7 @@ using namespace std::string_literals;
 
 std::pair<int, size_t> open_fd(const std::string& path, bool direct = true)
 {
-    auto flag = O_RDONLY;
+    auto flag = O_RDWR;
     if(direct)
         flag |= O_DIRECT;
 
@@ -44,7 +44,7 @@ std::pair<int, size_t> open_fd(const std::string& path, bool direct = true)
     return {fd, size};
 }
 
-const std::string INDEX_PATH = "/tmp/iota.bin";
+const std::string INDEX_PATH = "/tmp/testfile";
 
 size_t PAGE_SIZE = 4096;
 
@@ -89,7 +89,7 @@ std::atomic_uint64_t atomic_counter = 0;
 
 hedge::async::task<void> get_obj(hedge::async::read_request r, [[maybe_unused]] hedge::async::read_request r2, [[maybe_unused]] hedge::async::executor_context& executor, working_group& wg)
 {
-    [[maybe_unused]]  auto data_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE, PAGE_SIZE));
+    [[maybe_unused]] auto data_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE, PAGE_SIZE));
     r.data = data_ptr;
 
     [[maybe_unused]] auto response_f = co_await executor.submit_request(r);
@@ -137,15 +137,16 @@ int main()
     const uint32_t QUEUE_DEPTH = 128;
     std::vector<std::shared_ptr<hedge::async::executor_context>> contexts;
 
+    contexts.reserve(8);
     for(int i = 0; i < 8; ++i)
-        contexts.emplace_back(std::make_shared<hedge::async::executor_context>(QUEUE_DEPTH));
+        contexts.emplace_back(hedge::async::executor_context::make_new(QUEUE_DEPTH));
 
     std::vector<int> fds;
     size_t file_size = 0;
     for(int i = 0; i < 1; ++i)
     {
         auto [fd, size] = open_fd(INDEX_PATH, true);
-        posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM);
+        posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
         fds.push_back(fd);
         file_size = size;
     }

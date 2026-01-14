@@ -139,12 +139,12 @@ namespace hedge::async
         this->response.file_size = this->_statx_buf.stx_size;
     }
 
-    void fsync_mailbox::prepare_sqe(io_uring_sqe* sqe)
+    void fdatasync_mailbox::prepare_sqe(io_uring_sqe* sqe)
     {
-        io_uring_prep_fsync(sqe, this->request.fd, 0);
+        io_uring_prep_fsync(sqe, this->request.fd, IORING_FSYNC_DATASYNC);
     }
 
-    void fsync_mailbox::handle_cqe(io_uring_cqe* cqe)
+    void fdatasync_mailbox::handle_cqe(io_uring_cqe* cqe)
     {
         if(cqe->res < 0)
             this->response.error_code = cqe->res;

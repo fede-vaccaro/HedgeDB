@@ -155,6 +155,13 @@ namespace hedge::db
                 page_ptr = opt_page_guard->data + opt_page_guard->idx;
                 prof::avg_stat::PERF_STATS["cache_hits"].add(1);
                 prof::avg_stat::PERF_STATS["lookup"].stop(false);
+
+                // std::cout << "cache hit for fd " << this->fd() << " and file " << this->path() << " page offset " << page_start_offset << "\n";
+
+                // print meta index
+                // size_t count = 0;
+                // for(const auto& entry : this->_meta_index)
+                    // std::cout << "Meta index entry key: " << count++ << " " << entry.key << "\n";
             }
             else
             {
