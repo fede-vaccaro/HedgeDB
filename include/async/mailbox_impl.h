@@ -6,8 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <linux/stat.h>
-#include <memory>
-#include <span>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -30,14 +29,21 @@ namespace hedge::async
 
         void handle_cqe(io_uring_cqe* cqe)
         {
+            assert(!this->response_set);
             static_cast<Derived*>(this)->handle_cqe(cqe);
             this->response_set = true;
         }
 
         void* get_response() // todo: use &response as default otherwise call get_response() on the derived class (implement through SFINAE)
         {
+            assert(!this->response_consumed);
             this->response_consumed = true;
             return static_cast<Derived*>(this)->get_response();
+        }
+
+        void* get_request()
+        {
+            return &static_cast<Derived*>(this)->request;
         }
 
         void set_continuation(std::coroutine_handle<> handle)
@@ -49,7 +55,7 @@ namespace hedge::async
         {
             if(response_consumed)
                 return;
-            
+
             this->continuation.resume();
         }
     };
@@ -423,30 +429,30 @@ namespace hedge::async
         };
     };
 
-    struct fsync_request;
-    struct fsync_response;
-    struct fsync_mailbox;
+    struct fdatasync_request;
+    struct fdatasync_response;
+    struct fdatasync_mailbox;
 
-    struct fsync_request
+    struct fdatasync_request
     {
-        using response_t = fsync_response;
-        using mailbox_t = fsync_mailbox;
+        using response_t = fdatasync_response;
+        using mailbox_t = fdatasync_mailbox;
 
         int32_t fd;
     };
 
-    struct fsync_response
+    struct fdatasync_response
     {
         int32_t error_code{};
     };
 
-    struct fsync_mailbox : mailbox_base<fsync_mailbox>
+    struct fdatasync_mailbox : mailbox_base<fdatasync_mailbox>
     {
-        fsync_mailbox(fsync_request req)
+        fdatasync_mailbox(fdatasync_request req)
             : request(req) {}
 
-        fsync_request request;
-        fsync_response response;
+        fdatasync_request request;
+        fdatasync_response response;
 
         void prepare_sqe(io_uring_sqe* sqe);
         void handle_cqe(io_uring_cqe* cqe);
@@ -525,6 +531,8 @@ namespace hedge::async
     // Hack for transferring coros
     struct continuation_mailbox : mailbox_base<continuation_mailbox>
     {
+        char request;
+
         void prepare_sqe(io_uring_sqe*) {}
         void handle_cqe(io_uring_cqe*) {}
 
@@ -548,7 +556,7 @@ namespace hedge::async
             fallocate_mailbox,
             close_mailbox,
             file_info_mailbox,
-            fsync_mailbox,
+            fdatasync_mailbox,
             yield_mailbox,
             continuation_mailbox>;
 

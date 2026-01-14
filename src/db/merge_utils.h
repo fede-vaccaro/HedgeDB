@@ -100,6 +100,14 @@ namespace hedge::db
             this->_buffer.erase(this->_buffer.begin(), this->_buffer_it());
             this->_buffer.insert(this->_buffer.end(), new_buffer_view.begin(), new_buffer_view.end());
             this->_view = view_as<index_entry_t>(this->_buffer);
+            // if(!std::is_sorted(this->_view.begin(), this->_view.end()))
+            // {
+            //     std::cout << "ROLLING BUFFER NOT SORTED!\n";
+            //     for(auto& entry : this->_view)
+            //         std::cout << entry.key.to_string() << "\n";
+            //     myassert(false, "Rolling buffer is not sorted!");
+            // }
+
             this->_it = this->_view.begin();
         }
 

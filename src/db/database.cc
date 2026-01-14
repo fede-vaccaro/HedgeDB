@@ -139,7 +139,7 @@ namespace hedge::db
 
         db->_flush_iteration = max_flush_iteration + 1;
 
-        uint32_t max_last_table_id;
+        uint32_t max_last_table_id{0};
         for(const auto& entry : std::filesystem::directory_iterator(db->_values_path))
         {
             if(entry.is_regular_file() && entry.path().extension() == value_table::TABLE_FILE_EXTENSION)
@@ -605,6 +605,7 @@ namespace hedge::db
                     .base_path = this->_indices_path,
                     .discard_deleted_keys = false,
                     .create_new_with_odirect = this->_config.use_odirect_for_indices,
+                    .precache_output_vec = true,
                 };
 
                 auto maybe_compacted_table = co_await index_ops::two_way_merge_async(

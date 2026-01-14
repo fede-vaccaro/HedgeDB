@@ -49,6 +49,8 @@ namespace hedge
         return (value + divisor - 1) / divisor;
     }
 
+    void myassert(bool expr, std::string msg = "");
+
     inline uint16_t extract_prefix(const uuids::uuid& key)
     {
         const auto& array_view = byte_varray_view(key);
@@ -80,12 +82,14 @@ namespace hedge
 
     std::vector<std::pair<size_t, std::filesystem::path>> get_prefixes(const std::filesystem::path& base_path, size_t num_space_partitions);
 
+    using aligned_buffer_t = std::unique_ptr<uint8_t, std::function<void(void*)>>;
+
     // Needed for page aligned buffers
     template <typename T>
     struct page_aligned_buffer
     {
     private:
-        std::unique_ptr<uint8_t> buf;
+        aligned_buffer_t buf = aligned_buffer_t(nullptr, [](auto*) {});
         size_t _size;
 
     public:
@@ -94,7 +98,7 @@ namespace hedge
         {
             size_t mem = hedge::ceil(s * sizeof(T), PAGE_SIZE_IN_BYTES) * PAGE_SIZE_IN_BYTES;
 
-            buf = std::unique_ptr<uint8_t>(static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, mem)));
+            buf = aligned_buffer_t(static_cast<uint8_t*>(std::aligned_alloc(PAGE_SIZE_IN_BYTES, mem)), std::free);
             assert(buf);
 
             std::fill(buf.get(), buf.get() + mem, 0);
@@ -159,7 +163,7 @@ namespace hedge
 
         void zero()
         {
-        std::fill(this->data(), this->data() + this->_size, T{});
+            std::fill(this->data(), this->data() + this->_size, T{});
         }
     };
 

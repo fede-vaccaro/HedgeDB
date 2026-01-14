@@ -3,6 +3,7 @@
 #include <cassert>
 #include <coroutine>
 #include <liburing.h>
+#include <memory>
 #include <variant>
 
 #include "mailbox_impl.h"
@@ -66,6 +67,12 @@ namespace hedge::async
                               { return impl.resume(); }, _mailbox_impl);
         }
 
+        void* get_request()
+        {
+            return std::visit([](auto& impl) -> void*
+                              { return impl.get_request(); }, _mailbox_impl);
+        }
+
         bool response_set()
         {
             return std::visit([](auto& impl)
@@ -96,7 +103,7 @@ namespace hedge::async
 
         auto await_resume() noexcept
         {
-            return std::move(*reinterpret_cast<RESPONSE_T*>(mbox->get_response()));
+            return std::move(*static_cast<RESPONSE_T*>(mbox->get_response()));
         }
     };
 

@@ -44,4 +44,12 @@ namespace hedge
         return std::pair{path, filename};
     }
 
+    void myassert(bool expr, std::string msg)
+    {
+        constexpr bool ACTIVE = true;
+
+        if(ACTIVE && !expr)
+            throw std::runtime_error("Assertion failed: " + msg);
+    }
+
 } // namespace hedge

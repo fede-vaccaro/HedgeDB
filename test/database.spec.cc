@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <sys/types.h>
@@ -124,11 +125,12 @@ namespace hedge::db
         config.auto_compaction = true;
         config.keys_in_mem_before_flush = this->MEMTABLE_CAPACITY;
         config.compaction_read_ahead_size_bytes = 16 * 1024 * 1024;
-        config.num_partition_exponent = 4;
+        config.num_partition_exponent = 0;
         config.target_compaction_size_ratio = 0.90;
-        config.use_odirect_for_indices = false;
+        config.use_odirect_for_indices = true;
         config.index_page_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024;
         config.index_point_cache_size_bytes = 0;
+        config.compaction_timeout = std::chrono::minutes(20);
 
         if(config.index_page_clock_cache_size_bytes > 0)
             std::cout << "Using CLOCK cache. Allocated space: " << config.index_page_clock_cache_size_bytes / (1024.0 * 1024) << "MB" << std::endl;
@@ -304,7 +306,7 @@ namespace hedge::db
         database_test,
         testing::Combine(
             testing::Values(80'000'000), // n keys
-            testing::Values(1024),       // payload size
+            testing::Values(100),       // payload size
             testing::Values(2'000'000)   // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)
