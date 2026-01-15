@@ -74,11 +74,12 @@ namespace hedge::db
     // Implemented using a reference-counted CLOCK algorithm;
     class alignas(64) page_cache
     {
+        friend class PageCacheTest;
+
         async::rw_spinlock _m{};
         std::atomic_size_t _clock_hand{};
         size_t _max_page_capacity{};
 
-        // The key is not stored here to obtain the correct cache alignement
         struct alignas(64) _metadata
         {
             std::atomic_uint64_t flags{0};
@@ -89,45 +90,62 @@ namespace hedge::db
             page_tag key{};
         };
 
-        std::vector<_metadata> _frames;         // Metadata about each pages - ~16 MB overhead for 1 GB worth of pages
-        tsl::sparse_map<page_tag, size_t> _lut; // key -> idx mapping
-        std::unique_ptr<uint8_t> _data;         // Memory arena
+        std::vector<_metadata> _frames;
+        tsl::sparse_map<page_tag, size_t> _lut;
+        std::unique_ptr<uint8_t> _data;
 
     public:
         explicit page_cache(size_t bytes);
 
         struct awaitable_page_guard;
 
-        struct page_guard
+        // Handles reading a page. Only releases reference count.
+        struct read_page_guard
         {
-            page_guard() = default;
-            page_guard(uint8_t* data, size_t idx, _metadata* frame);
+            read_page_guard() = default;
+            read_page_guard(uint8_t* data, size_t idx, _metadata* frame);
+            ~read_page_guard();
 
-            page_guard(page_guard&& other) noexcept;
+            read_page_guard(const read_page_guard&) = delete;
+            read_page_guard& operator=(const read_page_guard&) = delete;
 
-            page_guard& operator=(page_guard&& other) noexcept;
+            read_page_guard(read_page_guard&& other) noexcept;
+            read_page_guard& operator=(read_page_guard&& other) noexcept;
 
-            const auto* frame() const
-            {
-                return this->_frame;
-            }
+            uint8_t* data{nullptr};
+            size_t idx{0};
 
-            uint8_t* data;
-            size_t idx;
-
-            ~page_guard();
+            const _metadata* frame() const { return this->_frame; }
 
         private:
-            _metadata* _frame;
+            friend struct awaitable_page_guard;
+            _metadata* _frame{nullptr};
+        };
 
-            void _on_destruction();
+        // Handles writing a page. Resumes waiters and sets READY flag on destruction.
+        struct write_page_guard
+        {
+            write_page_guard() = default;
+            write_page_guard(uint8_t* data, size_t idx, _metadata* frame);
+            ~write_page_guard();
 
-            friend awaitable_page_guard;
+            write_page_guard(const write_page_guard&) = delete;
+            write_page_guard& operator=(const write_page_guard&) = delete;
+
+            write_page_guard(write_page_guard&& other) noexcept;
+            write_page_guard& operator=(write_page_guard&& other) noexcept;
+
+            uint8_t* data{nullptr};
+            size_t idx{0};
+
+        private:
+            friend struct awaitable_page_guard;
+            _metadata* _frame{nullptr};
         };
 
         struct awaitable_page_guard
         {
-            page_guard pg;
+            read_page_guard pg;
 
             [[nodiscard]] bool await_ready() const noexcept
             {
@@ -154,13 +172,13 @@ namespace hedge::db
                 return std::noop_coroutine();
             }
 
-            page_guard&& await_resume()
+            read_page_guard&& await_resume()
             {
                 return std::move(this->pg);
             }
         };
 
-        page_guard get_write_slot(page_tag page);
+        write_page_guard get_write_slot(page_tag page);
         std::optional<awaitable_page_guard> lookup(page_tag page, bool hint_evict = false);
         std::optional<awaitable_page_guard> try_lookup(page_tag page, bool hint_evict = false);
 
@@ -177,12 +195,10 @@ namespace hedge::db
         explicit shared_page_cache(size_t bytes, size_t num_caches)
         {
             void* caches = aligned_alloc(alignof(page_cache), sizeof(page_cache) * num_caches);
-
             if(caches == nullptr)
                 throw std::runtime_error("Could not allocate memory for shared_page_cache caches");
 
             this->_caches = std::unique_ptr<page_cache>(static_cast<page_cache*>(caches));
-
             this->_num_caches = num_caches;
             size_t per_cache_bytes = hedge::ceil(bytes, num_caches);
 
@@ -190,7 +206,7 @@ namespace hedge::db
                 new(this->_caches.get() + i) page_cache(per_cache_bytes);
         }
 
-        page_cache::page_guard get_write_slot(page_tag page)
+        page_cache::write_page_guard get_write_slot(page_tag page)
         {
             size_t hash = std::hash<page_tag>{}(page) % this->_num_caches;
             return this->_caches.get()[hash].get_write_slot(page);
@@ -202,7 +218,7 @@ namespace hedge::db
             return this->_caches.get()[hash].lookup(page);
         }
 
-        std::vector<page_cache::page_guard> get_write_slots_range(uint32_t fd, size_t start_page_index, size_t num_pages);
+        std::vector<page_cache::write_page_guard> get_write_slots_range(uint32_t fd, size_t start_page_index, size_t num_pages);
         std::vector<std::optional<page_cache::awaitable_page_guard>> lookup_range(uint32_t fd, size_t start_page_index, size_t num_pages, bool hint_evict);
     };
 

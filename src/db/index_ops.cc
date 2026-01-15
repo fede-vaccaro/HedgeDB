@@ -530,7 +530,7 @@ namespace hedge::db
         auto rhs_rbuf = rolling_buffer();
 
         using read_response_with_buffer_span_t = std::pair<async::read_response, std::span<uint8_t>>;
-        using page_guard_with_buffer_span_t = std::pair<db::page_cache::page_guard, std::span<uint8_t>>;
+        using page_guard_with_buffer_span_t = std::pair<db::page_cache::read_page_guard, std::span<uint8_t>>;
 
         using unpacked_t = std::variant<page_guard_with_buffer_span_t, read_response_with_buffer_span_t>;
 
@@ -560,7 +560,7 @@ namespace hedge::db
                 hedge::overloaded{
                     [](fs::file_reader::awaitable_page_guard_t& awaitable) -> async::task<expected<unpacked_t>>
                     {
-                        co_return unpacked_t{page_guard_with_buffer_span_t{db::page_cache::page_guard(co_await awaitable.first), awaitable.second}};
+                        co_return unpacked_t{page_guard_with_buffer_span_t{db::page_cache::read_page_guard(co_await awaitable.first), awaitable.second}};
                     },
                     [](fs::file_reader::awaitable_read_request_t& awaitable) -> async::task<expected<unpacked_t>>
                     {

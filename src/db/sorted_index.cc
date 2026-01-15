@@ -137,7 +137,9 @@ namespace hedge::db
         auto page_start_offset = this->_footer.index_start_offset + (page_id * PAGE_SIZE_IN_BYTES);
 
         // start_counter(fd);
-        std::optional<page_cache::page_guard> opt_page_guard;
+        std::optional<page_cache::read_page_guard> opt_page_guard;
+        std::optional<page_cache::write_page_guard> opt_write_guard;
+        
         auto page_tag = to_page_tag(static_cast<uint32_t>(this->fd()), page_start_offset);
 
         std::unique_ptr<uint8_t> data; // might be needed for holding a temporary memory allocation
@@ -176,8 +178,8 @@ namespace hedge::db
             prof::avg_stat::PERF_STATS["get_slot"].start();
             auto maybe_write_slot = cache->get_write_slot(page_tag);
 
-            opt_page_guard = std::move(maybe_write_slot);
-            page_ptr = opt_page_guard->data + opt_page_guard->idx;
+            opt_write_guard = std::move(maybe_write_slot);
+            page_ptr = opt_write_guard->data + opt_write_guard->idx;
 
             prof::avg_stat::PERF_STATS["get_slot"].stop();
 
@@ -186,7 +188,7 @@ namespace hedge::db
 
         if(should_read_from_fs)
         {
-            if(!opt_page_guard.has_value())
+            if(!opt_page_guard.has_value() && !opt_write_guard.has_value())
             {
                 auto* page_mem_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, PAGE_SIZE_IN_BYTES));
                 if(page_mem_ptr == nullptr)
