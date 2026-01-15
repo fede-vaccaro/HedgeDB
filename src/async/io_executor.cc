@@ -211,21 +211,25 @@ namespace hedge::async
         this->_sleep_cv.notify_one();
     };
 
-    void executor_context::submit_io_task_high_pri(task<void> task)
+    bool executor_context::try_submit_io_task(task<void> task)
     {
         if(!this->_running.load(std::memory_order_relaxed))
         {
             std::cerr << "cannot submit task: context closed" << std::endl;
-            return;
+            return false;
         }
 
         {
             std::unique_lock lk(this->_pending_requests_mutex);
 
-            this->_pending_requests.emplace_front(std::move(task));
-        }
+            if(this->_pending_requests.size() >= this->_max_buffered_requests)
+                return false;
 
+            this->_pending_requests.emplace_back(std::move(task));
+        }
+        
         this->_sleep_cv.notify_one();
+        return true;
     };
 
     void executor_context::shutdown()
@@ -308,11 +312,11 @@ namespace hedge::async
                 handle.resume();
             }
 
-            this->_gc_tasks();
-
             this->_do_work();
 
             this->_wait_for_cqe();
+
+            this->_gc_tasks();
 
             if(this->_should_sleep())
                 this->_count_before_sleep++;

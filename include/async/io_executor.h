@@ -127,7 +127,7 @@ namespace hedge::async
         }
 
         void submit_io_task(task<void> task);          // do NOT call this from a task, otherwise it will deadlock! TODO: address this
-        void submit_io_task_high_pri(task<void> task); // do NOT call this from a task, otherwise it will deadlock! TODO: address this
+        bool try_submit_io_task(task<void> task); // do NOT call this from a task, otherwise it will deadlock! TODO: address this
 
         void shutdown();
 

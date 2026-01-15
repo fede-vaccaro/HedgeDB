@@ -24,8 +24,7 @@ namespace hedge::db
     page_cache::page_cache(size_t bytes)
     {
         this->_max_page_capacity = hedge::ceil(bytes, PAGE_SIZE_IN_BYTES);
-
-        this->_frames = std::vector<_metadata>(this->_max_page_capacity); // NOLINT
+        this->_frames = std::vector<_metadata>(this->_max_page_capacity);
         this->_lut.reserve(this->_max_page_capacity);
 
         auto* ptr = aligned_alloc(PAGE_SIZE_IN_BYTES, this->_max_page_capacity * PAGE_SIZE_IN_BYTES);
@@ -37,76 +36,117 @@ namespace hedge::db
         this->_data = std::unique_ptr<uint8_t>(uint_ptr);
     }
 
-    struct awaitable_page_guard;
+    // --- read_page_guard Implementation ---
 
-    using page_guard = page_cache::page_guard;
-
-    page_guard::page_guard(uint8_t* data, size_t idx, _metadata* frame)
-        : data(data),
-          idx(idx),
-          _frame(frame)
+    page_cache::read_page_guard::read_page_guard(uint8_t* data, size_t idx, _metadata* frame)
+        : data(data), idx(idx), _frame(frame)
     {
         assert(this->_frame != nullptr);
     }
 
-    page_guard::page_guard(page_guard&& other) noexcept
+    page_cache::read_page_guard::~read_page_guard()
+    {
+        if(this->_frame != nullptr)
+            this->_frame->flags.fetch_sub(1);
+    }
+
+    page_cache::read_page_guard::read_page_guard(read_page_guard&& other) noexcept
         : data(std::exchange(other.data, nullptr)),
           idx(std::exchange(other.idx, 0)),
           _frame(std::exchange(other._frame, nullptr))
     {
     }
 
-    page_guard& page_guard::operator=(page_guard&& other) noexcept
+    page_cache::read_page_guard& page_cache::read_page_guard::operator=(read_page_guard&& other) noexcept
     {
-        this->data = std::exchange(other.data, nullptr);
-        this->idx = std::exchange(other.idx, 0);
-
-        if(this->_frame != nullptr)
+        if(this != &other)
         {
-            this->_on_destruction();
-            this->_frame = nullptr;
-        }
+            if(this->_frame != nullptr)
+                this->_frame->flags.fetch_sub(1);
 
+            this->data = std::exchange(other.data, nullptr);
+            this->idx = std::exchange(other.idx, 0);
+            this->_frame = std::exchange(other._frame, nullptr);
+        }
         return *this;
     }
 
-    uint8_t* page_data = nullptr;
+    // --- write_page_guard Implementation ---
 
-    page_guard::~page_guard()
+    page_cache::write_page_guard::write_page_guard(uint8_t* data, size_t idx, _metadata* frame)
+        : data(data), idx(idx), _frame(frame)
+    {
+        assert(this->_frame != nullptr);
+    }
+
+    page_cache::write_page_guard::~write_page_guard()
     {
         if(this->_frame == nullptr)
             return;
 
-        this->_on_destruction();
-    }
+        // Atomic publish: mark page as READY
+        this->_frame->flags.fetch_or(PAGE_FLAG_READY);
 
-    void page_cache::page_guard::_on_destruction()
-    {
-        // Enter only if ready bit == 0, meaning that the page_guard owner is a writer
-        if((this->_frame->flags.fetch_or(PAGE_FLAG_READY) & PAGE_FLAG_READY) == 0)
+        // Resume waiters
+        using waiter_container_t = decltype(_metadata::waiters);
+        waiter_container_t waiters;
         {
-            assert((this->_frame->flags.load() & PAGE_FLAG_READY) != 0);
+            std::lock_guard lk(this->_frame->waiters_mutex);
+            waiters = std::exchange(this->_frame->waiters, waiter_container_t{});
+        }
 
-            using waiter_container_t = decltype(_metadata::waiters);
-            waiter_container_t waiters;
-
-            {
-                std::lock_guard lk(this->_frame->waiters_mutex);
-                waiters = std::exchange(this->_frame->waiters, waiter_container_t{});
-            }
-
+        if(!waiters.empty())
+        {
             prof::avg_stat::PERF_STATS["resumed_count"].add(waiters.size(), 0);
-            if(!waiters.empty())
-                prof::avg_stat::PERF_STATS["avg_resumed_count"].add(waiters.size(), 1);
-
             for(auto& [task, continuation] : waiters)
                 async::this_thread_executor()->transfer_task(std::move(task), continuation);
         }
 
+        // Release pin: must happen AFTER setting READY to prevent eviction
+        // while the page is transitioning but before refcount drops.
         this->_frame->flags.fetch_sub(1);
     }
 
-    page_guard page_cache::get_write_slot(page_tag page)
+    page_cache::write_page_guard::write_page_guard(write_page_guard&& other) noexcept
+        : data(std::exchange(other.data, nullptr)),
+          idx(std::exchange(other.idx, 0)),
+          _frame(std::exchange(other._frame, nullptr))
+    {
+    }
+
+    page_cache::write_page_guard& page_cache::write_page_guard::operator=(write_page_guard&& other) noexcept
+    {
+        if(this != &other)
+        {
+            // Destruction logic for the old frame:
+            // We must publish the READY bit if we overwrite a writer guard to avoid deadlocking waiters.
+            if(this->_frame != nullptr)
+            {
+                this->_frame->flags.fetch_or(PAGE_FLAG_READY);
+
+                using waiter_container_t = decltype(_metadata::waiters);
+                waiter_container_t waiters;
+                {
+                    std::lock_guard lk(this->_frame->waiters_mutex);
+                    waiters = std::exchange(this->_frame->waiters, waiter_container_t{});
+                }
+
+                for(auto& [task, continuation] : waiters)
+                    async::this_thread_executor()->transfer_task(std::move(task), continuation);
+
+                this->_frame->flags.fetch_sub(1);
+            }
+
+            this->data = std::exchange(other.data, nullptr);
+            this->idx = std::exchange(other.idx, 0);
+            this->_frame = std::exchange(other._frame, nullptr);
+        }
+        return *this;
+    }
+
+    // --- page_cache Methods ---
+
+    page_cache::write_page_guard page_cache::get_write_slot(page_tag page)
     {
         while(true)
         {
@@ -115,12 +155,11 @@ namespace hedge::db
 
             {
                 std::lock_guard lk(this->_m);
-
-                // still the only one watching it!
+                // If refcount > 1, a reader pinned it between _find_frame and our lock.
                 if((frame_ptr->flags.load() & PAGE_FLAG_REFERENCE_COUNT_MASK) != 1)
                 {
-                    frame_ptr->flags.fetch_sub(1); // Release counter
-                    continue;                      // otherwise, look for another one
+                    frame_ptr->flags.fetch_sub(1);
+                    continue;
                 }
 
                 this->_lut.erase(frame_ptr->key);
@@ -132,10 +171,7 @@ namespace hedge::db
                 frame_ptr->key = page;
             }
 
-            return {
-                this->_data.get(),
-                idx * 4096,
-                frame_ptr};
+            return {this->_data.get(), idx * PAGE_SIZE_IN_BYTES, frame_ptr};
         }
     }
 
@@ -143,58 +179,48 @@ namespace hedge::db
     {
         size_t idx = 0;
         _metadata* frame_ptr = nullptr;
-
         {
             std::shared_lock lk(this->_m);
-
             auto it = this->_lut.find(page);
             if(it == this->_lut.end())
                 return std::nullopt;
 
             idx = it.value();
-
             frame_ptr = &this->_frames[idx];
+            frame_ptr->flags.fetch_add(1);
 
             if(hint_evict)
                 frame_ptr->flags.fetch_and(~PAGE_FLAG_RECENTLY_USED);
             else
                 frame_ptr->flags.fetch_or(PAGE_FLAG_RECENTLY_USED);
-
-            frame_ptr->flags.fetch_add(1); // increase reference count
         }
 
-        return awaitable_page_guard{.pg = page_guard{this->_data.get(), idx * 4096, frame_ptr}};
+        return awaitable_page_guard{.pg = read_page_guard{this->_data.get(), idx * PAGE_SIZE_IN_BYTES, frame_ptr}};
     }
 
     std::optional<page_cache::awaitable_page_guard> page_cache::try_lookup(page_tag page, bool hint_evict)
     {
         size_t idx = 0;
         _metadata* frame_ptr = nullptr;
-
         {
             std::shared_lock lk(this->_m);
-
             auto it = this->_lut.find(page);
             if(it == this->_lut.end())
                 return std::nullopt;
 
             idx = it.value();
-
             frame_ptr = &this->_frames[idx];
-
-            // avoid co-awaiting on the page and transferring coroutine to an external executor
             if((frame_ptr->flags.load() & PAGE_FLAG_READY) == 0UL)
                 return std::nullopt;
 
-            frame_ptr->flags.fetch_add(1); // increase reference count
-
+            frame_ptr->flags.fetch_add(1);
             if(hint_evict)
                 frame_ptr->flags.fetch_and(~PAGE_FLAG_RECENTLY_USED);
             else
                 frame_ptr->flags.fetch_or(PAGE_FLAG_RECENTLY_USED);
         }
 
-        return awaitable_page_guard{.pg = page_guard{this->_data.get(), idx * 4096, frame_ptr}};
+        return awaitable_page_guard{.pg = read_page_guard{this->_data.get(), idx * PAGE_SIZE_IN_BYTES, frame_ptr}};
     }
 
     std::vector<std::optional<page_cache::awaitable_page_guard>> shared_page_cache::lookup_range(uint32_t fd, size_t start_page_index, size_t num_pages, bool hint_evict)
@@ -215,9 +241,9 @@ namespace hedge::db
         return results;
     }
 
-    std::vector<page_cache::page_guard> shared_page_cache::get_write_slots_range(uint32_t fd, size_t start_page_index, size_t num_pages)
+    std::vector<page_cache::write_page_guard> shared_page_cache::get_write_slots_range(uint32_t fd, size_t start_page_index, size_t num_pages)
     {
-        std::vector<page_cache::page_guard> results;
+        std::vector<page_cache::write_page_guard> results;
         results.reserve(num_pages);
 
         for(size_t i = 0; i < num_pages; ++i)
