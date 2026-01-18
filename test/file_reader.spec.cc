@@ -1,299 +1,320 @@
-#include <algorithm>
+// THIS FILE WAS WRITTEN FROM AN LLM AND HUMAN INSPECTED
+
+#include <fcntl.h>
+#include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
-#include <numeric>
-
-#include <error.hpp>
+#include <memory>
+#include <span>
+#include <variant>
+#include <vector>
+#include <string>
 
 #include "async/io_executor.h"
-#include "async/task.h"
+#include "async/wait_group.h"
+#include "cache.h"
 #include "fs/file_reader.h"
 #include "fs/fs.hpp"
-#include "utils.h"
+#include "types.h"
 
-namespace hedge::async
+namespace hedge::fs
 {
+    using namespace hedge::db;
+    using namespace hedge::async;
 
-    struct test_paginated_view : public ::testing::Test
+    static const std::string TEST_DIR = "/tmp/hh";
+    static const std::string TEST_FILE = TEST_DIR + "/file_reader_test";
+
+    class FileReaderTest : public ::testing::Test
     {
+    protected:
         void SetUp() override
         {
-            constexpr uint32_t QUEUE_DEPTH = 32;
-
-            this->_executor = executor_context::make_new(QUEUE_DEPTH);
-        }
-
-        void TearDown() override
-        {
-            this->_executor->shutdown();
-        }
-
-        std::shared_ptr<executor_context> _executor{};
-    };
-
-    TEST_F(test_paginated_view, test_one_page)
-    {
-        std::ofstream file("/tmp/test_file", std::ios::binary);
-
-        ASSERT_TRUE(file.is_open()) << "Failed to open file for writing: " << strerror(errno);
-
-        std::vector<uint8_t> data(64);
-        std::iota(data.begin(), data.end(), 0); // Fill with sequential bytes
-        file.write(reinterpret_cast<const char*>(data.data()), data.size());
-        file.close();
-
-        auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
-        ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
-
-        auto view = fs::file_reader{
-            fd.value(),
-            fs::file_reader_config{.start_offset = 0, .end_offset = 64, .read_ahead_size = 64}};
-
-        auto task = view.next();
-
-        auto maybe_span = this->_executor->sync_submit(std::move(task));
-
-        ASSERT_TRUE(maybe_span.has_value()) << "Expected a valid vector, but got an error: " << maybe_span.error().to_string();
-        ASSERT_EQ(maybe_span.value().size(), 64) << "Expected to read 64 bytes, but got " << maybe_span.value().size() << " bytes";
-        ASSERT_TRUE(std::ranges::equal(maybe_span.value(), data));
-    }
-
-    TEST_F(test_paginated_view, test_multiple_pages)
-    {
-        std::ofstream file("/tmp/test_file", std::ios::binary);
-
-        ASSERT_TRUE(file.is_open()) << "Failed to open file for writing: " << strerror(errno);
-
-        std::vector<uint8_t> data(64);
-        std::iota(data.begin(), data.end(), 0); // Fill with sequential bytes
-        file.write(reinterpret_cast<const char*>(data.data()), data.size());
-        file.close();
-
-        auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
-        ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
-
-        auto view = fs::file_reader{
-            fd.value(),
-            fs::file_reader_config{.start_offset = 0, .end_offset = 64, .read_ahead_size = 64},
-            this->_executor};
-
-        for(int i = 0; i < 4; i++)
-        {
-            auto task = view.next();
-
-            auto maybe_span = this->_executor->sync_submit(std::move(task));
-
-            ASSERT_TRUE(maybe_span.has_value()) << "Expected a valid vector, but got an error: " << maybe_span.error().to_string();
-            ASSERT_EQ(maybe_span.value().size(), 16) << "Expected to read 64 bytes, but got " << maybe_span.value().size() << " bytes";
-
-            auto sub_span = std::span(data).subspan(i * 16, 16);
-            auto sub_vector = std::vector<uint8_t>(sub_span.begin(), sub_span.end());
-
-            ASSERT_TRUE(std::ranges::equal(maybe_span.value(), sub_vector))
-                << "Expected to read sequential bytes, but got different data at page " << i;
-        }
-    }
-
-    TEST_F(test_paginated_view, test_clamp_at_end)
-    {
-        std::ofstream file("/tmp/test_file", std::ios::binary);
-
-        ASSERT_TRUE(file.is_open()) << "Failed to open file for writing: " << strerror(errno);
-
-        std::vector<uint8_t> data(64);
-        std::iota(data.begin(), data.end(), 0); // Fill with sequential bytes
-        file.write(reinterpret_cast<const char*>(data.data()), data.size());
-        file.close();
-
-        auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
-        ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
-
-        auto view = fs::file_reader{
-            fd.value(),
-            fs::file_reader_config{.start_offset = 0, .end_offset = 64, .read_ahead_size = 1000},
-            this->_executor};
-
-        auto task = view.next(); // Request more pages than available
-
-        auto maybe_span = this->_executor->sync_submit(std::move(task));
-
-        ASSERT_TRUE(maybe_span.has_value()) << "Expected a valid vector, but got an error: " << maybe_span.error().to_string();
-        ASSERT_EQ(maybe_span.value().size(), 64) << "Expected to read 64 bytes, but got " << maybe_span.value().size() << " bytes";
-        ASSERT_TRUE(std::ranges::equal(maybe_span.value(), data));
-    }
-
-    TEST_F(test_paginated_view, test_single_read_from_task)
-    {
-        std::ofstream file("/tmp/test_file", std::ios::binary);
-
-        ASSERT_TRUE(file.is_open()) << "Failed to open file for writing: " << strerror(errno);
-
-        std::vector<uint8_t> data(64);
-        std::iota(data.begin(), data.end(), 0); // Fill with sequential bytes
-        file.write(reinterpret_cast<const char*>(data.data()), data.size());
-        file.close();
-
-        auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
-        ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
-
-        auto view = fs::file_reader{
-            fd.value(),
-            fs::file_reader_config{.start_offset = 0, .end_offset = 64, .read_ahead_size = 1000},
-            this->_executor};
-
-        auto promise = std::promise<expected<std::span<uint8_t>>>{};
-        auto future = promise.get_future();
-
-        auto task_lambda = [&, promise = std::move(promise)]() mutable -> task<void>
-        {
-            auto maybe_vector = co_await view.next();
-
-            promise.set_value(std::move(maybe_vector));
-        };
-
-        this->_executor->submit_io_task(task_lambda());
-        auto maybe_span = future.get();
-
-        ASSERT_TRUE(maybe_span.has_value()) << "Expected a valid vector, but got an error: " << maybe_span.error().to_string();
-        ASSERT_EQ(maybe_span.value().size(), 64) << "Expected to read 64 bytes, but got " << maybe_span.value().size() << " bytes";
-        ASSERT_TRUE(std::ranges::equal(maybe_span.value(), data));
-    }
-
-    TEST_F(test_paginated_view, test_read_bytes_bug) // i'm reproducing here a bug i've found while developing... can't really give it a name to this config
-    {
-        std::ofstream file("/tmp/test_file", std::ios::binary);
-
-        ASSERT_TRUE(file.is_open()) << "Failed to open file for writing: " << strerror(errno);
-
-        std::vector<uint8_t> data(36864); // up to 1152 elements, 9 pages
-
-        struct key_like_t
-        {
-            size_t key;
-            uint8_t _padding[24];
-        };
-
-        auto span = view_as<key_like_t>(data);
-        for(size_t i = 0; i < 1028; i++)
-            span[i].key = i;
-
-        file.write(reinterpret_cast<const char*>(data.data()), data.size());
-        file.close();
-
-        auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
-        ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
-
-        auto view = fs::file_reader{
-            fd.value(),
-            fs::file_reader_config{.start_offset = 0, .end_offset = 36864, .read_ahead_size = 4096},
-            this->_executor};
-
-        for(int i = 0; i < 9; i++)
-        {
-            auto task = view.next();
-
-            auto maybe_vector = this->_executor->sync_submit(std::move(task));
-
-            ASSERT_TRUE(maybe_vector.has_value()) << "Expected a valid vector, but got an error: " << maybe_vector.error().to_string();
-            ASSERT_EQ(maybe_vector.value().size(), 4096) << "Expected to read 4096 bytes, but got " << maybe_vector.value().size() << " bytes";
-
-            auto sub_span = std::span(data).subspan(i * 4096, 4096);
-            auto sub_vector = std::vector<uint8_t>(sub_span.begin(), sub_span.end());
-
-            ASSERT_TRUE(std::ranges::equal(maybe_vector.value(), sub_vector))
-                << "Expected to read sequential bytes, but got different data at page " << i;
-
-            if(i == 8)
+            if(std::filesystem::exists(TEST_DIR))
             {
-                ASSERT_TRUE(view.is_eof()) << "Expected view to be at EOF after reading all pages";
+                std::filesystem::remove_all(TEST_DIR);
+            }
+            std::filesystem::create_directories(TEST_DIR);
+
+            try
+            {
+                executor_pool::init_static_pool(1, 32);
+            }
+            catch(...)
+            {
             }
         }
 
-        for(int i = 0; i < 4; i++)
+        void CreateTestFile(size_t size)
         {
-            auto task = view.next();
+            std::ofstream ofs(TEST_FILE, std::ios::binary);
+            std::vector<uint8_t> buffer(PAGE_SIZE_IN_BYTES);
 
-            auto maybe_vector = this->_executor->sync_submit(std::move(task));
+            size_t written = 0;
+            while(written < size)
+            {
+                size_t remaining = size - written;
+                size_t chunk = std::min(PAGE_SIZE_IN_BYTES, remaining);
 
-            ASSERT_TRUE(maybe_vector.has_value()) << "Expected a valid vector, but got an error: " << maybe_vector.error().to_string();
-            ASSERT_EQ(maybe_vector.value().size(), 0) << "Expected to read 0 bytes, but got " << maybe_vector.value().size() << " bytes";
-            ASSERT_TRUE(view.is_eof()) << "Expected view to be at EOF after reading all pages";
+                for(size_t j = 0; j < PAGE_SIZE_IN_BYTES; ++j)
+                {
+                    buffer[j] = (j < chunk) ? static_cast<uint8_t>((written + j) % 256) : 0;
+                }
+
+                ofs.write(reinterpret_cast<const char*>(buffer.data()), PAGE_SIZE_IN_BYTES);
+                written += chunk;
+                if(chunk < PAGE_SIZE_IN_BYTES) written += (PAGE_SIZE_IN_BYTES - chunk);
+            }
+            ofs.close();
         }
-    }
 
-    TEST_F(test_paginated_view, test_first_page_clamp)
+        task<void> PopulateCache(std::shared_ptr<shared_page_cache> cache, int fd, size_t start_page_idx, const std::vector<uint8_t>& blueprint)
+        {
+            for(size_t i = 0; i < blueprint.size(); ++i)
+            {
+                if(blueprint[i])
+                {
+                    size_t page_idx = start_page_idx + i;
+                    auto page_tag = hedge::db::to_page_tag(fd, page_idx * PAGE_SIZE_IN_BYTES);
+                    auto page_guard = cache->get_write_slot(page_tag);
+                    uint8_t* data_ptr = page_guard.data + page_guard.idx;
+
+                    auto read_response = co_await async::this_thread_executor()->submit_request(async::read_request{
+                        .fd = fd,
+                        .data = data_ptr,
+                        .offset = page_idx * PAGE_SIZE_IN_BYTES,
+                        .size = PAGE_SIZE_IN_BYTES,
+                    });
+
+                    std::cout << "Populated cache for page " << page_idx << std::endl;
+
+                    if(read_response.error_code != 0)
+                        throw std::runtime_error("Failed to populate cache at page " + std::to_string(page_idx) + ": " + strerror(read_response.error_code));
+
+                }
+            }
+            co_return;
+        }
+
+        task<std::string> VerifyReaderSequence(
+            hedge::fs::file& file_obj,
+            std::shared_ptr<shared_page_cache> cache,
+            size_t start_offset,
+            size_t end_offset,
+            size_t read_ahead,
+            size_t logical_file_size)
+        {
+            file_reader_config config{
+                .start_offset = start_offset,
+                .end_offset = end_offset,
+                .read_ahead_size = read_ahead};
+
+            file_reader reader(file_obj, config);
+            size_t current_offset = start_offset;
+
+            while(!reader.is_eof())
+            {
+                auto batch = reader.next(cache);
+                std::cout << "Batch size: " << batch.size() << std::endl;
+
+                if(batch.empty()) break;
+
+                for(auto& item : batch)
+                {
+                    std::cout << "Processing item at offset " << current_offset << std::endl;
+
+                    std::span<uint8_t> data_span;
+                    if(std::holds_alternative<file_reader::awaitable_read_request_t>(item))
+                    {
+                        auto& req = std::get<file_reader::awaitable_read_request_t>(item);
+                        auto result = co_await req.first;
+                        if(result.error_code != 0)
+                        {
+                            co_return "Read failed at " + std::to_string(current_offset) + ": " + strerror(result.error_code);
+                        }
+                        data_span = req.second;
+                        std::cout << "Span size (read request): " << data_span.size() << std::endl;
+                    }
+                    else
+                    {
+                        auto& pg_awaitable = std::get<file_reader::awaitable_page_guard_t>(item);
+                        auto pg = co_await pg_awaitable.first;
+                        data_span = pg_awaitable.second;
+                        std::cout << "Span size (page guard): " << data_span.size() << std::endl;
+                    }
+
+                    for(size_t i = 0; i < data_span.size(); ++i)
+                    {
+                        size_t file_abs_offset = current_offset + i;
+                        uint8_t expected = (file_abs_offset >= logical_file_size) ? 0 : static_cast<uint8_t>(file_abs_offset % 256);
+
+                        if(data_span[i] != expected)
+                        {
+                            co_return "Data mismatch at " + std::to_string(file_abs_offset) + 
+                                     " Exp: " + std::to_string(expected) + " Got: " + std::to_string(data_span[i]);
+                        }
+                    }
+                    current_offset += data_span.size();
+                }
+            }
+
+            if(current_offset != end_offset)
+                co_return "Short read. Got " + std::to_string(current_offset) + " Exp " + std::to_string(end_offset);
+
+            co_return "";
+        }
+    };
+
+    TEST_F(FileReaderTest, SequenceNotCachedAtAll)
     {
-        std::ofstream file("/tmp/test_file", std::ios::binary);
+        size_t pages = 4;
+        size_t size = pages * PAGE_SIZE_IN_BYTES;
+        std::vector<uint8_t> blueprint(pages, 0);
 
-        ASSERT_TRUE(file.is_open()) << "Failed to open file for writing: " << strerror(errno);
+        CreateTestFile(size);
+        auto file_res = hedge::fs::file::from_path(TEST_FILE, fs::file::open_mode::read_only, true);
+        ASSERT_TRUE(file_res.has_value());
+        auto& file_obj = file_res.value();
+        auto cache = std::make_shared<shared_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
 
-        std::vector<uint8_t> data(64);
-        std::iota(data.begin(), data.end(), 0); // Fill with sequential bytes
-        file.write(reinterpret_cast<const char*>(data.data()), data.size());
-        file.close();
+        auto error = executor_pool::executor_from_static_pool()->sync_submit([&]() -> task<std::string> {
+            co_await PopulateCache(cache, file_obj.id(), 0, blueprint);
+            co_return co_await VerifyReaderSequence(file_obj, cache, 0, size, size, size);
+        }());
 
-        auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
-        ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
-
-        auto view = fs::file_reader{
-            fd.value(),
-            fs::file_reader_config{.start_offset = 0, .end_offset = 50, .read_ahead_size = 4096},
-            this->_executor};
-
-        auto task = view.next();
-
-        auto maybe_span = this->_executor->sync_submit(std::move(task));
-
-        ASSERT_TRUE(maybe_span.has_value()) << "Expected a valid vector, but got an error: " << maybe_span.error().to_string();
-        ASSERT_EQ(maybe_span.value().size(), 50) << "Expected to read 64 bytes, but got " << maybe_span.value().size() << " bytes";
-
-        auto sub_span = std::span(data).subspan(0, 50);
-        auto sub_vector = std::vector(sub_span.begin(), sub_span.end());
-        ASSERT_TRUE(std::ranges::equal(maybe_span.value(), sub_vector));
+        EXPECT_EQ(error, "");
     }
 
-    TEST_F(test_paginated_view, test_last_page_clamp)
+    TEST_F(FileReaderTest, SequenceFullyCached)
     {
-        std::ofstream file("/tmp/test_file", std::ios::binary);
+        size_t pages = 4;
+        size_t size = pages * PAGE_SIZE_IN_BYTES;
+        std::vector<uint8_t> blueprint(pages, 1);
 
-        ASSERT_TRUE(file.is_open()) << "Failed to open file for writing: " << strerror(errno);
+        CreateTestFile(size);
+        auto file_res = hedge::fs::file::from_path(TEST_FILE, fs::file::open_mode::read_only, true);
+        ASSERT_TRUE(file_res.has_value());
+        auto& file_obj = file_res.value();
+        auto cache = std::make_shared<shared_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
 
-        std::vector<uint8_t> data(64);
-        std::iota(data.begin(), data.end(), 0); // Fill with sequential bytes
-        file.write(reinterpret_cast<const char*>(data.data()), data.size());
-        file.close();
+        auto error = executor_pool::executor_from_static_pool()->sync_submit([&]() -> task<std::string> {
+            co_await PopulateCache(cache, file_obj.id(), 0, blueprint);
+            co_return co_await VerifyReaderSequence(file_obj, cache, 0, size, size, size);
+        }());
 
-        auto fd = fs::file::from_path("/tmp/test_file", fs::file::open_mode::read_only, false, 64);
-        ASSERT_TRUE(fd.has_value()) << "Failed to open file: " << fd.error().to_string();
-
-        auto view = fs::file_reader{
-            fd.value(),
-            fs::file_reader_config{.start_offset = 0, .end_offset = 50, .read_ahead_size = 30},
-            this->_executor};
-
-        // first page
-        auto task = view.next();
-
-        auto maybe_span = this->_executor->sync_submit(std::move(task));
-
-        ASSERT_TRUE(maybe_span.has_value()) << "Expected a valid vector, but got an error: " << maybe_span.error().to_string();
-        ASSERT_EQ(maybe_span.value().size(), 30) << "Expected to read 30 bytes, but got " << maybe_span.value().size() << " bytes";
-
-        auto sub_span = std::span(data).subspan(0, 30);
-        auto sub_vector = std::vector(sub_span.begin(), sub_span.end());
-        ASSERT_TRUE(std::ranges::equal(maybe_span.value(), sub_vector));
-
-        // second and last page clamped page
-        task = view.next();
-
-        maybe_span = this->_executor->sync_submit(std::move(task));
-
-        ASSERT_TRUE(maybe_span.has_value()) << "Expected a valid vector, but got an error: " << maybe_span.error().to_string();
-        ASSERT_EQ(maybe_span.value().size(), 20) << "Expected to read 20 bytes, but got " << maybe_span.value().size() << " bytes";
-
-        sub_span = std::span(data).subspan(30, 20);
-        sub_vector = std::vector(sub_span.begin(), sub_span.end());
-        ASSERT_TRUE(std::ranges::equal(maybe_span.value(), sub_vector));
+        EXPECT_EQ(error, "");
     }
 
-} // namespace hedge::async
+    TEST_F(FileReaderTest, SequencePartiallyCached)
+    {
+        size_t pages = 4;
+        size_t size = pages * PAGE_SIZE_IN_BYTES;
+        std::vector<uint8_t> blueprint = {1, 0, 1, 0};
+
+        CreateTestFile(size);
+        auto file_res = hedge::fs::file::from_path(TEST_FILE, fs::file::open_mode::read_only, true);
+        ASSERT_TRUE(file_res.has_value());
+        auto& file_obj = file_res.value();
+        auto cache = std::make_shared<shared_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
+
+        auto error = executor_pool::executor_from_static_pool()->sync_submit([&]() -> task<std::string> {
+            co_await PopulateCache(cache, file_obj.id(), 0, blueprint);
+            co_return co_await VerifyReaderSequence(file_obj, cache, 0, size, size, size);
+        }());
+
+        EXPECT_EQ(error, "");
+    }
+
+    TEST_F(FileReaderTest, SecondLastCached_LastNot_Unaligned)
+    {
+        size_t extra = 500;
+        size_t size = (2 * PAGE_SIZE_IN_BYTES) + extra;
+        std::vector<uint8_t> blueprint = {0, 1, 0};
+
+        CreateTestFile(size);
+        auto file_res = hedge::fs::file::from_path(TEST_FILE, fs::file::open_mode::read_only, true);
+        ASSERT_TRUE(file_res.has_value());
+        auto& file_obj = file_res.value();
+        auto cache = std::make_shared<shared_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
+
+        auto error = executor_pool::executor_from_static_pool()->sync_submit([&]() -> task<std::string> {
+            co_await PopulateCache(cache, file_obj.id(), 0, blueprint);
+            co_return co_await VerifyReaderSequence(file_obj, cache, PAGE_SIZE_IN_BYTES, size, 2 * PAGE_SIZE_IN_BYTES, size);
+        }());
+
+        EXPECT_EQ(error, "");
+    }
+
+    TEST_F(FileReaderTest, LastCached_SecondLastNot_Unaligned)
+    {
+        size_t extra = 500;
+        size_t size = (2 * PAGE_SIZE_IN_BYTES) + extra;
+        std::vector<uint8_t> blueprint = {0, 0, 1};
+
+        CreateTestFile(size);
+        auto file_res = hedge::fs::file::from_path(TEST_FILE, fs::file::open_mode::read_only, true);
+        ASSERT_TRUE(file_res.has_value());
+        auto& file_obj = file_res.value();
+        auto cache = std::make_shared<shared_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
+
+        auto error = executor_pool::executor_from_static_pool()->sync_submit([&]() -> task<std::string> {
+            co_await PopulateCache(cache, file_obj.id(), 0, blueprint);
+            co_return co_await VerifyReaderSequence(file_obj, cache, PAGE_SIZE_IN_BYTES, size, 2 * PAGE_SIZE_IN_BYTES, size);
+        }());
+
+        EXPECT_EQ(error, "");
+    }
+
+    TEST_F(FileReaderTest, Coalescing_LastPage_UnalignedFile)
+    {
+        size_t extra = 100;
+        size_t size = 3 * PAGE_SIZE_IN_BYTES + extra;
+        std::vector<uint8_t> blueprint = {1, 0, 0, 0};
+
+        CreateTestFile(size);
+        auto file_res = hedge::fs::file::from_path(TEST_FILE, fs::file::open_mode::read_only, true);
+        ASSERT_TRUE(file_res.has_value());
+        auto& file_obj = file_res.value();
+        auto cache = std::make_shared<shared_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
+
+        auto error = executor_pool::executor_from_static_pool()->sync_submit([&]() -> task<std::string> {
+            co_await PopulateCache(cache, file_obj.id(), 0, blueprint);
+            co_return co_await VerifyReaderSequence(file_obj, cache, 0, size, size, size);
+        }());
+
+        EXPECT_EQ(error, "");
+    }
+
+    TEST_F(FileReaderTest, VerifyCoalescingBehavior)
+    {
+        size_t size = 4 * PAGE_SIZE_IN_BYTES;
+        std::vector<uint8_t> blueprint = {0, 1, 0, 0};
+
+        CreateTestFile(size);
+        auto file_res = hedge::fs::file::from_path(TEST_FILE, fs::file::open_mode::read_only, true);
+        ASSERT_TRUE(file_res.has_value());
+        auto& file_obj = file_res.value();
+        auto cache = std::make_shared<shared_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
+
+        auto error = executor_pool::executor_from_static_pool()->sync_submit([&]() -> task<std::string> {
+            co_await PopulateCache(cache, file_obj.id(), 0, blueprint);
+            file_reader_config config{0, size, size};
+            file_reader reader(file_obj, config);
+
+            auto batch = reader.next(cache);
+            if(batch.size() != 3) co_return "Expected batch size 3, got " + std::to_string(batch.size());
+            if(!std::holds_alternative<file_reader::awaitable_read_request_t>(batch[0])) co_return "Item 0 type err";
+            if(!std::holds_alternative<file_reader::awaitable_page_guard_t>(batch[1])) co_return "Item 1 type err";
+            if(!std::holds_alternative<file_reader::awaitable_read_request_t>(batch[2])) co_return "Item 2 type err";
+
+            for(auto& item : batch)
+            {
+                if(std::holds_alternative<file_reader::awaitable_read_request_t>(item)) co_await std::get<file_reader::awaitable_read_request_t>(item).first;
+                else co_await std::get<file_reader::awaitable_page_guard_t>(item).first;
+            }
+            co_return "";
+        }());
+
+        EXPECT_EQ(error, "");
+    }
+} // namespace hedge::fs

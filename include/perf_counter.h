@@ -35,24 +35,88 @@ namespace hedge::prof
 
     long long stop_counter(int fd);
 
-    struct avg_stat
+    struct counter_i
+    {
+        virtual void add(size_t c, size_t n = 1) = 0;
+        virtual void start() = 0;
+        virtual void stop(bool ignore = false) = 0;
+        virtual void reset() = 0;
+        [[nodiscard]] virtual double get() const = 0;
+        virtual ~counter_i() = default;
+    };
+
+    struct counter final : counter_i
     {
         std::size_t stat{0};
-        std::size_t count{1};
+        std::size_t count{0};
         inline static thread_local int fd;
 
-        void add(size_t c, size_t n = 1);
+        void add(size_t c, size_t n) final;
 
-        void start();
+        void start() final;
 
-        void stop(bool ignore = false);
+        void stop(bool ignore) final;
+        void reset() final;
 
-        void reset();
-
-        [[nodiscard]] double get() const;
-
-        static tsl::robin_map<std::string, avg_stat> PERF_STATS;
+        [[nodiscard]] double get() const final;
     };
+
+    struct noop_counter final : counter_i
+    {
+        void add(size_t /*n*/, size_t /*c*/) final {}
+
+        void start() final {}
+
+        void stop(bool /*ignore*/) final {}
+        void reset() final {}
+
+        [[nodiscard]] double get() const final { return 0.0; }
+    };
+
+    inline static noop_counter NOOP_COUNTER{};
+
+    template <size_t N>
+    struct fixed_string
+    {
+        char data[N];
+        constexpr fixed_string(const char (&str)[N])
+        {
+            for(size_t i = 0; i < N; ++i)
+                data[i] = str[i];
+        }
+        constexpr operator std::string_view() const { return {data, N - 1}; }
+    };
+
+    template <typename K, size_t Size>
+    struct fixed_set
+    {
+        std::array<K, Size> data;
+
+        constexpr auto find(const K& key) const
+        {
+            return std::find(data.begin(), data.end(), key);
+        }
+
+        constexpr bool contains(const K& key) const
+        {
+            return find(key) != data.end();
+        }
+
+        [[nodiscard]] constexpr size_t at(std::string_view k) const
+        {
+            return std::distance(data.begin(), find(k));
+        }
+    };
+
+    template <fixed_string name>
+    static counter_i& get()
+    {
+        static counter_i* instance = _acquire_counter_ptr(name);
+
+        return *instance;
+    }
+
+    counter_i* _acquire_counter_ptr(std::string_view name);
 
     void print_internal_perf_stats(bool reset = true);
 

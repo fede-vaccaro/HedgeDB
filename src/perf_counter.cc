@@ -22,7 +22,7 @@ sudo sh -c 'echo 0 >/proc/sys/kernel/kptr_restrict'
 namespace hedge::prof
 {
 
-    static constexpr bool PROFILING_ENABLED = false;
+    static constexpr bool PROFILING_ENABLED = true;
 
     int open_perf_counter(uint32_t type, uint64_t config)
     {
@@ -57,7 +57,7 @@ namespace hedge::prof
     }
     int make_counter();
 
-    void avg_stat::add(size_t c, size_t n)
+    void counter::add(size_t c, size_t n)
     {
         if(!PROFILING_ENABLED)
             return;
@@ -66,7 +66,7 @@ namespace hedge::prof
         std::atomic_ref<size_t>(count).fetch_add(n, std::memory_order::relaxed);
     }
 
-    void avg_stat::start()
+    void counter::start()
     {
         if(!PROFILING_ENABLED)
             return;
@@ -76,8 +76,12 @@ namespace hedge::prof
             int fd = open_perf_counter(PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
 
             if(fd < 0)
-                throw std::runtime_error("Failed to open perf counter: " + std::string(strerror(errno)));
+            {
+                std::string msg = "sudo sh -c 'echo 1 >/proc/sys/kernel/perf_event_paranoid'"
+                                  "sudo sh -c 'echo 0 >/proc/sys/kernel/kptr_restrict'";
 
+                throw std::runtime_error("Failed to open perf counter: " + std::string(strerror(errno)) + " . You might need to enable access to perf counters by running: \n" + msg);
+            }
             return fd;
         }();
 
@@ -86,26 +90,69 @@ namespace hedge::prof
         start_counter(fd);
     }
 
-    void avg_stat::stop(bool ignore)
+    void counter::stop(bool ignore)
     {
         if(!PROFILING_ENABLED)
             return;
 
         auto cycles = stop_counter(fd);
+
         if(ignore)
             return;
-        add(cycles);
+
+        this->add(cycles, 1);
     }
 
-    void avg_stat::reset()
+    void counter::reset()
     {
         stat = 0;
         count = 1;
     }
 
-    [[nodiscard]] double avg_stat::get() const
+    [[nodiscard]] double counter::get() const
     {
         return (double)this->stat / (double)count;
+    }
+
+    constexpr static auto keys = std::array{
+        // std::string_view{"cache_hits"},
+        // std::string_view{"lookup"},
+        // std::string_view{"get_slot"},
+        // std::string_view{"find_in_page"},
+        // std::string_view{"push_coro"},
+        // std::string_view{"resumed_count"},
+        // std::string_view{"avg_resumed_count"},
+        // std::string_view{"gc_coros"},
+        std::string_view{"merge_cache_bulk_lookup"},
+        std::string_view{"merge_cache_hits"},
+        std::string_view{"merge_cache_bulk_writes"},
+        std::string_view{"merge_cache_bulk_write_us"},
+        std::string_view{"merge_cache_bulk_writes_count"},
+        std::string_view{"cache_find_frame_spins"},
+        std::string_view{"coalesce_percentage"},
+        std::string_view{"file_reader_next"},
+        std::string_view{"consume_and_push"},
+    };
+
+    static constexpr fixed_set<std::string_view, keys.size()> _metrics_set = fixed_set(keys);
+
+    inline static std::array<std::unique_ptr<counter_i>, keys.size()> _counters = []()
+    {
+        std::array<std::unique_ptr<counter_i>, keys.size()> counters;
+        for(auto& k : counters)
+            k = std::make_unique<counter>();
+
+        return counters;
+    }();
+
+    counter_i* _acquire_counter_ptr(std::string_view name)
+    {
+        size_t idx = _metrics_set.at(name);
+
+        if(idx < _metrics_set.data.size())
+            return _counters[idx].get();
+
+        return &NOOP_COUNTER;
     }
 
     void print_internal_perf_stats(bool reset)
@@ -113,26 +160,16 @@ namespace hedge::prof
         if(!PROFILING_ENABLED)
             return;
 
-        for(const auto& [name, value] : avg_stat::PERF_STATS)
+        for(size_t i = 0; i < keys.size(); ++i)
         {
-            std::cout << "stat " << name << " : " << value.get() << std::endl;
-            if(reset)
-                avg_stat::PERF_STATS[name].reset();
+            auto& counter = _counters[i];
+            if(counter)
+            {
+                std::cout << keys[i] << ": " << counter->get() << "\n";
+                if(reset)
+                    counter->reset();
+            }
         }
     }
-
-    tsl::robin_map<std::string, avg_stat> avg_stat::PERF_STATS = []()
-    {
-        tsl::robin_map<std::string, avg_stat> initial_perfs;
-        initial_perfs.emplace("cache_hits", avg_stat());
-        initial_perfs.emplace("lookup", avg_stat());
-        initial_perfs.emplace("get_slot", avg_stat());
-        initial_perfs.emplace("find_in_page", avg_stat());
-        initial_perfs.emplace("push_coro", avg_stat());
-        initial_perfs.emplace("resumed_count", avg_stat());
-        initial_perfs.emplace("avg_resumed_count", avg_stat());
-        initial_perfs.emplace("gc_coros", avg_stat());
-        return initial_perfs;
-    }();
 
 } // namespace hedge::prof

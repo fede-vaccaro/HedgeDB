@@ -22,6 +22,7 @@ Diagnostics:
         "readability-identifier-length",
         "readability-redundant-member-init",
         "performance-avoid-endl",
+        "readability-convert-member-functions-to-static",
       ]
 
 # Enable header insertion when using code completion

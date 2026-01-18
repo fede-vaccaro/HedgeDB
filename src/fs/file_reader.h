@@ -27,7 +27,7 @@ namespace hedge::fs
 
     class file_reader
     {
-        const fs::file& _fd;
+        const fs::file& _file;
         file_reader_config _config;
         size_t _current_offset{0};
         aligned_buffer_t _buffer = aligned_buffer_t(nullptr, std::free);
