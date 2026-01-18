@@ -198,6 +198,7 @@ namespace hedge::db
                                                                           mem_index* index,
                                                                           size_t num_partition_exponent,
                                                                           size_t flush_iteration,
+                                                                          const std::shared_ptr<db::shared_page_cache>& cache,
                                                                           bool use_odirect)
     {
         if(num_partition_exponent > 16)
@@ -260,6 +261,7 @@ namespace hedge::db
                                                    path,
                                                    std::exchange(current_partition_entries, page_aligned_buffer<index_entry_t>(partition_estimated_size)),
                                                    current_partition_id,
+                                                   cache,
                                                    use_odirect));
 
                 curr_partition_count = 0;
@@ -300,7 +302,9 @@ namespace hedge::db
     }
 
     hedge::expected<sorted_index>
-    index_ops::save_as_sorted_index(const std::filesystem::path& path, page_aligned_buffer<index_entry_t>&& sorted_keys, size_t upper_bound, bool use_odirect)
+    index_ops::save_as_sorted_index(const std::filesystem::path& path, page_aligned_buffer<index_entry_t>&& sorted_keys, size_t upper_bound,
+                                    const std::shared_ptr<db::shared_page_cache>& cache,
+                                    bool use_odirect)
     {
         // Step 1: Generate the meta-index from the sorted keys.
         auto meta_index = create_meta_index<index_entry_t, PAGE_SIZE_IN_BYTES>(sorted_keys);
@@ -369,6 +373,17 @@ namespace hedge::db
         // Step 3: Create the sorted_index object to represent the file.
         if(!use_odirect)
             posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+
+        if(cache != nullptr)
+        {
+            size_t curr_offset = 0;
+            auto pages = cache->get_write_slots_range(maybe_sorted_index_file.value().id(), 0, (footer.index_end_offset + index_padding_bytes) / PAGE_SIZE_IN_BYTES);
+            for(auto& page : pages)
+            {
+                std::memcpy(page.data + page.idx, reinterpret_cast<uint8_t*>(sorted_keys.data()) + curr_offset, PAGE_SIZE_IN_BYTES);
+                curr_offset += PAGE_SIZE_IN_BYTES;
+            }
+        }
 
         constexpr size_t REF_PAGE_SIZE = 4096;
         constexpr size_t KEYS_PER_META_INDEX_PAGE = REF_PAGE_SIZE / sizeof(meta_index_entry);
@@ -502,7 +517,7 @@ namespace hedge::db
         auto fd_maybe = co_await fs::file::from_path_async(new_path,
                                                            fs::file::open_mode::write_new,
                                                            async::this_thread_executor(),
-                                                           false,
+                                                           true,
                                                            estimated_size);
 
         if(!fd_maybe.has_value())
@@ -527,23 +542,13 @@ namespace hedge::db
 
         // Create rolling buffers for both readers
         // Those will maintain a sliding window over the data read from disk
-        auto lhs_rbuf = rolling_buffer(config.read_ahead_size * 1.5);
-        auto rhs_rbuf = rolling_buffer(config.read_ahead_size * 1.5);
+        auto lhs_rbuf = rolling_buffer(config.read_ahead_size);
+        auto rhs_rbuf = rolling_buffer(config.read_ahead_size);
 
         using read_response_with_buffer_span_t = std::pair<async::read_response, std::span<uint8_t>>;
         using page_guard_with_buffer_span_t = std::pair<db::page_cache::read_page_guard, std::span<uint8_t>>;
 
         using unpacked_t = std::variant<page_guard_with_buffer_span_t, read_response_with_buffer_span_t>;
-
-        auto span_from_unpacked = hedge::overloaded{
-            [](const page_guard_with_buffer_span_t& page_guard)
-            {
-                return page_guard.second;
-            },
-            [](const read_response_with_buffer_span_t& read_response)
-            {
-                return read_response.second;
-            }};
 
         [[maybe_unused]] auto print_type_from_unpacked = hedge::overloaded{
             [](const page_guard_with_buffer_span_t&)
@@ -581,13 +586,11 @@ namespace hedge::db
         size_t bytes_written = 0;
 
         // Meta-index entries collected during the merge
-        std::vector<meta_index_entry> merged_meta_index;
+        size_t meta_index_entries = 0;
+        auto merged_meta_index = page_aligned_buffer<meta_index_entry>(max_new_meta_index_entries);
 
-        std::vector<fs::file_reader::awaitable_from_cache_or_fs_t> lhs_pending_reads;
-        std::vector<fs::file_reader::awaitable_from_cache_or_fs_t> rhs_pending_reads;
-
-        lhs_pending_reads = lhs_reader.next(cache);
-        rhs_pending_reads = rhs_reader.next(cache);
+        std::vector<fs::file_reader::awaitable_from_cache_or_fs_t> lhs_pending_reads = lhs_reader.next(config.try_reading_from_cache ? cache : nullptr);
+        std::vector<fs::file_reader::awaitable_from_cache_or_fs_t> rhs_pending_reads = rhs_reader.next(config.try_reading_from_cache ? cache : nullptr);
 
         int PRINT_TARGET_BUFF = 0;
 
@@ -601,8 +604,8 @@ namespace hedge::db
                     co_return hedge::error("Failed to read from LHS during buffer refresh: " + maybe_read.error().to_string());
 
                 // fetch data from LHS
-                auto span = std::visit([](const auto& unpacked)
-                                       { return unpacked.second; },
+                auto span = std::visit([](const auto& arg)
+                                       { return arg.second; },
                                        maybe_read.value());
 
                 // print span
@@ -641,10 +644,12 @@ namespace hedge::db
             // prepare new requests
             if(!lhs_reader.is_eof())
             {
-                lhs_pending_reads = lhs_reader.next(cache);
+                lhs_pending_reads = lhs_reader.next(config.try_reading_from_cache ? cache : nullptr);
             }
             else
+            {
                 lhs_rbuf.consume_and_push({});
+            }
 
             for(auto& read_mailbox : rhs_pending_reads)
             {
@@ -653,7 +658,8 @@ namespace hedge::db
                     co_return hedge::error("Failed to read from RHS during buffer refresh: " + maybe_read.error().to_string());
 
                 // fetch data from RHS
-                auto span = std::visit(span_from_unpacked, maybe_read.value());
+                auto span = std::visit([](const auto& arg)
+                                       { return arg.second; }, maybe_read.value());
 
                 // print span
                 // [[maybe_unused]] auto* start_it = reinterpret_cast<index_entry_t*>(span.begin().base());
@@ -690,9 +696,11 @@ namespace hedge::db
 
             // prepare new requests
             if(!rhs_reader.is_eof())
-                rhs_pending_reads = rhs_reader.next(cache);
+                rhs_pending_reads = rhs_reader.next(config.try_reading_from_cache ? cache : nullptr);
             else
+            {
                 rhs_rbuf.consume_and_push({});
+            }
 
             co_return hedge::ok();
         };
@@ -744,7 +752,7 @@ namespace hedge::db
         auto reset_write_buffer = [&write_buffer, &write_it]()
         {
             write_it = write_buffer.begin();
-            write_buffer.zero();
+            // write_buffer.zero();
         };
 
         [[maybe_unused]] auto print_buffer = [&write_buffer, &PRINT_TARGET_BUFF]()
@@ -759,7 +767,10 @@ namespace hedge::db
             // PRINT_TARGET_BUFF--;
         };
 
-        auto flush_buffer = [&write_buffer, &executor, &output_fd, &write_it](size_t offset) -> async::awaitable_mailbox<async::write_response>
+        std::vector<page_cache::write_page_guard> keep_hot;
+        keep_hot.reserve((estimated_size / PAGE_SIZE_IN_BYTES) + 1);
+
+        auto flush_buffer = [&](size_t offset) -> async::awaitable_mailbox<async::write_response>
         {
             // std::cout << "FLUSHING\n";
 
@@ -774,6 +785,49 @@ namespace hedge::db
                 .size = std::distance(write_buffer.begin(), write_it) * sizeof(index_entry_t),
                 .offset = offset});
 
+            if(config.cache_output_index && cache != nullptr)
+            {
+                // std::cout << "Precaching merged index data to cache...\n";
+                // Copy new pages to cache
+                // size_t num_written_pages = write_res.value().bytes_written / PAGE_SIZE_IN_BYTES;
+                size_t num_written_pages = (std::distance(write_buffer.begin(), write_it) * sizeof(index_entry_t)) / PAGE_SIZE_IN_BYTES;
+                size_t num_written_bytes = num_written_pages * PAGE_SIZE_IN_BYTES;
+
+                assert(bytes_written % PAGE_SIZE_IN_BYTES == 0);
+                assert(num_written_pages != 0);
+
+                prof::get<"merge_cache_bulk_write_us">().start();
+                prof::get<"merge_cache_bulk_writes">().start();
+                size_t start_page = bytes_written / PAGE_SIZE_IN_BYTES;
+                auto page_guards = cache->get_write_slots_range(read_fd.value().id(), start_page, num_written_pages);
+                prof::get<"merge_cache_bulk_writes">().stop();
+                
+                // std::cout << "requested slots for: " << read_fd.value().id() << " path:" << read_fd.value().path() << "\n";
+
+                size_t cur_page = 0;
+                for(auto& page : page_guards)
+                {
+                    assert(cur_page < page_guards.size());
+
+                    auto* dst = page.data + page.idx;
+                    auto* src_begin = reinterpret_cast<uint8_t*>(write_buffer.begin()) + (cur_page * PAGE_SIZE_IN_BYTES);
+                    auto* src_end = reinterpret_cast<uint8_t*>(write_buffer.begin()) + ((cur_page + 1) * PAGE_SIZE_IN_BYTES);
+
+                    assert(src_begin < reinterpret_cast<uint8_t*>(write_buffer.end()));
+                    assert(src_end <= reinterpret_cast<uint8_t*>(write_buffer.end()));
+
+                    std::memcpy(dst, src_begin, PAGE_SIZE_IN_BYTES);
+
+                    ++cur_page;
+                }
+
+                for(auto& page : page_guards)
+                    keep_hot.emplace_back(std::move(page));
+
+                prof::get<"merge_cache_bulk_write_us">().stop();
+                prof::get<"merge_cache_bulk_writes_count">().add(1, 0);
+            }
+
             // auto res = co_await awaitable_write_response;
 
             // if(res.error_code != 0)
@@ -782,9 +836,6 @@ namespace hedge::db
             // co_return res;
             return awaitable_write_response;
         };
-
-        std::vector<page_cache::write_page_guard> keep_hot;
-        keep_hot.reserve((estimated_size / PAGE_SIZE_IN_BYTES) + 1);
 
         /*
         -- Step 1: Main merge loop. Here happen the comparisons between the two buffer --
@@ -832,7 +883,10 @@ namespace hedge::db
                     last_written_key = new_item.key;
 
                     if(indexed_keys % INDEX_PAGE_NUM_ENTRIES == 0)
-                        merged_meta_index.emplace_back(last_written_key);
+                    {
+                        // merged_meta_index.emplace_back(last_written_key);
+                        merged_meta_index[meta_index_entries++] = meta_index_entry{last_written_key};
+                    }
 
                     if(buffer_full())
                         break; // The output buffer is full, exit loop to write to disk
@@ -856,49 +910,6 @@ namespace hedge::db
                 // co_return write_res.error();
 
                 // co_await async::this_thread_executor()->yield();
-
-                if(config.precache_output_vec && cache != nullptr)
-                {
-                    // Copy new pages to cache
-                    // size_t num_written_pages = write_res.value().bytes_written / PAGE_SIZE_IN_BYTES;
-                    size_t num_written_pages = (std::distance(write_buffer.begin(), write_it) * sizeof(index_entry_t)) / PAGE_SIZE_IN_BYTES;
-                    size_t num_written_bytes = num_written_pages * PAGE_SIZE_IN_BYTES;
-
-                    assert(bytes_written % PAGE_SIZE_IN_BYTES == 0);
-                    assert(num_written_pages != 0);
-
-                    auto t0 = std::chrono::high_resolution_clock::now();
-                    prof::get<"merge_cache_bulk_write_us">().start();
-                    size_t start_page = bytes_written / PAGE_SIZE_IN_BYTES;
-                    auto page_guards = cache->get_write_slots_range(read_fd.value().id(), start_page, num_written_pages);
-
-                    // std::cout << "requested slots for: " << read_fd.value().id() << " path:" << read_fd.value().path() << "\n";
-
-                    size_t cur_page = 0;
-                    for(auto& page : page_guards)
-                    {
-                        assert(cur_page < page_guards.size());
-
-                        auto* dst = page.data + page.idx;
-                        auto* src_begin = reinterpret_cast<uint8_t*>(write_buffer.begin()) + (cur_page * PAGE_SIZE_IN_BYTES);
-                        auto* src_end = reinterpret_cast<uint8_t*>(write_buffer.begin()) + ((cur_page + 1) * PAGE_SIZE_IN_BYTES);
-
-                        assert(src_begin < reinterpret_cast<uint8_t*>(write_buffer.end()));
-                        assert(src_end <= reinterpret_cast<uint8_t*>(write_buffer.end()));
-
-                        std::memcpy(dst, src_begin, PAGE_SIZE_IN_BYTES);
-
-                        ++cur_page;
-                    }
-
-                    for(auto& page : page_guards)
-                        keep_hot.emplace_back(std::move(page));
-
-                    auto t1 = std::chrono::high_resolution_clock::now();
-                    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-                    prof::get<"merge_cache_bulk_write_us">().add(duration);
-                    prof::get<"merge_cache_bulk_writes_count">().add(1, 0);
-                }
 
                 auto write_res = co_await flush_awaitable;
                 if(write_res.error_code != 0)
@@ -975,7 +986,9 @@ namespace hedge::db
                 last_written_key = new_item.key;
 
                 if(indexed_keys % INDEX_PAGE_NUM_ENTRIES == 0)
-                    merged_meta_index.emplace_back(new_item.key);
+                {
+                    merged_meta_index[meta_index_entries++] = meta_index_entry{new_item.key};
+                }
             }
         }
 
@@ -1000,8 +1013,9 @@ namespace hedge::db
                 write_item(*non_empty_view.it());
 
                 if(indexed_keys % INDEX_PAGE_NUM_ENTRIES == 0)
-                    merged_meta_index.emplace_back(non_empty_view.it()->key);
-
+                {
+                    merged_meta_index[meta_index_entries++] = meta_index_entry{non_empty_view.it()->key};
+                }
                 last_written_key = non_empty_view.it()->key;
 
                 non_empty_view.it()++;
@@ -1032,8 +1046,9 @@ namespace hedge::db
         // The condition is needed to write the last meta-index entry if the total number of indexed keys is not a multiple of the page size
         // We avoid entering in this condition if this key was already recorded (as happens when the last written key aligns with the page size)
         if(indexed_keys % INDEX_PAGE_NUM_ENTRIES != 0)
-            merged_meta_index.emplace_back(last_written_key);
-
+        {
+            merged_meta_index[meta_index_entries++] = meta_index_entry{last_written_key};
+        }
         // Final buffer flush
         // align write_it to page size
         size_t last_flush_keys = std::distance(write_buffer.begin(), write_it);
@@ -1074,13 +1089,20 @@ namespace hedge::db
         */
         // Write meta-index
         fb.meta_index_start_offset = bytes_written;
-        fb.meta_index_entries = merged_meta_index.size();
+
+        // resize meta index
+        merged_meta_index.resize(meta_index_entries);
+
+        fb.meta_index_entries = meta_index_entries;
+
+        // Consider padding for meta-index
+        size_t meta_index_padding_size = compute_alignment_padding<meta_index_entry>(meta_index_entries);
 
         {
             auto res = co_await executor->submit_request(async::write_request{
                 .fd = output_fd.fd(),
                 .data = reinterpret_cast<uint8_t*>(merged_meta_index.data()),
-                .size = merged_meta_index.size() * sizeof(meta_index_entry),
+                .size = (merged_meta_index.size() * sizeof(meta_index_entry)) + meta_index_padding_size,
                 .offset = bytes_written});
 
             if(res.error_code != 0)
@@ -1089,24 +1111,7 @@ namespace hedge::db
             bytes_written += res.bytes_written;
         }
 
-        fb.meta_index_end_offset = bytes_written;
-
-        // Write meta index padding if any
-        size_t meta_index_padding_size = compute_alignment_padding<meta_index_entry>(merged_meta_index.size());
-        if(meta_index_padding_size > 0)
-        {
-            auto padding = std::vector<uint8_t>(meta_index_padding_size, 0);
-            auto res = co_await executor->submit_request(async::write_request{
-                .fd = output_fd.fd(),
-                .data = padding.data(),
-                .size = meta_index_padding_size,
-                .offset = bytes_written});
-
-            if(res.error_code != 0)
-                co_return hedge::error("Failed to write meta index padding to file: " + std::string(strerror(res.error_code)));
-
-            bytes_written += res.bytes_written;
-        }
+        fb.meta_index_end_offset = (bytes_written - meta_index_padding_size);
 
         fb.footer_start_offset = bytes_written;
 
@@ -1134,14 +1139,14 @@ namespace hedge::db
         }
 
         // Sync to disk
-        if(config.create_new_with_odirect)
-        {
-            auto fsync_res = co_await executor->submit_request(async::fdatasync_request{
-                .fd = output_fd.fd()});
+        // if(config.create_new_with_odirect)
+        // {
+        //     auto fsync_res = co_await executor->submit_request(async::fdatasync_request{
+        //         .fd = output_fd.fd()});
 
-            if(fsync_res.error_code != 0)
-                co_return hedge::error("Failed to fsync merged index file: " + std::string(strerror(-fsync_res.error_code)));
-        }
+        //     if(fsync_res.error_code != 0)
+        //         co_return hedge::error("Failed to fsync merged index file: " + std::string(strerror(-fsync_res.error_code)));
+        // }
 
         constexpr size_t REF_PAGE_SIZE = 4096;
         constexpr size_t KEYS_PER_META_INDEX_PAGE = REF_PAGE_SIZE / sizeof(meta_index_entry);
@@ -1150,22 +1155,20 @@ namespace hedge::db
         // In this case the super index would be 512 * 16 bytes = 8KB
         std::optional<page_aligned_buffer<meta_index_entry>> super_index;
 
-        auto page_aligned_meta_index = page_aligned_buffer<meta_index_entry>(merged_meta_index.size());
+        // auto page_aligned_meta_index = page_aligned_buffer<meta_index_entry>(merged_meta_index.size());
 
         // assert(std::is_sorted(merged_meta_index.begin(), merged_meta_index.end(), [](const meta_index_entry& a, const meta_index_entry& b)
         //   { return a.key < b.key; }));
 
-        std::copy(merged_meta_index.begin(), merged_meta_index.end(), page_aligned_meta_index.begin());
+        // std::copy(merged_meta_index.begin(), merged_meta_index.end(), page_aligned_meta_index.begin());
 
         if(merged_meta_index.size() > KEYS_PER_META_INDEX_PAGE * SUPER_INDEX_ENABLED_THRESHOLD)
-            super_index = create_meta_index<meta_index_entry, REF_PAGE_SIZE>(page_aligned_meta_index);
-
-        merged_meta_index.shrink_to_fit();
+            super_index = create_meta_index<meta_index_entry, REF_PAGE_SIZE>(merged_meta_index);
 
         sorted_index result{
             std::move(read_fd.value()),
             {},
-            std::move(page_aligned_meta_index),
+            std::move(merged_meta_index),
             footer};
 
         result._super_index = std::move(super_index);
