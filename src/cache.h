@@ -26,20 +26,20 @@ namespace hedge::db
 {
     struct alignas(8) page_tag
     {
-        uint32_t fd;
+        uint64_t id;
         uint32_t page_index;
 
         bool operator==(const page_tag& other) const
         {
-            return fd == other.fd && page_index == other.page_index;
+            return id == other.id && page_index == other.page_index;
         }
     };
 
-    inline page_tag to_page_tag(uint32_t fd, size_t offset)
+    inline page_tag to_page_tag(uint64_t id, size_t offset)
     {
         assert(offset % PAGE_SIZE_IN_BYTES == 0);
 
-        return page_tag{.fd = fd, .page_index = static_cast<uint32_t>(offset / PAGE_SIZE_IN_BYTES)};
+        return page_tag{.id = id, .page_index = static_cast<uint32_t>(offset / PAGE_SIZE_IN_BYTES)};
     }
 } // namespace hedge::db
 
@@ -52,7 +52,7 @@ namespace std
         {
             size_t h;
 
-            h = (static_cast<size_t>(page_id.fd) << 32);
+            h = (static_cast<size_t>(page_id.id) << 32);
             h |= page_id.page_index;
 
             h ^= h >> 33;
@@ -155,19 +155,20 @@ namespace hedge::db
             template <typename PROMISE_TYPE>
             std::coroutine_handle<> await_suspend(std::coroutine_handle<PROMISE_TYPE> continuation) noexcept
             {
-                prof::avg_stat::PERF_STATS["push_coro"].start();
+                prof::get<"push_coro">().start();
 
                 std::lock_guard lk(pg._frame->waiters_mutex);
                 if((pg._frame->flags.load() & PAGE_FLAG_READY) != 0UL)
                 {
-                    prof::avg_stat::PERF_STATS["push_coro"].stop(true);
+                    prof::get<"push_coro">().stop(true);
                     return continuation;
                 }
                 auto root_coro = continuation.promise()._root_coro;
                 auto root_task = async::this_thread_executor()->extract_task(root_coro);
 
                 pg._frame->waiters.emplace_back(std::move(root_task), continuation);
-                prof::avg_stat::PERF_STATS["push_coro"].stop();
+                prof::get<"push_coro">()
+                .stop();
 
                 return std::noop_coroutine();
             }
@@ -218,8 +219,8 @@ namespace hedge::db
             return this->_caches.get()[hash].lookup(page);
         }
 
-        std::vector<page_cache::write_page_guard> get_write_slots_range(uint32_t fd, size_t start_page_index, size_t num_pages);
-        std::vector<std::optional<page_cache::awaitable_page_guard>> lookup_range(uint32_t fd, size_t start_page_index, size_t num_pages, bool hint_evict);
+        std::vector<page_cache::write_page_guard> get_write_slots_range(uint64_t id, size_t start_page_index, size_t num_pages);
+        std::vector<std::optional<page_cache::awaitable_page_guard>> lookup_range(uint64_t id, size_t start_page_index, size_t num_pages, bool hint_evict);
     };
 
     class point_cache

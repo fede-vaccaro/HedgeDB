@@ -58,7 +58,11 @@ namespace hedge::db
          * @return An `expected<sorted_index>` containing the newly created `sorted_index` object (representing the file)
          * on success, or an error if file writing fails.
          */
-        static hedge::expected<sorted_index> save_as_sorted_index(const std::filesystem::path& path, page_aligned_buffer<index_entry_t>&& sorted_keys, size_t upper_bound, bool use_odirect);
+        static hedge::expected<sorted_index> save_as_sorted_index(
+            const std::filesystem::path& path,
+            page_aligned_buffer<index_entry_t>&& sorted_keys,
+            size_t upper_bound,
+            bool use_odirect);
 
         /**
          * @brief Flushes one or more `mem_index` instances to disk, creating potentially multiple `sorted_index` files based on key partitioning.

@@ -30,9 +30,11 @@ namespace hedge::db
          * @brief Constructs a rolling_buffer.
          * @param reader An rvalue reference to an `fs::file_reader` which will be used to fetch data.
          */
-        rolling_buffer()
+        rolling_buffer(size_t initial_capacity)
         {
-            this->_init(); // Initialize the view and iterator for the (initially empty) buffer.
+            this->_buffer.reserve(initial_capacity);
+            this->_view = view_as<index_entry_t>(this->_buffer);
+            this->_it = this->_view.begin();
         }
 
         /**
@@ -90,6 +92,7 @@ namespace hedge::db
          */
         void _consume_and_push(std::span<uint8_t> new_buffer_view)
         {
+            prof::get<"consume_and_push">().start();
             /*
                 What happens here:
                 1. Erase the portion of the buffer that has already been processed (from begin up to the current byte iterator position).
@@ -97,28 +100,23 @@ namespace hedge::db
                 3. Update the span `_view` to reflect the potentially changed buffer content and size.
                 4. Reset the read iterator `this->_it`, since this->_view has changed.
             */
+
+            // size_t distance_to_end = std::distance(this->_it, this->_view.end());
             this->_buffer.erase(this->_buffer.begin(), this->_buffer_it());
             this->_buffer.insert(this->_buffer.end(), new_buffer_view.begin(), new_buffer_view.end());
             this->_view = view_as<index_entry_t>(this->_buffer);
-            // if(!std::is_sorted(this->_view.begin(), this->_view.end()))
+
+            // if(!std::is_sorted(this->_view.begin(), this->_view.begin() + distance_to_end + 1))
             // {
             //     std::cout << "ROLLING BUFFER NOT SORTED!\n";
-            //     for(auto& entry : this->_view)
-            //         std::cout << entry.key.to_string() << "\n";
+            //     std::cout << "Distance to end: " << distance_to_end << "\n";
+            //     // for(auto& entry : std::span<index_entry_t>{this->_view.begin(), this->_view.begin() + distance_to_end + 1})
+            //     //     std::cout << entry.key.to_string() << "\n";
             //     myassert(false, "Rolling buffer is not sorted!");
             // }
 
             this->_it = this->_view.begin();
-        }
-
-        /**
-         * @brief Initializes the view and iterator based on the initial (empty) buffer state.
-         */
-        void _init()
-        {
-            // Even though the buffer is initially empty, we need to set up the view and iterator correctly.
-            this->_view = view_as<index_entry_t>(this->_buffer);
-            this->_it = this->_view.begin();
+            prof::get<"consume_and_push">().stop();
         }
     };
 

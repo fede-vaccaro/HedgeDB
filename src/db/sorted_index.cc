@@ -139,8 +139,8 @@ namespace hedge::db
         // start_counter(fd);
         std::optional<page_cache::read_page_guard> opt_page_guard;
         std::optional<page_cache::write_page_guard> opt_write_guard;
-        
-        auto page_tag = to_page_tag(static_cast<uint32_t>(this->fd()), page_start_offset);
+
+        auto page_tag = to_page_tag(this->id(), page_start_offset);
 
         std::unique_ptr<uint8_t> data; // might be needed for holding a temporary memory allocation
         uint8_t* page_ptr = nullptr;
@@ -148,26 +148,26 @@ namespace hedge::db
 
         if(!should_read_from_fs)
         {
-            prof::avg_stat::PERF_STATS["lookup"].start();
+            prof::get<"lookup">().start();
             auto maybe_page_guard = cache->lookup(page_tag);
 
             if(maybe_page_guard.has_value())
             {
                 opt_page_guard = std::move(co_await maybe_page_guard.value());
                 page_ptr = opt_page_guard->data + opt_page_guard->idx;
-                prof::avg_stat::PERF_STATS["cache_hits"].add(1);
-                prof::avg_stat::PERF_STATS["lookup"].stop(false);
+                prof::get<"cache_hits">().add(1);
+                prof::get<"lookup">().stop(false);
 
                 // std::cout << "cache hit for fd " << this->fd() << " and file " << this->path() << " page offset " << page_start_offset << "\n";
 
                 // print meta index
                 // size_t count = 0;
                 // for(const auto& entry : this->_meta_index)
-                    // std::cout << "Meta index entry key: " << count++ << " " << entry.key << "\n";
+                // std::cout << "Meta index entry key: " << count++ << " " << entry.key << "\n";
             }
             else
             {
-                prof::avg_stat::PERF_STATS["lookup"].stop(true);
+                prof::get<"lookup">().stop(true);
             }
         }
 
@@ -175,15 +175,15 @@ namespace hedge::db
         {
             should_read_from_fs = true;
 
-            prof::avg_stat::PERF_STATS["get_slot"].start();
+            prof::get<"get_slot">().start();
             auto maybe_write_slot = cache->get_write_slot(page_tag);
 
             opt_write_guard = std::move(maybe_write_slot);
             page_ptr = opt_write_guard->data + opt_write_guard->idx;
 
-            prof::avg_stat::PERF_STATS["get_slot"].stop();
+            prof::get<"get_slot">().stop();
 
-            prof::avg_stat::PERF_STATS["cache_hits"].add(0);
+            prof::get<"cache_hits">().add(0);
         }
 
         if(should_read_from_fs)
@@ -221,9 +221,9 @@ namespace hedge::db
                 page_end_ptr = page_start_ptr + entries_on_last_page;
         }
 
-        prof::avg_stat::PERF_STATS["find_in_page"].start();
+        prof::get<"find_in_page">().start();
         hedge::expected<std::optional<value_ptr_t>> res = sorted_index::_find_in_page(key, page_start_ptr, page_end_ptr);
-        prof::avg_stat::PERF_STATS["find_in_page"].stop(should_read_from_fs);
+        prof::get<"find_in_page">().stop(should_read_from_fs);
 
         co_return res;
     }

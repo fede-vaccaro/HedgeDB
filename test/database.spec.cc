@@ -124,8 +124,8 @@ namespace hedge::db
         db_config config;
         config.auto_compaction = true;
         config.keys_in_mem_before_flush = this->MEMTABLE_CAPACITY;
-        config.compaction_read_ahead_size_bytes = 16 * 1024 * 1024;
-        config.num_partition_exponent = 0;
+        config.compaction_read_ahead_size_bytes = 2 * 1024 * 1024;
+        config.num_partition_exponent = 4;
         config.target_compaction_size_ratio = 0.90;
         config.use_odirect_for_indices = true;
         config.index_page_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024;
@@ -200,6 +200,8 @@ namespace hedge::db
         t1 = std::chrono::high_resolution_clock::now();
         duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         std::cout << "Total duration for a full compaction: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
+
+        prof::print_internal_perf_stats(false);
 
         EXPECT_DOUBLE_EQ(db->read_amplification_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
 
@@ -306,7 +308,7 @@ namespace hedge::db
         database_test,
         testing::Combine(
             testing::Values(80'000'000), // n keys
-            testing::Values(100),       // payload size
+            testing::Values(100),        // payload size
             testing::Values(2'000'000)   // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)

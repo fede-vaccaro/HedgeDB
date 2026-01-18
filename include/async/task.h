@@ -151,15 +151,22 @@ namespace hedge::async
             return this->_handle;
         }
 
+        template <typename U = RETURN_VALUE>
         RETURN_VALUE await_resume()
+            requires(!std::is_void_v<RETURN_VALUE>)
         {
-            if constexpr(std::is_void_v<RETURN_VALUE>)
-                return;
-
             if(!this->_handle.done())
                 assert(false);
 
             return std::move(*reinterpret_cast<RETURN_VALUE*>(this->_handle.promise()._data.data()));
+        }
+
+        template <typename U = RETURN_VALUE>
+        void await_resume()
+            requires(std::is_void_v<RETURN_VALUE>)
+        {
+            if(!this->_handle.done())
+                assert(false);
         }
 
         bool operator()()

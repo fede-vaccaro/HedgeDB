@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <optional>
 
 #include <fcntl.h>
@@ -48,6 +49,9 @@ namespace hedge::fs
         };
 
     private:
+        static std::atomic_size_t _GLOBAL_COUNTER;
+
+        size_t _id{std::numeric_limits<size_t>::max()};
         int _fd = -1;
         size_t _file_size{};
         std::filesystem::path _path;
@@ -56,6 +60,11 @@ namespace hedge::fs
         std::atomic_bool _deletion_triggered{false};
 
     public:
+        [[nodiscard]] size_t id() const
+        {
+            return this->_id;
+        }
+
         [[nodiscard]] int fd() const
         {
             return this->_fd;
@@ -140,6 +149,7 @@ namespace hedge::fs
 
             file fd_wrapped{};
 
+            fd_wrapped._id = _GLOBAL_COUNTER.fetch_add(1, std::memory_order_relaxed);
             fd_wrapped._fd = fd;
             fd_wrapped._file_size = file_size;
             fd_wrapped._path = path;
@@ -220,6 +230,7 @@ namespace hedge::fs
 
             file fd_wrapped{};
 
+            fd_wrapped._id = _GLOBAL_COUNTER.fetch_add(1, std::memory_order_relaxed);
             fd_wrapped._fd = fd;
             fd_wrapped._file_size = file_size;
             fd_wrapped._path = path;
@@ -231,7 +242,8 @@ namespace hedge::fs
 
         file() = default;
 
-        file(file&& other) noexcept : _fd(std::exchange(other._fd, -1)),
+        file(file&& other) noexcept : _id(std::exchange(other._id, std::numeric_limits<size_t>::max())),
+                                      _fd(std::exchange(other._fd, -1)),
                                       _file_size(std::exchange(other._file_size, 0)),
                                       _path(std::move(other._path)),
                                       _mode(std::exchange(other._mode, open_mode::undefined)),
@@ -245,6 +257,7 @@ namespace hedge::fs
             if(this == &other)
                 return *this;
 
+            this->_id = std::exchange(other._id, std::numeric_limits<size_t>::max());
             this->_fd = std::exchange(other._fd, -1);
             this->_file_size = std::exchange(other._file_size, 0);
             this->_path = std::move(other._path);

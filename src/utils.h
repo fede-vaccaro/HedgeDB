@@ -49,7 +49,14 @@ namespace hedge
         return (value + divisor - 1) / divisor;
     }
 
-    void myassert(bool expr, std::string msg = "");
+
+    inline void myassert(bool expr, const std::string& msg = "")
+    {
+        // constexpr bool ACTIVE = false;
+
+        // if(ACTIVE && !expr)
+        //     throw std::runtime_error("Assertion failed: " + msg);
+    }
 
     inline uint16_t extract_prefix(const uuids::uuid& key)
     {

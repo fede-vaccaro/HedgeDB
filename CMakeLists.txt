@@ -78,6 +78,7 @@ set(DB_SOURCES
     src/db/mem_index.h
     src/db/mem_index.cc
     src/fs/fs.hpp
+    src/fs/fs.cc
     src/fs/file_reader.cc
     src/fs/file_reader.h
     src/db/value_table.cc
@@ -112,9 +113,8 @@ add_executable(index_delete_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_de
 target_link_libraries(index_delete_test gtest gtest_main uring)
 
 # paginated_view tests
-# todo: might remove
-# add_executable(file_reader_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/file_reader.spec.cc)
-# target_link_libraries(file_reader_test uring gtest gtest_main)
+add_executable(file_reader_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/file_reader.spec.cc)
+target_link_libraries(file_reader_test uring gtest gtest_main)
 
 # value_table tests
 # TODO: re-enable
@@ -131,7 +131,7 @@ target_link_libraries(cache_test uring gtest gtest_main)
 
 # database tests
 add_executable(database_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/database.spec.cc)
-target_link_libraries(database_test uring gtest gtest_main)
+target_link_libraries(database_test uring gtest gtest_main tcmalloc)
 
 # # library TODO re-enable
 # add_library(hedgedb STATIC ${IO_EXECUTOR_SRCS} ${DB_SOURCES} src/api/api.cc)

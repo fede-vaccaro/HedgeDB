@@ -97,7 +97,7 @@ namespace hedge::db
 
         if(!waiters.empty())
         {
-            prof::avg_stat::PERF_STATS["resumed_count"].add(waiters.size(), 0);
+            prof::get<"resumed_count">().add(waiters.size(), 0);
             for(auto& [task, continuation] : waiters)
                 async::this_thread_executor()->transfer_task(std::move(task), continuation);
         }
@@ -105,6 +105,9 @@ namespace hedge::db
         // Release pin: must happen AFTER setting READY to prevent eviction
         // while the page is transitioning but before refcount drops.
         this->_frame->flags.fetch_sub(1);
+
+        // set recently used flag to keep it hot
+        this->_frame->flags.fetch_or(PAGE_FLAG_RECENTLY_USED);
     }
 
     page_cache::write_page_guard::write_page_guard(write_page_guard&& other) noexcept
@@ -150,6 +153,7 @@ namespace hedge::db
     {
         while(true)
         {
+
             size_t idx = this->_find_frame() % this->_max_page_capacity;
             _metadata* frame_ptr = &this->_frames[idx];
 
@@ -165,8 +169,8 @@ namespace hedge::db
                 this->_lut.erase(frame_ptr->key);
                 this->_lut[page] = idx;
 
-                frame_ptr->flags.fetch_or(PAGE_FLAG_RECENTLY_USED); // set recently used flag
-                frame_ptr->flags.fetch_and(~PAGE_FLAG_READY);       // unset ready flag
+                frame_ptr->flags.fetch_or(PAGE_FLAG_RECENTLY_USED);
+                frame_ptr->flags.fetch_and(~PAGE_FLAG_READY); // unset ready flag
                 frame_ptr->waiters.reserve(4);
                 frame_ptr->key = page;
             }
@@ -214,6 +218,7 @@ namespace hedge::db
                 return std::nullopt;
 
             frame_ptr->flags.fetch_add(1);
+
             if(hint_evict)
                 frame_ptr->flags.fetch_and(~PAGE_FLAG_RECENTLY_USED);
             else
@@ -223,32 +228,38 @@ namespace hedge::db
         return awaitable_page_guard{.pg = read_page_guard{this->_data.get(), idx * PAGE_SIZE_IN_BYTES, frame_ptr}};
     }
 
-    std::vector<std::optional<page_cache::awaitable_page_guard>> shared_page_cache::lookup_range(uint32_t fd, size_t start_page_index, size_t num_pages, bool hint_evict)
+    std::vector<std::optional<page_cache::awaitable_page_guard>> shared_page_cache::lookup_range(uint64_t id, size_t start_page_index, size_t num_pages, bool hint_evict)
     {
         std::vector<std::optional<page_cache::awaitable_page_guard>> results;
+        // results.resize(num_pages);
         results.reserve(num_pages);
 
         for(size_t i = 0; i < num_pages; ++i)
         {
-            auto tag = page_tag{.fd = fd, .page_index = static_cast<uint32_t>(start_page_index + i)};
+            auto tag = page_tag{.id = id, .page_index = static_cast<uint32_t>(start_page_index + i)};
 
             size_t hash = std::hash<page_tag>{}(tag);
 
-            results.emplace_back(this->_caches.get()[hash % this->_num_caches].try_lookup(tag, hint_evict));
+            auto awaitable_pg = this->_caches.get()[hash % this->_num_caches].try_lookup(tag, hint_evict);
+
+            // if(awaitable_pg.has_value())
+            // std::cout << "Cache hit for page index " << tag.page_index << std::endl;
+
+            results.emplace_back(std::move(awaitable_pg));
             // results.emplace_back(std::nullopt);
         }
 
         return results;
     }
 
-    std::vector<page_cache::write_page_guard> shared_page_cache::get_write_slots_range(uint32_t fd, size_t start_page_index, size_t num_pages)
+    std::vector<page_cache::write_page_guard> shared_page_cache::get_write_slots_range(uint64_t id, size_t start_page_index, size_t num_pages)
     {
         std::vector<page_cache::write_page_guard> results;
         results.reserve(num_pages);
 
         for(size_t i = 0; i < num_pages; ++i)
         {
-            auto tag = page_tag{.fd = fd, .page_index = static_cast<uint32_t>(start_page_index + i)};
+            auto tag = page_tag{.id = id, .page_index = static_cast<uint32_t>(start_page_index + i)};
             results.emplace_back(this->get_write_slot(tag));
         }
 
@@ -267,6 +278,7 @@ namespace hedge::db
 
         // Search for an evictable page
         // If no page is found, this procedure behaves basically as a spin-lock
+        [[maybe_unused]] size_t spins{0};
         while(true)
         {
             // Advance clock head
@@ -279,10 +291,15 @@ namespace hedge::db
             bool curr_is_not_referenced = (curr & PAGE_FLAG_REFERENCE_COUNT_MASK) == 0;
 
             if(curr_is_not_referenced && curr_is_not_recently_used && frame.flags.compare_exchange_strong(curr, desired))
+            {
+                // std::cout << "spins: " << spins << "\n";
+                prof::get<"cache_find_frame_spins">().add(spins);
                 return cur_pos;
+            }
 
             frame.flags.fetch_and(~PAGE_FLAG_RECENTLY_USED); // Unset recently used
             cur_pos = this->_clock_hand.fetch_add(1);
+            spins++;
         }
     }
 

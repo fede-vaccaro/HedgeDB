@@ -1,12 +1,11 @@
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <gtest/gtest.h>
 #include <iostream>
 #include <random>
-#include <thread>
 #include <vector>
+
+#include <gtest/gtest.h>
 
 #include "async/io_executor.h"
 #include "async/task.h"
@@ -80,6 +79,17 @@ namespace hedge::db
                     << " Flags: " << std::hex << flags << std::dec;
             }
         }
+
+        void check_still_referenced(page_cache& cache, size_t high)
+        {
+            for(size_t i = 0; i < high; ++i)
+            {
+                uint64_t flags = cache._frames[i].flags.load();
+                bool used = (flags & PAGE_FLAG_RECENTLY_USED) != 0;
+                ASSERT_EQ(used, true)
+                    << "Frame " << i << " is not used! " << " Flags: " << std::hex << flags << std::dec;
+            }
+        }
     };
 
     TEST_F(PageCacheTest, BasicWriteAndRead)
@@ -126,6 +136,7 @@ namespace hedge::db
 
         ASSERT_FALSE(error);
         check_all_guards_released(cache);
+        check_still_referenced(cache, 1);
     }
 
     TEST_F(PageCacheTest, GuardAssignmentSemantics)
@@ -247,6 +258,7 @@ namespace hedge::db
 
         ASSERT_FALSE(error);
         check_all_guards_released(cache);
+        check_still_referenced(cache, 10);
     }
 
     TEST_F(PageCacheTest, LargeScaleStressTest)

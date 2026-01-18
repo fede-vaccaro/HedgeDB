@@ -325,7 +325,7 @@ namespace hedge::async
 
     void executor_context::_gc_tasks()
     {
-        prof::avg_stat::PERF_STATS["gc_coros"].start();
+        prof::get<"gc_coros">().start();
 
         thread_local std::vector<decltype(this->_in_progress_tasks)::iterator> to_remove;
         to_remove.clear();
@@ -339,7 +339,7 @@ namespace hedge::async
         for(const auto& it : to_remove)
             this->_in_progress_tasks.erase(it);
 
-        prof::avg_stat::PERF_STATS["gc_coros"].stop();
+        prof::get<"gc_coros">().stop();
     }
 
     void executor_context::register_fd(int32_t fd)
