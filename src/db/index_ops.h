@@ -62,6 +62,7 @@ namespace hedge::db
             const std::filesystem::path& path,
             page_aligned_buffer<index_entry_t>&& sorted_keys,
             size_t upper_bound,
+            const std::shared_ptr<db::shared_page_cache>& cache,
             bool use_odirect);
 
         /**
@@ -83,6 +84,7 @@ namespace hedge::db
                                                                           mem_index* index,
                                                                           size_t num_partition_exponent,
                                                                           size_t flush_iteration,
+                                                                          const std::shared_ptr<db::shared_page_cache>& cache,
                                                                           bool use_odirect = false);
 
         /**
@@ -97,7 +99,8 @@ namespace hedge::db
                                                  ///< Set `false` if there are more indices belonging to the same partition to be merged later, to preserve delete markers until the final merge.
                                                  ///< Set `true` when this is the final merge for the partition to eliminate deleted entries from the final index.
             bool create_new_with_odirect{false}; ///< If `true`, opens the output file with O_DIRECT flag for direct I/O access.
-            bool precache_output_vec{true};      ///< If `true`, tries to fill the cache with the resulting sorted index
+            bool cache_output_index{true};      ///< If `true`, tries to fill the cache with the resulting sorted index
+            bool try_reading_from_cache{false};  ///< If `true`, attempts to read input index pages from the shared page cache before issuing disk reads.
         };
 
         /**
