@@ -17,6 +17,7 @@
 #include "db/mem_index.h"
 #include "index_ops.h"
 #include "io_executor.h"
+#include "perf_counter.h"
 #include "sorted_index.h"
 #include "types.h"
 #include "utils.h"
@@ -528,6 +529,7 @@ namespace hedge::db
                                                                      memtable_to_flush,
                                                                      this->_config.num_partition_exponent,
                                                                      flush_iteration,
+                                                                     this->_page_cache,
                                                                      this->_config.use_odirect_for_indices);
 
         if(!partitioned_sorted_indices)
@@ -558,7 +560,7 @@ namespace hedge::db
         return hedge::ok();
     }
 
-    hedge::status database::_compaction_job(bool ignore_ratio)
+    hedge::expected<size_t> database::_compaction_job(bool ignore_ratio)
     {
         this->_logger.log("Starting compaction job");
 
@@ -580,6 +582,8 @@ namespace hedge::db
 
         bool stability_reached = false; // @see database::compact_sorted_indices() to understand compaction stability
 
+        std::atomic_size_t total_bytes_written{0};
+
         // Main compaction loop
         while(!stability_reached)
         {
@@ -591,11 +595,15 @@ namespace hedge::db
             wg->set(indices_local_copy.size()); // One task per partition
 
             auto make_compaction_sub_task = [this,
+                                             &total_bytes_written,
                                              &errors,
                                              this_iteration_id = this->_flush_iteration.fetch_add(1)](
                                                 std::vector<sorted_index_ptr_t>& ordered_indices_vec,
                                                 std::shared_ptr<async::wait_group> wg) -> async::task<void>
             {
+                // set lower priority for thread
+                
+
                 auto smallest_index_it = ordered_indices_vec.begin() + (ordered_indices_vec.size() - 1);
                 auto second_smallest_index_it = smallest_index_it - 1;
 
@@ -605,7 +613,8 @@ namespace hedge::db
                     .base_path = this->_indices_path,
                     .discard_deleted_keys = false,
                     .create_new_with_odirect = this->_config.use_odirect_for_indices,
-                    .precache_output_vec = true,
+                    .populate_cache_with_output = true,
+                    .try_reading_from_cache = true,
                 };
 
                 auto maybe_compacted_table = co_await index_ops::two_way_merge_async(
@@ -632,7 +641,7 @@ namespace hedge::db
                     // Replace the two merged indices with the new one
                     ordered_indices_vec.erase(smallest_index_it);
                     ordered_indices_vec.erase(second_smallest_index_it);
-
+                    total_bytes_written.fetch_add(maybe_compacted_table.value().file_size(), std::memory_order::relaxed);
                     ordered_indices_vec.emplace_back(std::make_shared<sorted_index>(std::move(maybe_compacted_table.value())));
                 }
 
@@ -735,37 +744,43 @@ namespace hedge::db
 
         this->_logger.log("Compaction job completed successfully");
 
-        return hedge::ok();
+        return total_bytes_written.load();
     }
 
-    std::future<hedge::status> database::compact_sorted_indices(bool ignore_ratio)
+    std::future<expected<size_t>> database::compact_sorted_indices(bool ignore_ratio)
     {
-        auto t0 = std::chrono::high_resolution_clock::now();
-        auto compaction_promise_ptr = std::make_shared<std::promise<hedge::status>>();
-        std::future<hedge::status> compaction_future = compaction_promise_ptr->get_future();
+        auto compaction_promise_ptr = std::make_shared<std::promise<hedge::expected<size_t>>>();
+        std::future<hedge::expected<size_t>> compaction_future = compaction_promise_ptr->get_future();
 
         this->_compaction_worker.submit(
-            [t0, weak_db = this->weak_from_this(), promise = std::move(compaction_promise_ptr), ignore_ratio]()
+            [db = this->shared_from_this(), promise = std::move(compaction_promise_ptr), ignore_ratio]()
             {
-                auto db = weak_db.lock();
-                if(!db)
-                {
-                    promise->set_value(hedge::error("Database instance destroyed before compaction could run."));
-                    db->_logger.log("Compaction job aborted: DB instance weak_ptr expired.");
-                    return;
-                }
+                auto start_processing_t = std::chrono::high_resolution_clock::now();
 
-                hedge::status status = db->_compaction_job(ignore_ratio);
-                if(!status)
-                    db->_logger.log("Compaction job failed: ", status.error().to_string());
+                auto maybe_bytes_written = db->_compaction_job(ignore_ratio);
+                if(!maybe_bytes_written)
+                    db->_logger.log("Compaction job failed: ", maybe_bytes_written.error().to_string());
 
                 auto t1 = std::chrono::high_resolution_clock::now();
-                auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-                db->_logger.log("Total duration for compaction: ", (double)duration.count() / 1000.0, " ms");
+                auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - start_processing_t);
+
+                double throughput_mbs = maybe_bytes_written.value() / ((double)duration.count() / 1000000.0) / (1000.0 * 1000.0);
+
+                if(maybe_bytes_written.value() > 0)
+                {
+                    db->_logger.log("Total duration for compaction: ", (double)duration.count() / 1000.0, " ms",
+                                    ", MB written: ", maybe_bytes_written.value() / (1000.0 * 1000.0),
+                                    ", throughput: ", throughput_mbs, " MB/s");
+
+                    prof::get<"merge_mb_written">().add(maybe_bytes_written.value() / (1000.0 * 1000.0));
+                    prof::get<"merge_throughput_mbs">().add(throughput_mbs);
+                }
 
                 // todo: fix std::future_error No associated state if the future was already retrieved with wait_for()
-                promise->set_value(std::move(status));
+                promise->set_value(std::move(maybe_bytes_written));
             });
+
+        this->_logger.log("Compaction job submitted to background worker.");
 
         return compaction_future;
     }

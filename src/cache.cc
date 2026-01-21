@@ -33,7 +33,7 @@ namespace hedge::db
 
         auto* uint_ptr = static_cast<uint8_t*>(ptr);
         std::fill_n(uint_ptr, this->_max_page_capacity * PAGE_SIZE_IN_BYTES, 0);
-        this->_data = std::unique_ptr<uint8_t>(uint_ptr);
+        this->_data = aligned_buffer_t(uint_ptr, std::free);
     }
 
     // --- read_page_guard Implementation ---

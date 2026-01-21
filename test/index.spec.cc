@@ -65,7 +65,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
                 memtable.put(uuid, {static_cast<uint64_t>(j), uuid_fake_size(uuid), 0});
             }
 
-            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, &memtable, NUM_PARTITION_EXPONENT, i);
+            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, &memtable, NUM_PARTITION_EXPONENT, i, nullptr);
 
             if(!partitioned_sorted_indices)
             {
@@ -164,7 +164,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
             .read_ahead_size = _this->READ_AHEAD_SIZE_BYTES,
             .new_index_id = _this->N_RUNS,
             .base_path = _this->_base_path,
-            .precache_output_vec = true,
+            .populate_cache_with_output = true,
         };
 
         hedge::db::sorted_index new_index{};

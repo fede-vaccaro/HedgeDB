@@ -119,9 +119,9 @@ namespace hedge::db
 
         // --- Background Workers ---
         /// Worker thread dedicated to handling index compaction jobs.
-        async::worker _compaction_worker{}; ///< It just controls the flow for compaction, the actual I/O is done by the pool _compaction_executor
-        async::worker _value_table_worker{}; ///< Worker thread for instantiating new value tables
-        async::worker _flush_worker{}; ///< Worker thread for flushing the memtables
+        async::worker _compaction_worker{};                                               ///< It just controls the flow for compaction, the actual I/O is done by the pool _compaction_executor
+        async::worker _value_table_worker{};                                              ///< Worker thread for instantiating new value tables
+        async::worker _flush_worker{};                                                    ///< Worker thread for flushing the memtables
         std::vector<std::shared_ptr<async::executor_context>> _compation_executor_pool{}; ///< Pool of executors managing background compactions
 
         // Index page cache
@@ -203,9 +203,9 @@ namespace hedge::db
          * they will NOT be considered in the current compaction job.
          * @param ignore_ratio If true, forces merges even if size ratio criteria aren't met (e.g., for full compaction).
          * @param executor The I/O executor context used *within* the compaction job for disk I/O.
-         * @return A future that resolves to the status of the submitted compaction job upon completion.
+         * @return A future that resolves to the total number of bytes written during compaction, or an error if the compaction failed.
          */
-        std::future<hedge::status> compact_sorted_indices(bool ignore_ratio);
+        std::future<expected<size_t>> compact_sorted_indices(bool ignore_ratio);
 
         /**
          * @brief Factory function to create a new database instance at the specified path.
@@ -270,9 +270,9 @@ namespace hedge::db
          * Updates the main `_sorted_indices` map upon completion.
          * @param ignore_ratio If true, forces merges regardless of size ratios.
          * @param executor The I/O executor for disk operations during merging.
-         * @return Status indicating the overall success or failure of the compaction job.
+         * @return Bytes written from the compaction, otherwise an error indicating the overall success or failure of the compaction job.
          */
-        hedge::status _compaction_job(bool ignore_ratio);
+        hedge::expected<size_t> _compaction_job(bool ignore_ratio);
         /**
          * @brief Internal helper to find the most recent `value_ptr_t` and the corresponding `value_table` for a key.
          * Searches memtable, then relevant sorted_indices. Handles deleted entries.

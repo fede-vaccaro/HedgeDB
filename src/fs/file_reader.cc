@@ -24,21 +24,25 @@ namespace hedge::fs
         if(buffer_size % PAGE_SIZE_IN_BYTES != 0)
             buffer_size += PAGE_SIZE_IN_BYTES - (buffer_size % PAGE_SIZE_IN_BYTES);
 
-        void* alloc = std::aligned_alloc(PAGE_SIZE_IN_BYTES, buffer_size);
-
-        if(alloc == nullptr)
-            throw std::runtime_error("Could not allocate memory for file reader");
-
-        this->_buffer = aligned_buffer_t(static_cast<uint8_t*>(alloc), std::free);
-
         // page align read_ahead_size
         this->_config.read_ahead_size = buffer_size;
     }
 
-    std::optional<file_reader::awaitable_read_request_t> file_reader::next()
+    std::vector<file_reader::awaitable_from_cache_or_fs_t> file_reader::next(const std::shared_ptr<db::shared_page_cache>& cache)
+    {
+        prof::get<"file_reader_next">().start();
+        if(cache == nullptr)
+            return this->_next();
+
+        auto res = this->_next(cache);
+        prof::get<"file_reader_next">().stop();
+        return res;
+    }
+
+    std::vector<file_reader::awaitable_from_cache_or_fs_t> file_reader::_next()
     {
         if(this->_current_offset >= this->_config.end_offset)
-            return std::nullopt; // EOF reached
+            return {}; // EOF reached
 
         size_t bytes_to_read = this->_config.read_ahead_size;
         size_t page_aligned_bytes_to_read = bytes_to_read;
@@ -54,29 +58,31 @@ namespace hedge::fs
         if(this->_file.has_direct_access() && page_aligned_bytes_to_read % PAGE_SIZE_IN_BYTES != 0)
             page_aligned_bytes_to_read += PAGE_SIZE_IN_BYTES - (page_aligned_bytes_to_read % PAGE_SIZE_IN_BYTES);
 
+        page_aligned_buffer<index_entry_t> buffer(page_aligned_bytes_to_read / sizeof(index_entry_t));
+
         auto awaitable_mailbox = async::this_thread_executor()->submit_request(async::read_request{
             .fd = this->_file.fd(),
-            .data = this->_buffer.get(),
+            .data = static_cast<uint8_t*>(buffer.raw_data()),
             .offset = this->_current_offset,
             .size = page_aligned_bytes_to_read,
         });
 
         this->_current_offset += page_aligned_bytes_to_read;
 
-        std::span<uint8_t> memory_span{
-            this->_buffer.get(),
-            bytes_to_read,
-        };
+        auto last_chunk_size = bytes_to_read / sizeof(index_entry_t);
+        buffer.resize(last_chunk_size);
 
-        return file_reader::awaitable_read_request_t{awaitable_mailbox, memory_span};
+        std::vector<file_reader::awaitable_from_cache_or_fs_t> out;
+        out.reserve(1);
+        out.emplace_back(file_reader::awaitable_read_request_t{awaitable_mailbox, std::move(buffer)});
+
+        return out;
     }
 
-    std::vector<file_reader::awaitable_from_cache_or_fs_t> file_reader::next(const std::shared_ptr<db::shared_page_cache>& cache)
+    std::vector<file_reader::awaitable_from_cache_or_fs_t> file_reader::_next(const std::shared_ptr<db::shared_page_cache>& cache)
     {
         if(this->_current_offset >= this->_config.end_offset)
             return {}; // EOF reached
-
-        prof::get<"file_reader_next">().start();
 
         size_t bytes_to_read = this->_config.read_ahead_size;
         size_t page_aligned_bytes_to_read = bytes_to_read;
@@ -98,6 +104,7 @@ namespace hedge::fs
         assert(this->_current_offset % PAGE_SIZE_IN_BYTES == 0);
         prof::get<"merge_cache_bulk_lookup">().start();
         auto page_guards = cache->lookup_range(this->_file.id(), this->_current_offset / PAGE_SIZE_IN_BYTES, num_pages_to_read, true);
+        // auto page_guards = std::vector<std::optional<db::page_cache::awaitable_page_guard>>{num_pages_to_read};
         prof::get<"merge_cache_bulk_lookup">().stop();
 
         // std::cout << "try reading: id " << this->_file.id() << " path: " << this->_file.path() << "\n";
@@ -114,9 +121,7 @@ namespace hedge::fs
         int64_t coalescing_sequence_start_it = -1;
         int64_t coalescing_sequence_end_it = -1;
 
-        int64_t buffer_head = 0;
         size_t from_fs_count_coalesced = 0;
-        size_t from_fs_page_count = 0;
 
         for(size_t i = 0; i < page_guards.size(); ++i)
         {
@@ -125,9 +130,11 @@ namespace hedge::fs
                 // First create the single request for reading the previous `coalesced_requests` consecutive pages, if any
                 if(auto coalesced_requests = (coalescing_sequence_end_it - coalescing_sequence_start_it); coalesced_requests > 0)
                 {
+                    page_aligned_buffer<index_entry_t> buffer((coalesced_requests * PAGE_SIZE_IN_BYTES) / sizeof(index_entry_t));
+
                     auto awaitable_mailbox = async::this_thread_executor()->submit_request(async::read_request{
                         .fd = this->_file.fd(),
-                        .data = this->_buffer.get() + buffer_head,
+                        .data = static_cast<uint8_t*>(buffer.raw_data()),
                         .offset = this->_current_offset + (coalescing_sequence_start_it * PAGE_SIZE_IN_BYTES),
                         .size = coalesced_requests * PAGE_SIZE_IN_BYTES,
                     });
@@ -135,15 +142,8 @@ namespace hedge::fs
                     // myassert(size_t(buffer_head) < this->_config.read_ahead_size, "Buffer head " + std::to_string(buffer_head) + " exceeds read ahead size " + std::to_string(this->_config.read_ahead_size));
                     // myassert(size_t(buffer_head + (coalesced_requests * PAGE_SIZE_IN_BYTES)) <= this->_config.read_ahead_size, "Buffer head " + std::to_string(buffer_head + (coalesced_requests * PAGE_SIZE_IN_BYTES)) + " exceeds read ahead size " + std::to_string(this->_config.read_ahead_size));
 
-                    std::span<uint8_t> memory_span{
-                        this->_buffer.get() + buffer_head,
-                        coalesced_requests * PAGE_SIZE_IN_BYTES,
-                    };
-
-                    buffer_head += coalesced_requests * PAGE_SIZE_IN_BYTES;
-
                     from_fs_count_coalesced++;
-                    result.emplace_back(file_reader::awaitable_read_request_t{awaitable_mailbox, memory_span});
+                    result.emplace_back(file_reader::awaitable_read_request_t{awaitable_mailbox, std::move(buffer)});
 
                     // Reset iterators
                     coalescing_sequence_start_it = -1;
@@ -174,15 +174,16 @@ namespace hedge::fs
                 coalescing_sequence_start_it = i;
 
             coalescing_sequence_end_it = i + 1;
-            from_fs_page_count++;
         }
 
         // If any, create the request for requesting the last batch of requests
         if(auto coalesced_requests = (coalescing_sequence_end_it - coalescing_sequence_start_it); coalesced_requests > 0)
         {
+            page_aligned_buffer<index_entry_t> buffer((coalesced_requests * PAGE_SIZE_IN_BYTES) / sizeof(index_entry_t));
+
             auto awaitable_mailbox = async::this_thread_executor()->submit_request(async::read_request{
                 .fd = this->_file.fd(),
-                .data = this->_buffer.get() + buffer_head,
+                .data = static_cast<uint8_t*>(buffer.raw_data()),
                 .offset = this->_current_offset + (coalescing_sequence_start_it * PAGE_SIZE_IN_BYTES),
                 .size = coalesced_requests * PAGE_SIZE_IN_BYTES,
             });
@@ -199,13 +200,11 @@ namespace hedge::fs
                 last_chunk_bytes -= remainder;
             }
 
-            std::span memory_span{
-                this->_buffer.get() + buffer_head,
-                last_chunk_bytes,
-            };
+            size_t last_chunk_size = last_chunk_bytes / sizeof(index_entry_t);
+            buffer.resize(last_chunk_size);
 
             from_fs_count_coalesced++;
-            result.emplace_back(file_reader::awaitable_read_request_t{awaitable_mailbox, memory_span});
+            result.emplace_back(file_reader::awaitable_read_request_t{awaitable_mailbox, std::move(buffer)});
         }
 
         // verify sequentiality in requests
@@ -240,12 +239,11 @@ namespace hedge::fs
 
         // DEBUG_VERIFY_SEQUENTIALITY();
 
-        prof::get<"coalesce_percentage">().add(from_fs_count_coalesced, from_fs_page_count);
+        prof::get<"fs_read_requests">().add(from_fs_count_coalesced);
 
         // Finally confirm offset shift
         this->_current_offset += page_aligned_bytes_to_read;
 
-        prof::get<"file_reader_next">().stop();
         return result;
     }
 
@@ -257,16 +255,6 @@ namespace hedge::fs
     bool file_reader::is_eof() const
     {
         return this->_current_offset >= this->_config.end_offset;
-    }
-
-    void file_reader::reset_it(size_t it)
-    {
-        this->_current_offset = std::min(it, this->_config.end_offset);
-    }
-
-    uint8_t* file_reader::get_buffer_ptr() const
-    {
-        return this->_buffer.get();
     }
 
 } // namespace hedge::fs

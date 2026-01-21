@@ -90,7 +90,7 @@ namespace hedge::db
             auto t1 = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
             std::cout << "Total duration for key generation: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
-            std::cout << "Generated " << (sizeof(key_t) * this->N_KEYS) / (1024.0 * 1024.0) << " MB of keys. This data will be held in memory." << std::endl;
+            std::cout << "Generated " << (sizeof(key_t) * this->N_KEYS) / (1000.0 * 1000.0) << " MB of keys. This data will be held in memory." << std::endl;
         }
 
         // test parameters
@@ -124,16 +124,16 @@ namespace hedge::db
         db_config config;
         config.auto_compaction = true;
         config.keys_in_mem_before_flush = this->MEMTABLE_CAPACITY;
-        config.compaction_read_ahead_size_bytes = 2 * 1024 * 1024;
-        config.num_partition_exponent = 4;
-        config.target_compaction_size_ratio = 0.90;
+        config.compaction_read_ahead_size_bytes = 64 * 1024 * 1024;
+        config.num_partition_exponent = 0;
+        config.target_compaction_size_ratio = 0.9;
         config.use_odirect_for_indices = true;
         config.index_page_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024;
         config.index_point_cache_size_bytes = 0;
         config.compaction_timeout = std::chrono::minutes(20);
 
         if(config.index_page_clock_cache_size_bytes > 0)
-            std::cout << "Using CLOCK cache. Allocated space: " << config.index_page_clock_cache_size_bytes / (1024.0 * 1024) << "MB" << std::endl;
+            std::cout << "Using CLOCK cache. Allocated space: " << config.index_page_clock_cache_size_bytes / (1000.0 * 1000.0) << "MB" << std::endl;
 
         auto maybe_db = database::make_new(this->_base_path, config);
         ASSERT_TRUE(maybe_db) << "An error occurred while creating the database: " << maybe_db.error().to_string();
@@ -181,7 +181,7 @@ namespace hedge::db
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         std::cout << "Total duration for insertion: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
         std::cout << "Average duration per insertion: " << (double)duration.count() / this->N_KEYS << " us" << std::endl;
-        std::cout << "Insertion bandwidth: " << (double)this->N_KEYS * (this->PAYLOAD_SIZE / 1024.0 / 1024.0) / (duration.count() / 1'000'000.0) << " MB/s" << std::endl;
+        std::cout << "Insertion bandwidth: " << (double)this->N_KEYS * ((this->PAYLOAD_SIZE + sizeof(key_t)) / 1000.0 / 1000.0) / (duration.count() / 1'000'000.0) << " MB/s" << std::endl;
         std::cout << "Insertion throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000) << " items/s" << std::endl;
         std::cout << "Deleted keys: " << this->_deleted_keys.size() << std::endl;
 
@@ -196,10 +196,12 @@ namespace hedge::db
         // compaction
         t0 = std::chrono::high_resolution_clock::now();
         auto compaction_status_future = db->compact_sorted_indices(true);
-        ASSERT_TRUE(compaction_status_future.get()) << "An error occurred during compaction: " << compaction_status_future.get().error().to_string();
+        auto maybe_compaction_status = compaction_status_future.get();
+        ASSERT_TRUE(maybe_compaction_status.has_value()) << "An error occurred during compaction: " << maybe_compaction_status.error().to_string();
         t1 = std::chrono::high_resolution_clock::now();
         duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         std::cout << "Total duration for a full compaction: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
+        std::cout << "Compaction throughput in: " << (double)(maybe_compaction_status.value() / (1000.0 * 1000.0)) / (duration.count() / 1'000'000.0) << " MB/s" << std::endl;
 
         prof::print_internal_perf_stats(false);
 
@@ -297,7 +299,7 @@ namespace hedge::db
             std::cout << "Total duration for retrieval: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
             std::cout << "Average duration per retrieval: " << (double)duration.count() / this->N_KEYS << " us" << std::endl;
             std::cout << "Retrieval throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000) << " items/s" << std::endl;
-            std::cout << "Retrieval bandwidth: " << (double)this->N_KEYS * (this->PAYLOAD_SIZE / 1024.0) / (duration.count() / 1000.0) << " MB/s" << std::endl;
+            std::cout << "Retrieval bandwidth: " << (double)this->N_KEYS * (this->PAYLOAD_SIZE / 1000.0) / (duration.count() / 1000.0) << " MB/s" << std::endl;
 
             prof::print_internal_perf_stats(true);
         }
@@ -308,8 +310,8 @@ namespace hedge::db
         database_test,
         testing::Combine(
             testing::Values(80'000'000), // n keys
-            testing::Values(100),        // payload size
-            testing::Values(2'000'000)   // memtable capacity
+            testing::Values(100),       // payload size
+            testing::Values(1'000'000)   // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)
         {
