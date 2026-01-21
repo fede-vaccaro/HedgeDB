@@ -66,7 +66,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
                     this->_deleted_items.insert({uuid, value_ptr});
             }
 
-            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, &memtable, NUM_PARTITION_EXPONENT, i);
+            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, &memtable, NUM_PARTITION_EXPONENT, i, nullptr);
 
             if(!partitioned_sorted_indices)
             {
@@ -112,7 +112,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
             }
 
             // Flush the deleted items memtable
-            auto deleted_partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, &deleted_memtable, NUM_PARTITION_EXPONENT, N_RUNS);
+            auto deleted_partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, &deleted_memtable, NUM_PARTITION_EXPONENT, N_RUNS, nullptr);
 
             if(!deleted_partitioned_sorted_indices)
             {

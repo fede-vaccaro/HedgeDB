@@ -132,7 +132,7 @@ namespace hedge::fs
                         {
                             co_return "Read failed at " + std::to_string(current_offset) + ": " + strerror(result.error_code);
                         }
-                        data_span = req.second;
+                        data_span = req.second.as_byte_span();
                         std::cout << "Span size (read request): " << data_span.size() << std::endl;
                     }
                     else

@@ -32,7 +32,7 @@ namespace hedge::async
     {
         using handle_t = std::coroutine_handle<task_promise<TASK, RETURN_VALUE>>;
 
-        std::array<uint8_t, sizeof(RETURN_VALUE)> _data;
+        alignas(alignof(RETURN_VALUE)) std::array<uint8_t, sizeof(RETURN_VALUE)> _data;
         std::coroutine_handle<> _continuation;
         std::coroutine_handle<> _root_coro{nullptr};
 
