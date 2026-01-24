@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -43,6 +44,7 @@ namespace hedge::db
         uint64_t meta_index_start_offset{};      ///< Byte offset from the beginning of the file where the meta-index data begins.
         uint64_t meta_index_end_offset{};        ///< Byte offset from the beginning of the file where the meta-index data ends (exclusive of any padding).
         uint64_t footer_start_offset{};          ///< Byte offset from the beginning of the file where this footer structure begins.
+        uint64_t epoch{};                        ///< Epoch timestamp indicating when the file was created.
     };
 
     /**
@@ -158,6 +160,8 @@ namespace hedge::db
          * @return The number of indexed keys (a 64-bit unsigned integer).
          */
         [[nodiscard]] size_t size() const { return this->_footer.indexed_keys; }
+
+        [[nodiscard]] size_t epoch() const { return this->_footer.epoch; }
 
         /**
          * @brief Prints various statistics about the index (file path, counts, sizes) to standard output.

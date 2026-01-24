@@ -167,41 +167,24 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
             .populate_cache_with_output = true,
         };
 
-        hedge::db::sorted_index new_index{};
+        std::vector<const hedge::db::sorted_index*> index_ptrs;
+        index_ptrs.reserve(indices.size());
+        for(const auto& index : indices)
+            index_ptrs.emplace_back(&index);
 
-        // prepare merge between 1 and 2
-        auto new_index_1 = co_await hedge::db::index_ops::k_way_merge_async(
+        auto new_index = co_await hedge::db::index_ops::k_way_merge_async(
             merge_config,
-            indices[0],
-            indices[1],
+            index_ptrs,
             _this->_executor,
             cache);
 
-        if(!new_index_1.has_value())
-            promise.set_value(new_index_1.error());
+        if(!new_index.has_value())
+            promise.set_value(new_index.error());
 
-        new_index = std::move(new_index_1.value());
+        new_index = std::move(new_index.value());
 
-        merge_config.new_index_id++;
-
-        // prepare merge between new_index_1 and 3
-        if(_this->N_RUNS == 3 && indices.size() == 3)
-        {
-            auto new_index_2 = co_await hedge::db::index_ops::k_way_merge_async(
-                merge_config,
-                new_index,
-                indices[2],
-                _this->_executor,
-                cache);
-
-            if(!new_index_2.has_value())
-                promise.set_value(new_index_2.error());
-
-            new_index = std::move(new_index_2.value());
-        }
-
-        auto prefix = new_index.upper_bound();
-        index_map.insert({prefix, std::move(new_index)});
+        auto prefix = new_index.value().upper_bound();
+        index_map.insert({prefix, std::move(new_index.value())});
 
         promise.set_value(hedge::ok());
 

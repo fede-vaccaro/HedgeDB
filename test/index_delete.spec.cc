@@ -215,8 +215,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
 
         auto new_index = co_await hedge::db::index_ops::k_way_merge_async(
             merge_config,
-            left,
-            right,
+            {&left, &right},
             _this->_executor,
             nullptr);
 

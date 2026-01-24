@@ -105,7 +105,7 @@ namespace hedge::db
 
         // --- Write buffers ---
         /// Each thread should have
-        static constexpr size_t WRITE_BUFFER_DEFAULT_SIZE = 16 * 4096; // 64 kb
+        static constexpr size_t WRITE_BUFFER_DEFAULT_SIZE = 16 * 4096;
         inline static std::atomic_size_t _thread_count{0};
         std::vector<std::unique_ptr<write_buffer>> _write_buffers;
 
@@ -232,7 +232,7 @@ namespace hedge::db
 
         /**
          * @brief Calculates the average read amplification factor.
-         * Represents the average number of sorted_index files checked per partition during a lookup.
+         * Represents the average number of sorted_index files checked (or, disk lookups) per lookup.
          * Lower is better (1.0 is ideal after full compaction).
          * @return The average load factor across all partitions. Returns NaN if there are no partitions.
          */
@@ -268,11 +268,10 @@ namespace hedge::db
         /**
          * @brief The core logic for performing index compaction, run by the `compaction_worker`.
          * Updates the main `_sorted_indices` map upon completion.
-         * @param ignore_ratio If true, forces merges regardless of size ratios.
-         * @param executor The I/O executor for disk operations during merging.
+         * @param ignore_size_ratio If true, forces merges regardless of size ratios.
          * @return Bytes written from the compaction, otherwise an error indicating the overall success or failure of the compaction job.
          */
-        hedge::expected<size_t> _compaction_job(bool ignore_ratio);
+        hedge::expected<size_t> _compaction_job(bool ignore_size_ratio);
         /**
          * @brief Internal helper to find the most recent `value_ptr_t` and the corresponding `value_table` for a key.
          * Searches memtable, then relevant sorted_indices. Handles deleted entries.
@@ -281,6 +280,26 @@ namespace hedge::db
          * @return An async task resolving to an expected containing the pair {value_ptr, value_table_ptr} or an error (e.g., KEY_NOT_FOUND, DELETED).
          */
         async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> _find_value_ptr_and_value_table(key_t key);
+
+        // Debug stuff
+        static auto check_is_sorted_by_epoch(const std::vector<sorted_index_ptr_t>& vec) -> bool
+        {
+            auto sorted = std::ranges::is_sorted(
+                vec,
+                [](const sorted_index_ptr_t& lhs, const sorted_index_ptr_t& rhs)
+                {
+                    return lhs->epoch() < rhs->epoch();
+                });
+            if(!sorted)
+            {
+                std::cout << "Indices not sorted by epoch:" << std::endl;
+                for(const auto& idx_ptr : vec)
+                {
+                    std::cout << " - Path: " << idx_ptr->path().string() << ", epoch: " << idx_ptr->epoch() << std::endl;
+                }
+            }
+            return sorted;
+        };
     };
 
 } // namespace hedge::db

@@ -348,9 +348,9 @@ namespace hedge::db
                 sorted_indices_local = sorted_indices_it->second;
             }
 
-            // Need to search ALL indices in the partition and find the one with the highest priority `value_ptr_t`.
+            // Indices are sorted by epoch: newest (and most recent key first)
             // TODO: Add bloom filter support to skip unnecessary lookups.
-            for(const auto& sorted_index_ptr : sorted_indices_local)
+            for(const auto& sorted_index_ptr : std::ranges::reverse_view(sorted_indices_local))
             {
                 auto maybe_value_ptr = co_await sorted_index_ptr->lookup_async(key, this->_page_cache);
                 if(!maybe_value_ptr.has_value())
@@ -358,8 +358,8 @@ namespace hedge::db
 
                 if(auto& opt_value_ptr = maybe_value_ptr.value(); opt_value_ptr.has_value())
                 {
-                    if(!value_ptr_opt.has_value() || (value_ptr_opt && *opt_value_ptr < *value_ptr_opt))
-                        value_ptr_opt = opt_value_ptr.value();
+                    value_ptr_opt = opt_value_ptr.value();
+                    break; // Found the key in this index, no need to check older indices
                 }
             }
         }
@@ -535,13 +535,13 @@ namespace hedge::db
         if(!partitioned_sorted_indices)
             return hedge::error("An error occurred while flushing the mem index: " + partitioned_sorted_indices.error().to_string());
 
+        // The memtables waiting for flush and the sorted indices must be updated atomically
+        // Otherwise, there is a time window where a key coexists in both the memtable and the new sorted index,
         {
-            std::lock_guard lk(this->_pending_flushes_mutex);
-            this->_pending_flushes.erase(flush_iteration);
-        }
+            std::lock_guard pending_flushes_lk(this->_pending_flushes_mutex);
+            std::lock_guard sorted_index_lk(this->_sorted_index_mutex);
 
-        {
-            std::lock_guard lk(this->_sorted_index_mutex);
+            this->_pending_flushes.erase(flush_iteration);
 
             for(auto& new_sorted_index : partitioned_sorted_indices.value())
             {
@@ -550,6 +550,8 @@ namespace hedge::db
 
                 auto sorted_index_ptr = std::make_shared<sorted_index>(std::move(new_sorted_index));
                 this->_sorted_indices[prefix].emplace_back(std::move(sorted_index_ptr));
+
+                assert(check_is_sorted_by_epoch(this->_sorted_indices[prefix]) && "Sorted indices vector is not sorted by epoch after memtable flush");
             }
         }
 
@@ -560,7 +562,7 @@ namespace hedge::db
         return hedge::ok();
     }
 
-    hedge::expected<size_t> database::_compaction_job(bool ignore_ratio)
+    hedge::expected<size_t> database::_compaction_job(bool ignore_size_ratio)
     {
         this->_logger.log("Starting compaction job");
 
@@ -580,133 +582,175 @@ namespace hedge::db
         for(auto& [prefix, vec] : indices_local_copy)
             initial_vec_sizes.emplace(prefix, vec.size());
 
-        bool stability_reached = false; // @see database::compact_sorted_indices() to understand compaction stability
-
         std::atomic_size_t total_bytes_written{0};
 
         // Main compaction loop
-        while(!stability_reached)
+        std::vector<hedge::error> errors;
+        auto wg = async::wait_group::make_shared();
+
+        wg->set(indices_local_copy.size()); // One task per partition
+
+        auto make_compaction_sub_task = [this,
+                                         &total_bytes_written,
+                                         &errors,
+                                         this_iteration_id = this->_flush_iteration.fetch_add(1)](
+                                            size_t indices_to_merge,
+                                            std::vector<sorted_index_ptr_t>& ordered_indices_vec,
+                                            std::shared_ptr<async::wait_group> wg) -> async::task<void>
         {
-            stability_reached = true;
-
-            std::vector<hedge::error> errors;
-            auto wg = async::wait_group::make_shared();
-
-            wg->set(indices_local_copy.size()); // One task per partition
-
-            auto make_compaction_sub_task = [this,
-                                             &total_bytes_written,
-                                             &errors,
-                                             this_iteration_id = this->_flush_iteration.fetch_add(1)](
-                                                std::vector<sorted_index_ptr_t>& ordered_indices_vec,
-                                                std::shared_ptr<async::wait_group> wg) -> async::task<void>
-            {
-                // set lower priority for thread
-
-                auto smallest_index_it = ordered_indices_vec.begin() + (ordered_indices_vec.size() - 1);
-                auto second_smallest_index_it = smallest_index_it - 1;
-
-                auto merge_config = hedge::db::index_ops::merge_config{
-                    .read_ahead_size = this->_config.compaction_read_ahead_size_bytes,
-                    .new_index_id = this_iteration_id,
-                    .base_path = this->_indices_path,
-                    .discard_deleted_keys = false,
-                    .create_new_with_odirect = this->_config.use_odirect_for_indices,
-                    .populate_cache_with_output = true,
-                    .try_reading_from_cache = true,
-                };
-
-                auto maybe_compacted_table = co_await index_ops::k_way_merge_async(
-                    merge_config,
-                    **second_smallest_index_it,
-                    **smallest_index_it,
-                    async::this_thread_executor(),
-                    this->_page_cache);
-
-                if(!maybe_compacted_table)
-                {
-                    errors.emplace_back(
-                        std::format("An error occurred while compacting {} and {}: {}",
-                                    (*smallest_index_it)->path().string(),
-                                    (*second_smallest_index_it)->path().string(),
-                                    maybe_compacted_table.error().to_string()));
-                }
-                else
-                {
-                    // Remove temporary (or not) tables
-                    (*smallest_index_it)->set_delete_on_obj_destruction(true);
-                    (*second_smallest_index_it)->set_delete_on_obj_destruction(true);
-
-                    // Replace the two merged indices with the new one
-                    ordered_indices_vec.erase(smallest_index_it);
-                    ordered_indices_vec.erase(second_smallest_index_it);
-                    total_bytes_written.fetch_add(maybe_compacted_table.value().file_size(), std::memory_order::relaxed);
-                    ordered_indices_vec.emplace_back(std::make_shared<sorted_index>(std::move(maybe_compacted_table.value())));
-                }
-
-                wg->decr();
+            // set lower priority for thread
+            auto merge_config = hedge::db::index_ops::merge_config{
+                .read_ahead_size = this->_config.compaction_read_ahead_size_bytes,
+                .new_index_id = this_iteration_id,
+                .base_path = this->_indices_path,
+                .discard_deleted_keys = false,
+                .create_new_with_odirect = this->_config.use_odirect_for_indices,
+                .populate_cache_with_output = true,
+                .try_reading_from_cache = true,
             };
 
-            size_t compaction_executor_id = 0;
-            for(auto& [prefix, partition_vec] : indices_local_copy)
-            {
-                if(partition_vec.size() <= 1) // Nothing to compact
-                {
-                    wg->decr();
-                    continue;
-                }
+            std::vector<const sorted_index*> index_ptrs;
+            index_ptrs.reserve(indices_to_merge);
 
-                // Compacts the two smallest sorted indices in the partition if the size ratio condition
-                // This minimizes the number of overall operations if we stick to the two_ways_merge strategy
-                // K-way merge could be more efficient but is more complex to implement
-                std::ranges::sort(
-                    partition_vec,
-                    [](const sorted_index_ptr_t& lhs, const sorted_index_ptr_t& rhs)
+            for(auto it = ordered_indices_vec.rbegin(); it != ordered_indices_vec.rbegin() + indices_to_merge; ++it)
+                index_ptrs.emplace_back(it->get());
+
+            auto maybe_compacted_table = co_await index_ops::k_way_merge_async(
+                merge_config,
+                index_ptrs,
+                async::this_thread_executor(),
+                this->_page_cache);
+
+            if(!maybe_compacted_table)
+            {
+                errors.emplace_back(std::format("An error occurred on compaction: {}", errors.front().to_string()));
+            }
+            else
+            {
+                // Remove temporary (or not) tables
+                for(auto it = ordered_indices_vec.rbegin(); it != ordered_indices_vec.rbegin() + indices_to_merge; ++it)
+                    it->get()->set_delete_on_obj_destruction(true);
+
+                // Replace the two merged indices with the new one
+                size_t bytes_written = maybe_compacted_table.value().file_size();
+
+                // erase the last `indices_to_merge` elements
+                for(size_t i = 0; i < indices_to_merge; ++i)
+                    ordered_indices_vec.pop_back();
+
+                ordered_indices_vec.insert(ordered_indices_vec.end(), std::make_shared<sorted_index>(std::move(maybe_compacted_table.value())));
+
+                assert(check_is_sorted_by_epoch(ordered_indices_vec) && "Sorted indices vector is not sorted by epoch after compaction");
+
+                total_bytes_written.fetch_add(bytes_written, std::memory_order::relaxed);
+            }
+
+            wg->decr();
+        };
+
+        size_t compaction_executor_id = 0;
+        for(auto& [prefix, partition_vec] : indices_local_copy)
+        {
+            if(partition_vec.size() <= 1) // Nothing to compact
+            {
+                wg->decr();
+                continue;
+            }
+
+            // Compact by epoch: newest indices get merged together first
+            // It is expected that size increases with index seniority
+            assert(check_is_sorted_by_epoch(partition_vec) && "Sorted indices vector is not sorted by epoch before compaction");
+
+            // TODO: Check if issues might arise after bulk deletes
+            size_t included_indices = 1;
+            size_t cumulative_size = partition_vec.rbegin()->get()->size();
+
+            if(ignore_size_ratio)
+            {
+                included_indices = partition_vec.size();
+
+                cumulative_size = std::accumulate(
+                    partition_vec.begin(),
+                    partition_vec.end(),
+                    0UL,
+                    [](size_t acc, const sorted_index_ptr_t& idx_ptr)
                     {
-                        return lhs->size() > rhs->size();
+                        return acc + idx_ptr->size();
                     });
-
-                auto smallest_index = static_cast<double>(partition_vec[partition_vec.size() - 1]->size());
-                auto second_smallest_index = static_cast<double>(partition_vec[partition_vec.size() - 2]->size());
-
-                if(!ignore_ratio && smallest_index / second_smallest_index <= this->_config.target_compaction_size_ratio)
-                {
-                    wg->decr();
-                    continue;
-                }
-
-                stability_reached = false;
-
-                // TODO: If only two sorted indices are left to compact, the merge_config.filter_deleted_keys should be true
-                // Otherwise, if
-                // - filter_delete_keys is `true`
-                // - A key is in more than two sorted indices and is deleted in one of them
-                // The key would appear again, because we lost track of it after merging the first two indices
-                const auto& executor = this->_compation_executor_pool[compaction_executor_id++ % this->_compation_executor_pool.size()];
-                executor->submit_io_task(make_compaction_sub_task(partition_vec, wg));
             }
-
-            // Barrier waiting for this round of compaction sub-tasks to complete
-            // TODO: This could be improved since we can the sorted indices belonging
-            // to each partition can be compacted independently
-            bool done = wg->wait_for(this->_config.compaction_timeout);
-
-            if(!done)
-                return hedge::error("compaction timeout.");
-
-            // TODO: In case there are errors occurred at mid-term during compaction,
-            // We won't loose the old sorted indices, but we might end up in stale state.
-            // This is due to not tracking which merges succeeded and which failed.
-            // So it will be hard or even impossible to reload the database correctly
-            // because on file system there will be a mix of old and new sorted indices.
-            // This should be solved by having a manifest file
-            if(!errors.empty())
+            else
             {
-                for(auto& error : errors)
-                    this->_logger.log("Compaction error: ", error.to_string());
 
-                return hedge::error("Some errors occurred during compaction. Check the logs for details.");
+                // https://github.com/facebook/rocksdb/wiki/universal-compaction#3-compaction-triggered-by-number-of-sorted-runs-while-respecting-size_ratio
+                // This approach is aimed at minimizing write amplification and making the most out of the write bandwidth
+                // Take, for example, an indices with 6M items and a fresh flushed one with 1M items
+                // assume target_compaction_size_ratio = 1.0
+                // candidate_size / cumulative_size would be 6 which is > size_ratio: it's not worth to rewrite that 6M table because would be for the most part basically a copy operation
+                //
+                // Let's assume these are the sizes in millions of the first 5 indices: 1 1 1 2 6
+                // candidate_size = 1, cumulative_size = 1: 1/1 <= 1.0 -> included indices = {1, 1}
+                // candidate_size = 1, cumulative_size = 2: 1/(1+1) = 0.5 <= 1.0 -> included indices = {1, 1, 1}
+                // candidate_size = 2, cumulative_size = 3: 2/(1+1+1) = 0.67 <= 1.0 -> included indices = {1, 1, 1, 2}
+                // candidate_size = 6, cumulative_size = 5: 6/5 = 1.2 > 0 -> STOP (do not include index with 6M items)
+                for(auto it = partition_vec.rbegin() + 1; it != partition_vec.rend(); ++it)
+                {
+                    size_t candidate_size = it->get()->size();
+                    if((double)candidate_size / (double)cumulative_size <= this->_config.target_compaction_size_ratio)
+                    {
+                        cumulative_size += it->get()->size();
+                        ++included_indices;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
             }
+
+            if(included_indices < 2)
+            {
+                wg->decr();
+                continue;
+            }
+
+            // TODO: If only two sorted indices are left to compact, the merge_config.filter_deleted_keys should be true
+            // Otherwise, if
+            // - filter_delete_keys is `true`
+            // - A key is in more than two sorted indices and is deleted in one of them
+            // The key would appear again, because we lost track of it after merging the first two indices
+
+            this->_logger.log("Triggering compaction of ", std::to_string(included_indices), " indices for ", std::to_string(cumulative_size / 1000), "K key pairs");
+            // print the included indices:
+            for(auto it = partition_vec.rbegin(); it != partition_vec.rbegin() + included_indices; ++it)
+            {
+                this->_logger.log(" - Index path: ", (*it)->path().string(),
+                                  ", epoch: ", (*it)->epoch(),
+                                  ", size: ", (*it)->size() / 1000, "K key pairs");
+            }
+            const auto& executor = this->_compation_executor_pool[compaction_executor_id++ % this->_compation_executor_pool.size()];
+            executor->submit_io_task(make_compaction_sub_task(included_indices, partition_vec, wg));
+        }
+
+        // Barrier waiting for this round of compaction sub-tasks to complete
+        // TODO: This could be improved since we can the sorted indices belonging
+        // to each partition can be compacted independently
+        bool done = wg->wait_for(this->_config.compaction_timeout);
+
+        if(!done)
+            return hedge::error("compaction timeout.");
+
+        // TODO: In case there are errors occurred at mid-term during compaction,
+        // We won't loose the old sorted indices, but we might end up in stale state.
+        // This is due to not tracking which merges succeeded and which failed.
+        // So it will be hard or even impossible to reload the database correctly
+        // because on file system there will be a mix of old and new sorted indices.
+        // This should be solved by having a manifest file
+        if(!errors.empty())
+        {
+            for(auto& error : errors)
+                this->_logger.log("Compaction error: ", error.to_string());
+
+            return hedge::error("Some errors occurred during compaction. Check the logs for details.");
         }
 
         // Finalize compaction: replace the database's sorted indices with the compacted ones
@@ -730,7 +774,7 @@ namespace hedge::db
                 // Here, some indices might get out of scope and get deleted if no other shared_ptr owns them
                 db_sorted_indices_vec.erase(range_start, range_end);
 
-                db_sorted_indices_vec.insert(db_sorted_indices_vec.end(),
+                db_sorted_indices_vec.insert(db_sorted_indices_vec.begin(),
                                              new_partition_vec.begin(),
                                              new_partition_vec.end());
 

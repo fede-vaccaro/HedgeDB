@@ -126,7 +126,7 @@ namespace hedge::db
         config.keys_in_mem_before_flush = this->MEMTABLE_CAPACITY;
         config.compaction_read_ahead_size_bytes = 64 * 1024 * 1024;
         config.num_partition_exponent = 0;
-        config.target_compaction_size_ratio = 0.9;
+        config.target_compaction_size_ratio = 1.0;
         config.use_odirect_for_indices = true;
         config.index_page_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024;
         config.index_point_cache_size_bytes = 0;
@@ -170,7 +170,6 @@ namespace hedge::db
         };
 
         auto t0 = std::chrono::high_resolution_clock::now();
-
         for(size_t i = 0; i < this->N_KEYS; ++i)
         {
             const auto& executor = async::executor_pool::executor_from_static_pool();
@@ -194,14 +193,17 @@ namespace hedge::db
         // std::cout << "Total duration for flush: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
 
         // compaction
+        std::cout << "Triggering full compaction" << std::endl;
         t0 = std::chrono::high_resolution_clock::now();
         auto compaction_status_future = db->compact_sorted_indices(true);
         auto maybe_compaction_status = compaction_status_future.get();
         ASSERT_TRUE(maybe_compaction_status.has_value()) << "An error occurred during compaction: " << maybe_compaction_status.error().to_string();
         t1 = std::chrono::high_resolution_clock::now();
-        duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-        std::cout << "Total duration for a full compaction: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
-        std::cout << "Compaction throughput in: " << (double)(maybe_compaction_status.value() / (1000.0 * 1000.0)) / (duration.count() / 1'000'000.0) << " MB/s" << std::endl;
+        auto compaction_duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+        std::cout << "Total duration for a full compaction: " << (double)compaction_duration.count() / 1000.0 << " ms" << std::endl;
+        std::cout << "Compaction throughput in: " << (double)(maybe_compaction_status.value() / (1000.0 * 1000.0)) / (compaction_duration.count() / 1'000'000.0) << " MB/s" << std::endl;
+        std::cout << "Insertion throughput including compaction:"
+                  << (uint64_t)(this->N_KEYS / (double)(duration.count() + compaction_duration.count()) * 1'000'000) << " items/s" << std::endl;
 
         prof::print_internal_perf_stats(false);
 
