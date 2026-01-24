@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 
+#include <chrono>
 #include <errno.h>
 #include <linux/perf_event.h>
 #include <stdint.h>
@@ -24,16 +25,10 @@ namespace hedge::prof
 {
 
     template <typename Tp>
-    inline __attribute__((always_inline)) void DoNotOptimize(Tp const& value)
+    inline __attribute__((always_inline)) void do_not_optimize(Tp const& value)
     {
         asm volatile("" : : "r,m"(value) : "memory");
     }
-
-    int open_perf_counter(uint32_t type, uint64_t config);
-
-    void start_counter(int fd);
-
-    long long stop_counter(int fd);
 
     struct counter_i
     {
@@ -41,15 +36,20 @@ namespace hedge::prof
         virtual void start() = 0;
         virtual void stop(bool ignore = false) = 0;
         virtual void reset() = 0;
-        [[nodiscard]] virtual double get() const = 0;
+        [[nodiscard]] virtual double avg() const = 0;
+        [[nodiscard]] virtual double total() const = 0;
+        [[nodiscard]] virtual double count() const = 0;
+        [[nodiscard]] virtual double duration_ns() const { return 0.0; }
         virtual ~counter_i() = default;
     };
 
     struct counter final : counter_i
     {
-        std::size_t stat{0};
-        std::size_t count{0};
-        inline static thread_local int fd;
+        std::size_t _total{0};
+        std::size_t _count{0};
+        std::size_t _duration{0};
+        std::chrono::high_resolution_clock::time_point _start_time{};
+        // inline static thread_local int fd;
 
         void add(size_t c, size_t n) final;
 
@@ -58,7 +58,10 @@ namespace hedge::prof
         void stop(bool ignore) final;
         void reset() final;
 
-        [[nodiscard]] double get() const final;
+        [[nodiscard]] double avg() const final;
+        [[nodiscard]] double total() const final;
+        [[nodiscard]] double count() const final;
+        [[nodiscard]] double duration_ns() const final;
     };
 
     struct noop_counter final : counter_i
@@ -70,7 +73,10 @@ namespace hedge::prof
         void stop(bool /*ignore*/) final {}
         void reset() final {}
 
-        [[nodiscard]] double get() const final { return 0.0; }
+        [[nodiscard]] double avg() const final { return 0.0; }
+        [[nodiscard]] double total() const final { return 0.0; }
+        [[nodiscard]] double count() const final { return 0.0; }
+        [[nodiscard]] double duration_ns() const final { return 0.0; }
     };
 
     inline static noop_counter NOOP_COUNTER{};

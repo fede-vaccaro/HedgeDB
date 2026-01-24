@@ -51,7 +51,7 @@ namespace hedge::fs
     private:
         static std::atomic_size_t _GLOBAL_COUNTER;
 
-        size_t _id{std::numeric_limits<size_t>::max()};
+        uint32_t _id{std::numeric_limits<uint32_t>::max()};
         int _fd = -1;
         size_t _file_size{};
         std::filesystem::path _path;
@@ -149,7 +149,7 @@ namespace hedge::fs
 
             file fd_wrapped{};
 
-            fd_wrapped._id = _GLOBAL_COUNTER.fetch_add(1, std::memory_order_relaxed);
+            fd_wrapped._id = static_cast<uint32_t>(file::_GLOBAL_COUNTER.fetch_add(1, std::memory_order_relaxed));
             fd_wrapped._fd = fd;
             fd_wrapped._file_size = file_size;
             fd_wrapped._path = path;
@@ -230,7 +230,7 @@ namespace hedge::fs
 
             file fd_wrapped{};
 
-            fd_wrapped._id = _GLOBAL_COUNTER.fetch_add(1, std::memory_order_relaxed);
+            fd_wrapped._id = static_cast<uint32_t>(file::_GLOBAL_COUNTER.fetch_add(1, std::memory_order_relaxed));
             fd_wrapped._fd = fd;
             fd_wrapped._file_size = file_size;
             fd_wrapped._path = path;
@@ -242,7 +242,7 @@ namespace hedge::fs
 
         file() = default;
 
-        file(file&& other) noexcept : _id(std::exchange(other._id, std::numeric_limits<size_t>::max())),
+        file(file&& other) noexcept : _id(std::exchange(other._id, std::numeric_limits<uint32_t>::max())),
                                       _fd(std::exchange(other._fd, -1)),
                                       _file_size(std::exchange(other._file_size, 0)),
                                       _path(std::move(other._path)),

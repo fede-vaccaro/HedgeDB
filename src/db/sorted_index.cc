@@ -57,8 +57,13 @@ namespace hedge::db
                 if(last_page_size != 0)
                     meta_index_range_end = meta_index_range_begin + last_page_size;
             }
-            for(const auto* it = meta_index_range_begin; it != meta_index_range_end; it++)
-                __builtin_prefetch(it);
+
+            const auto* prefetch_ptr = reinterpret_cast<const uint8_t*>(meta_index_range_begin);
+            const auto* prefetch_end_ptr = reinterpret_cast<const uint8_t*>(meta_index_range_end);
+
+            // Prefetch meta index page entries
+            for(const uint8_t* ptr = prefetch_ptr; ptr < prefetch_end_ptr; ptr += 64)
+                __builtin_prefetch(ptr, 0, 1);
         }
 
         // Perform the binary search on the meta-index.
