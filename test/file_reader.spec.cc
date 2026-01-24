@@ -124,9 +124,9 @@ namespace hedge::fs
                     std::cout << "Processing item at offset " << current_offset << std::endl;
 
                     std::span<uint8_t> data_span;
-                    if(std::holds_alternative<file_reader::awaitable_read_request_t>(item))
+                    if(std::holds_alternative<file_reader<>::awaitable_read_request_t>(item))
                     {
-                        auto& req = std::get<file_reader::awaitable_read_request_t>(item);
+                        auto& req = std::get<file_reader<>::awaitable_read_request_t>(item);
                         auto result = co_await req.first;
                         if(result.error_code != 0)
                         {
@@ -137,7 +137,7 @@ namespace hedge::fs
                     }
                     else
                     {
-                        auto& pg_awaitable = std::get<file_reader::awaitable_page_guard_t>(item);
+                        auto& pg_awaitable = std::get<file_reader<>::awaitable_page_guard_t>(item);
                         auto pg = co_await pg_awaitable.first;
                         data_span = pg_awaitable.second;
                         std::cout << "Span size (page guard): " << data_span.size() << std::endl;
@@ -303,14 +303,14 @@ namespace hedge::fs
 
             auto batch = reader.next(cache);
             if(batch.size() != 3) co_return "Expected batch size 3, got " + std::to_string(batch.size());
-            if(!std::holds_alternative<file_reader::awaitable_read_request_t>(batch[0])) co_return "Item 0 type err";
-            if(!std::holds_alternative<file_reader::awaitable_page_guard_t>(batch[1])) co_return "Item 1 type err";
-            if(!std::holds_alternative<file_reader::awaitable_read_request_t>(batch[2])) co_return "Item 2 type err";
+            if(!std::holds_alternative<file_reader<>::awaitable_read_request_t>(batch[0])) co_return "Item 0 type err";
+            if(!std::holds_alternative<file_reader<>::awaitable_page_guard_t>(batch[1])) co_return "Item 1 type err";
+            if(!std::holds_alternative<file_reader<>::awaitable_read_request_t>(batch[2])) co_return "Item 2 type err";
 
             for(auto& item : batch)
             {
-                if(std::holds_alternative<file_reader::awaitable_read_request_t>(item)) co_await std::get<file_reader::awaitable_read_request_t>(item).first;
-                else co_await std::get<file_reader::awaitable_page_guard_t>(item).first;
+                if(std::holds_alternative<file_reader<>::awaitable_read_request_t>(item)) co_await std::get<file_reader<>::awaitable_read_request_t>(item).first;
+                else co_await std::get<file_reader<>::awaitable_page_guard_t>(item).first;
             }
             co_return "";
         }());

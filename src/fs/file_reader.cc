@@ -1,11 +1,12 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <sched.h>
 #include <stdexcept>
 
 #include "cache.h"
+#include "db/sorted_index.h"
 #include "file_reader.h"
-#include "fs.hpp"
 #include "io_executor.h"
 #include "mailbox_impl.h"
 #include "types.h"
@@ -15,7 +16,8 @@
 
 namespace hedge::fs
 {
-    file_reader::file_reader(const fs::file& fd, const file_reader_config& config)
+    template <typename FILE>
+    file_reader<FILE>::file_reader(const FILE& fd, const file_reader_config& config)
         : _file(fd), _config(config), _current_offset(config.start_offset)
     {
 
@@ -28,7 +30,8 @@ namespace hedge::fs
         this->_config.read_ahead_size = buffer_size;
     }
 
-    std::vector<file_reader::awaitable_from_cache_or_fs_t> file_reader::next(const std::shared_ptr<db::shared_page_cache>& cache)
+    template <typename FILE>
+    std::vector<typename file_reader<FILE>::awaitable_from_cache_or_fs_t> file_reader<FILE>::next(const std::shared_ptr<db::shared_page_cache>& cache)
     {
         prof::get<"file_reader_next">().start();
         if(cache == nullptr)
@@ -39,7 +42,8 @@ namespace hedge::fs
         return res;
     }
 
-    std::vector<file_reader::awaitable_from_cache_or_fs_t> file_reader::_next()
+    template <typename FILE>
+    std::vector<typename file_reader<FILE>::awaitable_from_cache_or_fs_t> file_reader<FILE>::_next()
     {
         if(this->_current_offset >= this->_config.end_offset)
             return {}; // EOF reached
@@ -79,7 +83,8 @@ namespace hedge::fs
         return out;
     }
 
-    std::vector<file_reader::awaitable_from_cache_or_fs_t> file_reader::_next(const std::shared_ptr<db::shared_page_cache>& cache)
+    template <typename FILE>
+    std::vector<typename file_reader<FILE>::awaitable_from_cache_or_fs_t> file_reader<FILE>::_next(const std::shared_ptr<db::shared_page_cache>& cache)
     {
         if(this->_current_offset >= this->_config.end_offset)
             return {}; // EOF reached
@@ -247,14 +252,19 @@ namespace hedge::fs
         return result;
     }
 
-    size_t file_reader::get_current_offset() const
+    template <typename FILE>
+    size_t file_reader<FILE>::get_current_offset() const
     {
         return this->_current_offset;
     }
 
-    bool file_reader::is_eof() const
+    template <typename FILE>
+    bool file_reader<FILE>::is_eof() const
     {
         return this->_current_offset >= this->_config.end_offset;
     }
+
+    template class file_reader<db::sorted_index>;
+    template class file_reader<fs::file>;
 
 } // namespace hedge::fs

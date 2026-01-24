@@ -4,6 +4,7 @@
 #include <error.hpp>
 #include <sys/types.h>
 
+#include "db/sorted_index.h"
 #include "fs.hpp"
 #include "mailbox.h"
 #include "mailbox_impl.h"
@@ -26,14 +27,16 @@ namespace hedge::fs
         size_t read_ahead_size;
     };
 
+    template <typename FILE = fs::file>
+    // requires std::is_base_of_v<fs::file, FILE>
     class file_reader
     {
-        const fs::file& _file;
+        const FILE& _file;
         file_reader_config _config;
         size_t _current_offset{0};
 
     public:
-        file_reader(const fs::file& fd, const file_reader_config& config);
+        file_reader(const FILE& fd, const file_reader_config& config);
 
         using awaitable_read_request_t = std::pair<async::awaitable_mailbox<async::read_response>, page_aligned_buffer<index_entry_t>>; // size_t is bytes requested before padding
 
@@ -42,10 +45,13 @@ namespace hedge::fs
         using awaitable_from_cache_or_fs_t = std::variant<awaitable_read_request_t, awaitable_page_guard_t>;
 
         std::vector<awaitable_from_cache_or_fs_t> next(const std::shared_ptr<db::shared_page_cache>& cache);
-        
 
         [[nodiscard]] size_t get_current_offset() const;
         [[nodiscard]] bool is_eof() const;
+        [[nodiscard]] const auto& file() const
+        {
+            return this->_file;
+        }
 
     private:
         std::vector<awaitable_from_cache_or_fs_t> _next();
