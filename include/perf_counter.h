@@ -122,6 +122,21 @@ namespace hedge::prof
         return *instance;
     }
 
+    struct counter_guard
+    {
+        counter_i* _counter;
+
+        counter_guard(counter_i& counter) : _counter(&counter)
+        {
+            this->_counter->start();
+        }
+
+        ~counter_guard()
+        {
+            this->_counter->stop();
+        }
+    };
+
     counter_i* _acquire_counter_ptr(std::string_view name);
 
     void print_internal_perf_stats(bool reset = true);

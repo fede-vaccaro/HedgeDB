@@ -170,7 +170,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
         hedge::db::sorted_index new_index{};
 
         // prepare merge between 1 and 2
-        auto new_index_1 = co_await hedge::db::index_ops::two_way_merge_async(
+        auto new_index_1 = co_await hedge::db::index_ops::k_way_merge_async(
             merge_config,
             indices[0],
             indices[1],
@@ -187,7 +187,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
         // prepare merge between new_index_1 and 3
         if(_this->N_RUNS == 3 && indices.size() == 3)
         {
-            auto new_index_2 = co_await hedge::db::index_ops::two_way_merge_async(
+            auto new_index_2 = co_await hedge::db::index_ops::k_way_merge_async(
                 merge_config,
                 new_index,
                 indices[2],

@@ -602,7 +602,6 @@ namespace hedge::db
                                                 std::shared_ptr<async::wait_group> wg) -> async::task<void>
             {
                 // set lower priority for thread
-                
 
                 auto smallest_index_it = ordered_indices_vec.begin() + (ordered_indices_vec.size() - 1);
                 auto second_smallest_index_it = smallest_index_it - 1;
@@ -617,7 +616,7 @@ namespace hedge::db
                     .try_reading_from_cache = true,
                 };
 
-                auto maybe_compacted_table = co_await index_ops::two_way_merge_async(
+                auto maybe_compacted_table = co_await index_ops::k_way_merge_async(
                     merge_config,
                     **second_smallest_index_it,
                     **smallest_index_it,

@@ -311,7 +311,7 @@ namespace hedge::db
         testing::Combine(
             testing::Values(80'000'000), // n keys
             testing::Values(100),       // payload size
-            testing::Values(1'000'000)   // memtable capacity
+            testing::Values(2'000'000)   // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)
         {

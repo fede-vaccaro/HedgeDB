@@ -162,7 +162,7 @@ namespace hedge::prof
         std::string_view{"merge_throughput_mbs"},
         std::string_view{"merge_mb_written"},
         std::string_view{"make_fs_page_from_span"},
-        std::string_view{"page_malloc"},
+        std::string_view{"inner_merge_loop"},
     };
 
     static constexpr fixed_set<std::string_view, keys.size()> _metrics_set = fixed_set(keys);
