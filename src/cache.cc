@@ -228,7 +228,7 @@ namespace hedge::db
         return awaitable_page_guard{.pg = read_page_guard{this->_data.get(), idx * PAGE_SIZE_IN_BYTES, frame_ptr}};
     }
 
-    std::vector<std::optional<page_cache::awaitable_page_guard>> shared_page_cache::lookup_range(uint64_t id, size_t start_page_index, size_t num_pages, bool hint_evict)
+    std::vector<std::optional<page_cache::awaitable_page_guard>> shared_page_cache::lookup_range(uint32_t id, size_t start_page_index, size_t num_pages, bool hint_evict)
     {
         std::vector<std::optional<page_cache::awaitable_page_guard>> results;
         // results.resize(num_pages);
@@ -252,7 +252,7 @@ namespace hedge::db
         return results;
     }
 
-    std::vector<page_cache::write_page_guard> shared_page_cache::get_write_slots_range(uint64_t id, size_t start_page_index, size_t num_pages)
+    std::vector<page_cache::write_page_guard> shared_page_cache::get_write_slots_range(uint32_t id, size_t start_page_index, size_t num_pages)
     {
         std::vector<page_cache::write_page_guard> results;
         results.reserve(num_pages);

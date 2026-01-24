@@ -54,6 +54,7 @@ namespace hedge::db
          * @param path The filesystem path where the new `sorted_index` file should be created.
          * @param sorted_keys An rvalue reference to a vector of `index_entry_t`, expected to be pre-sorted by key.
          * @param upper_bound The upper bound key prefix for the partition this index belongs to.
+         * @param cache A shared pointer to the database's shared page cache for index caching. Use nullptr if no caching is desired.
          * @param use_odirect If `true`, opens the file with O_DIRECT flag for direct I/O access.
          * @return An `expected<sorted_index>` containing the newly created `sorted_index` object (representing the file)
          * on success, or an error if file writing fails.
@@ -77,6 +78,7 @@ namespace hedge::db
          * @param num_partition_exponent Determines the number of partitions (2^num_partition_exponent).
          * @param flush_iteration A unique identifier for this flush operation, used in filenames
          * to distinguish between multiple and independent flushes to the same partition (e.g., `ff/ff00.0`, `ff/ff00.1`).
+         * @param cache A shared pointer to the database's shared page cache for index caching. Use nullptr if no caching is desired.
          * @return An `expected<std::vector<sorted_index>>` containing the newly created `sorted_index` objects on success,
          * or an error if any step fails.
          */
@@ -92,15 +94,15 @@ namespace hedge::db
          */
         struct merge_config
         {
-            size_t read_ahead_size{};            ///< Number of bytes to read from each input index file at a time during the merge. (e.g., 64 * 1024 for 64KB chunks).
-            size_t new_index_id{};               ///< The unique ID (iteration number) to use for the output merged index file name (e.g., ".<new_index_id>").
-            std::filesystem::path base_path{};   ///< The base directory where the output file will be created (within its partition subdirectory).
-            bool discard_deleted_keys{false};    ///< If `true`, entries marked with the delete flag (`value_ptr_t::is_deleted()`) will not be written to the output file.
-                                                 ///< Set `false` if there are more indices belonging to the same partition to be merged later, to preserve delete markers until the final merge.
-                                                 ///< Set `true` when this is the final merge for the partition to eliminate deleted entries from the final index.
-            bool create_new_with_odirect{false}; ///< If `true`, opens the output file with O_DIRECT flag for direct I/O access.
-            bool populate_cache_with_output{true};      ///< If `true`, tries to fill the cache with the resulting sorted index
-            bool try_reading_from_cache{false};  ///< If `true`, attempts to read input index pages from the shared page cache before issuing disk reads.
+            size_t read_ahead_size{};              ///< Number of bytes to read from each input index file at a time during the merge. (e.g., 64 * 1024 for 64KB chunks).
+            size_t new_index_id{};                 ///< The unique ID (iteration number) to use for the output merged index file name (e.g., ".<new_index_id>").
+            std::filesystem::path base_path{};     ///< The base directory where the output file will be created (within its partition subdirectory).
+            bool discard_deleted_keys{false};      ///< If `true`, entries marked with the delete flag (`value_ptr_t::is_deleted()`) will not be written to the output file.
+                                                   ///< Set `false` if there are more indices belonging to the same partition to be merged later, to preserve delete markers until the final merge.
+                                                   ///< Set `true` when this is the final merge for the partition to eliminate deleted entries from the final index.
+            bool create_new_with_odirect{false};   ///< If `true`, opens the output file with O_DIRECT flag for direct I/O access.
+            bool populate_cache_with_output{true}; ///< If `true`, tries to fill the cache with the resulting sorted index
+            bool try_reading_from_cache{false};    ///< If `true`, attempts to read input index pages from the shared page cache before issuing disk reads.
         };
 
         /**

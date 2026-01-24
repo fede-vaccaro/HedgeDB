@@ -228,8 +228,8 @@ namespace hedge::db
             }
         }
 
-        std::vector<page_cache::write_page_guard> get_write_slots_range(uint64_t id, size_t start_page_index, size_t num_pages);
-        std::vector<std::optional<page_cache::awaitable_page_guard>> lookup_range(uint64_t id, size_t start_page_index, size_t num_pages, bool hint_evict);
+        std::vector<page_cache::write_page_guard> get_write_slots_range(uint32_t id, size_t start_page_index, size_t num_pages);
+        std::vector<std::optional<page_cache::awaitable_page_guard>> lookup_range(uint32_t id, size_t start_page_index, size_t num_pages, bool hint_evict);
     };
 
     class point_cache
