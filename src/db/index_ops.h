@@ -63,6 +63,7 @@ namespace hedge::db
             const std::filesystem::path& path,
             page_aligned_buffer<index_entry_t>&& sorted_keys,
             size_t upper_bound,
+            size_t epoch,
             const std::shared_ptr<db::shared_page_cache>& cache,
             bool use_odirect);
 
@@ -117,7 +118,7 @@ namespace hedge::db
          * @return A `async::task` that resolves to an `expected<sorted_index>` containing the newly created merged `sorted_index`
          * object on success, or an error if the merge fails.
          */
-        static async::task<hedge::expected<sorted_index>> k_way_merge_async(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor, const std::shared_ptr<db::shared_page_cache>& cache);
+        static async::task<hedge::expected<sorted_index>> k_way_merge_async(const merge_config& config, const std::vector<const sorted_index*>& indices, const std::shared_ptr<async::executor_context>& executor, const std::shared_ptr<db::shared_page_cache>& cache);
 
         /**
          * @brief Synchronously merges two `sorted_index` files by running and waiting for `two_way_merge_async`.

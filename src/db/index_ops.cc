@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -46,6 +45,7 @@ namespace hedge::db
         std::optional<uint64_t> meta_index_start_offset{};
         std::optional<uint64_t> meta_index_end_offset{};
         std::optional<uint64_t> footer_start_offset{};
+        std::optional<uint64_t> epoch{};
 
         /**
          * @brief Validates that all required fields are set and constructs the footer.
@@ -70,6 +70,8 @@ namespace hedge::db
                 return hedge::error("Footer meta_index_end_offset not set");
             if(!this->footer_start_offset.has_value())
                 return hedge::error("Footer footer_start_offset not set");
+            if(!this->epoch.has_value())
+                return hedge::error("Footer epoch not set");
 
             return sorted_index_footer{
                 .version = sorted_index_footer::CURRENT_FOOTER_VERSION,
@@ -81,7 +83,7 @@ namespace hedge::db
                 .meta_index_start_offset = this->meta_index_start_offset.value(),
                 .meta_index_end_offset = this->meta_index_end_offset.value(),
                 .footer_start_offset = this->footer_start_offset.value(),
-            };
+                .epoch = this->epoch.value()};
         }
     };
 
@@ -262,6 +264,7 @@ namespace hedge::db
                                                    path,
                                                    std::exchange(current_partition_entries, page_aligned_buffer<index_entry_t>(partition_estimated_size)),
                                                    current_partition_id,
+                                                   flush_iteration,
                                                    cache,
                                                    use_odirect));
 
@@ -303,7 +306,7 @@ namespace hedge::db
     }
 
     hedge::expected<sorted_index>
-    index_ops::save_as_sorted_index(const std::filesystem::path& path, page_aligned_buffer<index_entry_t>&& sorted_keys, size_t upper_bound,
+    index_ops::save_as_sorted_index(const std::filesystem::path& path, page_aligned_buffer<index_entry_t>&& sorted_keys, size_t upper_bound, size_t epoch,
                                     const std::shared_ptr<db::shared_page_cache>& cache,
                                     bool use_odirect)
     {
@@ -327,6 +330,7 @@ namespace hedge::db
         builder.meta_index_start_offset = index_size_bytes + index_padding_bytes;
         builder.meta_index_end_offset = index_size_bytes + index_padding_bytes + meta_index_size_bytes;
         builder.footer_start_offset = index_size_bytes + index_padding_bytes + meta_index_size_bytes + meta_index_padding_bytes;
+        builder.epoch = epoch;
 
         OUTCOME_TRY(auto footer, builder.build());
 
@@ -454,8 +458,7 @@ namespace hedge::db
     // NOLINTNEXTLINE(readability-function-cognitive-complexity) - Acknowledging complexity inherent in external merge. TODO: consider refactoring later.
     async::task<hedge::expected<sorted_index>> index_ops::k_way_merge_async(
         const merge_config& config,
-        const sorted_index& left,
-        const sorted_index& right,
+        const std::vector<const sorted_index*>& indices,
         const std::shared_ptr<async::executor_context>& executor,
         const std::shared_ptr<db::shared_page_cache>& cache)
     {
@@ -468,23 +471,28 @@ namespace hedge::db
         if(config.read_ahead_size % PAGE_SIZE_IN_BYTES != 0)
             co_return hedge::error("Read ahead size must be page aligned (page size: " + std::to_string(PAGE_SIZE_IN_BYTES) + ")");
 
-        if(left._footer.version != sorted_index_footer::CURRENT_FOOTER_VERSION ||
-           right._footer.version != sorted_index_footer::CURRENT_FOOTER_VERSION)
-            co_return hedge::error("Cannot merge sorted indices with different versions");
-
-        if(left._footer.upper_bound != right._footer.upper_bound)
-            co_return hedge::error("Cannot merge sorted indices with different upper bounds");
-
         // Create new footer builder and start populating it
         footer_builder fb;
-        fb.upper_bound = left._footer.upper_bound;
+
+        auto argmax_it = std::ranges::max_element(indices, [](const auto* lhs, const auto* rhs)
+                                                  { return lhs->epoch() > rhs->epoch(); });
+
+        fb.epoch = (*argmax_it)->epoch();
+        fb.upper_bound = indices[0]->_footer.upper_bound;
         fb.index_start_offset = 0;
 
         // Extrapolate new index path
-        auto [dir, file_name] = format_prefix(left.upper_bound());
+        auto [dir, file_name] = format_prefix(indices[0]->upper_bound());
         auto new_path = config.base_path / dir / with_extension(file_name, std::format(".{}", config.new_index_id));
 
-        size_t max_new_index_keys = left.size() + right.size();
+        size_t max_new_index_keys = std::accumulate(
+            indices.begin(),
+            indices.end(),
+            static_cast<size_t>(0),
+            [](size_t acc, const sorted_index* idx)
+            {
+                return acc + idx->_footer.indexed_keys;
+            });
         size_t max_new_meta_index_entries = hedge::ceil(max_new_index_keys, INDEX_PAGE_NUM_ENTRIES);
         size_t estimated_size =
             (max_new_index_keys * sizeof(index_entry_t)) +
@@ -678,9 +686,9 @@ namespace hedge::db
             }
         };
 
-        const size_t num_bufs = 2;
+        const size_t num_bufs = indices.size();
 
-        auto rbufs_dtor = [](void* ptr)
+        auto rbufs_dtor = [num_bufs](void* ptr)
         {
             for(size_t i = 0; i < num_bufs; ++i)
             {
@@ -695,8 +703,8 @@ namespace hedge::db
 
         auto* buf_ptr = static_cast<rolling_buffer2*>(rbufs_mem.get());
 
-        new(buf_ptr) rolling_buffer2(left, config.read_ahead_size, config.try_reading_from_cache ? cache : nullptr);
-        new(buf_ptr + 1) rolling_buffer2(right, config.read_ahead_size, config.try_reading_from_cache ? cache : nullptr);
+        for(size_t i = 0; i < indices.size(); ++i)
+            new(buf_ptr + i) rolling_buffer2(*indices[i], config.read_ahead_size, config.try_reading_from_cache ? cache : nullptr);
 
         size_t indexed_keys = 0;
         [[maybe_unused]] size_t filtered_keys = 0; // TO FIX: this was used for an assert that is currently disabled
@@ -707,7 +715,7 @@ namespace hedge::db
         auto merged_meta_index = page_aligned_buffer<meta_index_entry>(max_new_meta_index_entries);
 
         auto* rbufs_begin = buf_ptr;
-        auto* rbufs_end = buf_ptr + 2;
+        auto* rbufs_end = buf_ptr + num_bufs;
 
         // Helper lambda to refresh both buffers by reading the next chunk from each index
         auto refresh_buffers = [&]() -> async::task<hedge::status>
@@ -755,7 +763,7 @@ namespace hedge::db
             ++write_it;
             assert(write_it <= write_buffer.end());
             assert(write_it >= write_buffer.begin());
-            assert(indexed_keys <= left.size() + right.size());
+            assert(indexed_keys <= max_new_index_keys);
         };
 
         auto buffer_full = [&write_buffer, &write_it]()
@@ -1204,7 +1212,7 @@ namespace hedge::db
         if(!executor)
             return hedge::error("Executor context is null");
 
-        auto result = executor->sync_submit(k_way_merge_async(config, left, right, executor, nullptr));
+        auto result = executor->sync_submit(k_way_merge_async(config, std::vector<const sorted_index*>{&left, &right}, executor, nullptr));
 
         if(!result.has_value())
             return hedge::error("Failed to merge sorted indices: " + result.error().to_string());
