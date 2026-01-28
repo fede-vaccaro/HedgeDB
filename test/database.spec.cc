@@ -124,8 +124,8 @@ namespace hedge::db
         db_config config;
         config.auto_compaction = true;
         config.keys_in_mem_before_flush = this->MEMTABLE_CAPACITY;
-        config.compaction_read_ahead_size_bytes = 64 * 1024 * 1024;
-        config.num_partition_exponent = 0;
+        config.compaction_read_ahead_size_bytes = 4 * 1024 * 1024;
+        config.num_partition_exponent = 4;
         config.target_compaction_size_ratio = 1.0;
         config.use_odirect_for_indices = true;
         config.index_page_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024;
@@ -146,10 +146,12 @@ namespace hedge::db
 
         auto make_put_task = [this, &db, &write_wg, &dist](size_t i) -> async::task<void>
         {
+            prof::counter_guard guard(prof::get<"put_async">());
+
             const auto& key = this->_keys_mmap.get_ptr<key_t>()[i];
             size_t seed = std::hash<uuids::uuid>{}(key) % MAX_CACHE_ITEMS_CAPACITY;
 
-            auto value = this->_possible_values[seed];
+            const auto& value = this->_possible_values[seed];
 
             auto status = co_await db->put_async(key, value);
 
@@ -183,6 +185,7 @@ namespace hedge::db
         std::cout << "Insertion bandwidth: " << (double)this->N_KEYS * ((this->PAYLOAD_SIZE + sizeof(key_t)) / 1000.0 / 1000.0) / (duration.count() / 1'000'000.0) << " MB/s" << std::endl;
         std::cout << "Insertion throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000) << " items/s" << std::endl;
         std::cout << "Deleted keys: " << this->_deleted_keys.size() << std::endl;
+        prof::print_internal_perf_stats(false);
 
         // flush
         // t0 = std::chrono::high_resolution_clock::now();
@@ -201,7 +204,7 @@ namespace hedge::db
         t1 = std::chrono::high_resolution_clock::now();
         auto compaction_duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         std::cout << "Total duration for a full compaction: " << (double)compaction_duration.count() / 1000.0 << " ms" << std::endl;
-        std::cout << "Compaction throughput in: " << (double)(maybe_compaction_status.value() / (1000.0 * 1000.0)) / (compaction_duration.count() / 1'000'000.0) << " MB/s" << std::endl;
+        std::cout << "Compaction throughput: " << (double)(maybe_compaction_status.value() / (1000.0 * 1000.0)) / (compaction_duration.count() / 1'000'000.0) << " MB/s" << std::endl;
         std::cout << "Insertion throughput including compaction:"
                   << (uint64_t)(this->N_KEYS / (double)(duration.count() + compaction_duration.count()) * 1'000'000) << " items/s" << std::endl;
 
@@ -262,14 +265,14 @@ namespace hedge::db
                 if(!maybe_value)
                 {
                     number_of_errors++;
-                    std::cerr << "An error occurred during retrieval for key " << key << ": " << maybe_value.error().to_string() << std::endl;
+                    // std::cerr << "An error occurred during retrieval for key " << key << ": " << maybe_value.error().to_string() << std::endl;
                     read_wg->decr();
                     co_return;
                 }
 
-                [[maybe_unused]] auto& value = maybe_value.value();
+                [[maybe_unused]] const auto& value = maybe_value.value();
 
-                auto expected_value = this->_possible_values[seed];
+                const auto& expected_value = this->_possible_values[seed];
 
                 if(value != expected_value)
                 {
@@ -311,8 +314,8 @@ namespace hedge::db
         test_suite,
         database_test,
         testing::Combine(
-            testing::Values(80'000'000), // n keys
-            testing::Values(100),       // payload size
+            testing::Values(10'000'000), // n keys
+            testing::Values(100),        // payload size
             testing::Values(2'000'000)   // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)

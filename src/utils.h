@@ -49,15 +49,6 @@ namespace hedge
         return (value + divisor - 1) / divisor;
     }
 
-
-    inline void myassert(bool expr, const std::string& msg = "")
-    {
-        // constexpr bool ACTIVE = false;
-
-        // if(ACTIVE && !expr)
-        //     throw std::runtime_error("Assertion failed: " + msg);
-    }
-
     inline uint16_t extract_prefix(const uuids::uuid& key)
     {
         const auto& array_view = byte_varray_view(key);
@@ -89,36 +80,47 @@ namespace hedge
 
     std::vector<std::pair<size_t, std::filesystem::path>> get_prefixes(const std::filesystem::path& base_path, size_t num_space_partitions);
 
-    using aligned_buffer_t = std::unique_ptr<uint8_t, std::function<void(void*)>>;
+    using aligned_buffer_t = std::unique_ptr<uint8_t[], void (*)(void*)>;
 
     // Needed for page aligned buffers
     template <typename T>
     struct page_aligned_buffer
     {
     private:
-        aligned_buffer_t buf = aligned_buffer_t(nullptr, [](auto*) {});
+        aligned_buffer_t _buf = aligned_buffer_t(nullptr, std::free);
         size_t _size;
 
     public:
         page_aligned_buffer() = default;
+
         explicit page_aligned_buffer(size_t s) : _size(s)
         {
             size_t mem = hedge::ceil(s * sizeof(T), PAGE_SIZE_IN_BYTES) * PAGE_SIZE_IN_BYTES;
 
-            buf = aligned_buffer_t(static_cast<uint8_t*>(std::aligned_alloc(PAGE_SIZE_IN_BYTES, mem)), std::free);
-            assert(buf);
+            this->_buf = aligned_buffer_t(static_cast<uint8_t*>(std::aligned_alloc(PAGE_SIZE_IN_BYTES, mem)), std::free);
+            assert(_buf);
 
-            std::fill(buf.get(), buf.get() + mem, 0);
+            std::fill(_buf.get(), _buf.get() + mem, 0);
+        }
+
+        std::span<uint8_t> as_byte_span()
+        {
+            return {_buf.get(), this->_size * sizeof(T)};
+        }
+
+        void* raw_data()
+        {
+            return _buf.get();
         }
 
         T* data()
         {
-            return reinterpret_cast<T*>(buf.get());
+            return reinterpret_cast<T*>(_buf.get());
         }
 
         const T* data() const
         {
-            return reinterpret_cast<T*>(buf.get());
+            return reinterpret_cast<T*>(_buf.get());
         }
 
         T* begin()
@@ -172,6 +174,7 @@ namespace hedge
         {
             std::fill(this->data(), this->data() + this->_size, T{});
         }
+
     };
 
 } // namespace hedge

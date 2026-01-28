@@ -23,6 +23,7 @@
 #include "io_executor.h"
 #include "logger.h"
 #include "perf_counter.h"
+#include "spinlock.h"
 #include "task.h"
 
 using namespace std::string_literals;
@@ -31,23 +32,21 @@ namespace hedge::async
 {
 
     template <typename T>
-    std::vector<T> pop_n(std::deque<T>& queue, size_t n)
+    void pop_n(std::vector<T>& out, std::deque<T>& queue, size_t n)
     {
+        out.clear();
+
         auto it_start = queue.begin();
         auto it_end = it_start + std::min(n, queue.size());
 
         if(it_start == it_end)
-            return {};
-
-        std::vector<T> slice;
+            return;
 
         auto slice_size = std::distance(it_start, it_end);
-        slice.reserve(slice_size);
-        std::move(it_start, it_end, std::back_inserter(slice));
+        out.reserve(slice_size);
+        std::move(it_start, it_end, std::back_inserter(out));
 
         queue.erase(it_start, it_end);
-
-        return slice;
     }
 
     executor_context::executor_context(uint32_t queue_depth) : _queue_depth(queue_depth), _max_buffered_requests(queue_depth * 4)
@@ -90,7 +89,9 @@ namespace hedge::async
         auto sq_space_left = io_uring_sq_space_left(&this->_ring);
         auto sq_to_submit = std::min(static_cast<int32_t>(sq_space_left), cqe_space_margin);
 
-        auto requests = pop_n(this->_waiting_for_io_queue, sq_to_submit);
+        thread_local std::vector<std::unique_ptr<mailbox>> requests;
+
+        pop_n(requests, this->_waiting_for_io_queue, sq_to_submit);
 
         if(requests.empty())
             return;
@@ -200,18 +201,21 @@ namespace hedge::async
         }
 
         {
-            std::unique_lock lk(this->_pending_requests_mutex);
+            // std::unique_lock lk(this->_pending_requests_mutex);
 
-            this->_pending_requests_cv.wait(lk, [this]()
-                                            { return this->_pending_requests.size() < this->_max_buffered_requests; });
-
-            this->_pending_requests.emplace_back(std::move(task));
+            int retry{0};
+            while(!this->_pending_requests.push_back(task))
+            {
+                async::nanosleep(retry);
+            }
         }
 
-        this->_sleep_cv.notify_one();
+        bool is_sleeping = this->_sleep.exchange(false, std::memory_order_relaxed);
+        if(is_sleeping)
+            this->_sleep.notify_one();
     };
 
-    bool executor_context::try_submit_io_task(task<void> task)
+    bool executor_context::try_submit_io_task(task<void>& task)
     {
         if(!this->_running.load(std::memory_order_relaxed))
         {
@@ -219,18 +223,15 @@ namespace hedge::async
             return false;
         }
 
-        {
-            std::unique_lock lk(this->_pending_requests_mutex);
+        if(!this->_pending_requests.push_back(task))
+            return false;
 
-            if(this->_pending_requests.size() >= this->_max_buffered_requests)
-                return false;
+        bool is_sleeping = this->_sleep.exchange(false, std::memory_order::relaxed);
+        if(is_sleeping)
+            this->_sleep.notify_one();
 
-            this->_pending_requests.emplace_back(std::move(task));
-        }
-        
-        this->_sleep_cv.notify_one();
         return true;
-    };
+    }
 
     void executor_context::shutdown()
     {
@@ -241,14 +242,14 @@ namespace hedge::async
 
         this->_running.store(false, std::memory_order_relaxed);
 
-        this->_sleep_cv.notify_one();
-        this->_pending_requests_cv.notify_all();
+        this->_sleep.store(false, std::memory_order_relaxed);
+        this->_sleep.notify_one();
 
         if(this->_worker.joinable())
             this->_worker.join();
     }
 
-    bool executor_context::_should_sleep()
+    [[nodiscard]] bool executor_context::_should_sleep() const
     {
         if(!this->_in_flight_requests.empty() ||
            !this->_in_progress_tasks.empty() ||
@@ -256,14 +257,7 @@ namespace hedge::async
            !this->_io_ready_queue.empty())
             return false;
 
-        size_t pending;
-
-        {
-            std::unique_lock lk(this->_pending_requests_mutex);
-            pending = this->_pending_requests.size();
-        }
-
-        return pending == 0 && this->_running.load(std::memory_order_relaxed);
+        return this->_pending_requests.empty() && this->_running.load(std::memory_order_relaxed);
     }
 
     void executor_context::_event_loop()
@@ -274,29 +268,40 @@ namespace hedge::async
 
         while(true)
         {
-            if(this->_in_progress_tasks.size() < this->_queue_depth)
             {
-                std::unique_lock lk(this->_pending_requests_mutex); // should have priority over submit
+                // prof::counter_guard g(prof::get<"executor_pop_tasks">());
 
-                if(this->_count_before_sleep == CYCLES_BEFORE_SLEEP)
+                if(this->_in_progress_tasks.size() < this->_queue_depth)
                 {
-                    this->_sleep_cv.wait(lk, [this]()
-                                         { return !this->_pending_requests.empty() || !this->_running.load(std::memory_order::relaxed); });
-                    this->_count_before_sleep = 0;
+                    if(this->_count_before_sleep >= YIELD_TRIGGER_LOOPS)
+                    {
+                        std::this_thread::yield();
+                    }
+                    
+                    if(this->_count_before_sleep == SLEEP_TRIGGER_LOOPS)
+                    {
+                        bool expected = true;
+                        if(this->_sleep.compare_exchange_strong(expected, true, std::memory_order_relaxed))
+                            this->_sleep.wait(true, std::memory_order_relaxed);
+
+                        this->_count_before_sleep = 0;
+                    }
+
+                    while(this->_in_progress_tasks.size() + new_tasks.size() < this->_queue_depth * 2)
+                    {
+                        auto task = this->_pending_requests.pop_front();
+
+                        if(!task.has_value())
+                            break;
+
+                        assert(task.value().handle() != nullptr);
+                        new_tasks.emplace_back(std::move(task.value()));
+                    }
+
+                    if(!this->_running.load(std::memory_order_relaxed) && this->_pending_requests.empty()) // && this->_in_progress_tasks.empty() && this->_in_flight_requests.empty() && new_tasks.empty()
+                        break;
                 }
-
-                while(!this->_pending_requests.empty() && this->_in_progress_tasks.size() < this->_queue_depth)
-                {
-                    auto task = std::move(this->_pending_requests.front());
-                    this->_pending_requests.pop_front();
-
-                    new_tasks.emplace_back(std::move(task));
-                }
-
-                if(!this->_running.load(std::memory_order_relaxed) && this->_pending_requests.empty()) // && this->_in_progress_tasks.empty() && this->_in_flight_requests.empty() && new_tasks.empty()
-                    break;
             }
-            this->_pending_requests_cv.notify_all();
 
             this->_submit_sqe();
 
@@ -308,6 +313,7 @@ namespace hedge::async
                 auto handle = task.handle();
                 auto [_, ok] = this->_in_progress_tasks.insert({handle, std::move(task)});
                 assert(ok);
+                assert(handle != nullptr);
 
                 handle.resume();
             }
@@ -319,7 +325,15 @@ namespace hedge::async
             this->_gc_tasks();
 
             if(this->_should_sleep())
+            {
                 this->_count_before_sleep++;
+                this->_sleep.store(true, std::memory_order::relaxed);
+            }
+            else
+            {
+                // The sleep counter is reset on task submission
+                this->_count_before_sleep = 0;
+            }
         }
     }
 

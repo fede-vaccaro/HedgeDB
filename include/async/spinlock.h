@@ -69,7 +69,7 @@ namespace hedge::async
                 flag_.fetch_add(1, std::memory_order_relaxed); // Undo the lock
                 for(int i = 0; flag_.load(std::memory_order_relaxed) <= 0;)
                 {
-                    nanosleep(i);
+                    nanosleep(i); // TODO: nanosleep is a syscall, consider using pause instruction or adaptive mutex
                 }
             }
         }

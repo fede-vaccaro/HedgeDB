@@ -56,13 +56,13 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
 
             auto memtable = hedge::db::mem_index{};
 
-            memtable.reserve(n_keys);
+            memtable.reserve(1, n_keys);
 
             for(size_t j = 0; j < n_keys; ++j)
             {
                 auto uuid = generate_uuid();
                 this->_uuids.emplace_back(uuid);
-                memtable.put(uuid, {static_cast<uint64_t>(j), uuid_fake_size(uuid), 0});
+                memtable.put(0, uuid, {static_cast<uint64_t>(j), uuid_fake_size(uuid), 0});
             }
 
             auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, &memtable, NUM_PARTITION_EXPONENT, i, nullptr);

@@ -125,6 +125,10 @@ target_link_libraries(file_reader_test uring gtest gtest_main)
 add_executable(worker_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/worker.spec.cc)
 target_link_libraries(worker_test uring gtest gtest_main)
 
+# mpsc tests
+add_executable(mpsc_test test/mpsc.spec.cc)
+target_link_libraries(mpsc_test gtest gtest_main)
+
 # cache tests
 add_executable(cache_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/cache.spec.cc)
 target_link_libraries(cache_test uring gtest gtest_main)

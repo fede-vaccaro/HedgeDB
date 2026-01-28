@@ -10,6 +10,7 @@
 #include <liburing/io_uring.h>
 #include <memory>
 #include <mutex>
+#include <semaphore>
 #include <thread>
 #include <tsl/robin_map.h>
 #include <tsl/sparse_map.h>
@@ -18,6 +19,7 @@
 #include <logger.h>
 
 #include "mailbox.h"
+#include "mpsc.h"
 #include "task.h"
 
 namespace hedge::async
@@ -77,7 +79,9 @@ namespace hedge::async
         size_t _queue_depth;
         size_t _max_buffered_requests;
 
-        static constexpr int32_t CYCLES_BEFORE_SLEEP = 16;
+        static constexpr int32_t SLEEP_TRIGGER_LOOPS = 128;
+        static constexpr int32_t YIELD_TRIGGER_LOOPS = 64;
+
         int32_t _count_before_sleep{0};
 
         io_uring _ring;
@@ -93,10 +97,9 @@ namespace hedge::async
         std::deque<std::unique_ptr<mailbox>> _waiting_for_io_queue;
         std::deque<std::unique_ptr<mailbox>> _io_ready_queue;
 
-        std::condition_variable _sleep_cv;
-        std::condition_variable _pending_requests_cv;
-        std::mutex _pending_requests_mutex;
-        std::deque<task<void>> _pending_requests;
+        alignas(64) std::atomic_bool _sleep{false};
+
+        async::mpsc_queue<task<void>, 1024> _pending_requests;
 
         std::vector<int32_t> _registered_fds;
 
@@ -126,8 +129,8 @@ namespace hedge::async
             return future.get();
         }
 
-        void submit_io_task(task<void> task);          // do NOT call this from a task, otherwise it will deadlock! TODO: address this
-        bool try_submit_io_task(task<void> task); // do NOT call this from a task, otherwise it will deadlock! TODO: address this
+        void submit_io_task(task<void> task);      // do NOT call this from a task, otherwise it will deadlock! TODO: address this
+        bool try_submit_io_task(task<void>& task); // do NOT call this from a task, otherwise it will deadlock! TODO: address this
 
         void shutdown();
 
@@ -194,7 +197,7 @@ namespace hedge::async
         void _event_loop();
         void _gc_tasks();
 
-        bool _should_sleep();
+        [[nodiscard]] bool _should_sleep() const;
         std::vector<io_uring_sqe*>& _fill_sqes(size_t sqes_requested);
     };
 

@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <ranges>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -56,7 +57,7 @@ namespace hedge::db
         // TODO: Write a manifest file to store configuration and database state (e.g., last table ID).
         // This might be relevant for correctly loading the database later.
 
-        db->_mem_index.reserve(config.keys_in_mem_before_flush);
+        db->_mem_index.reserve(async::executor_pool::static_pool().size(), config.keys_in_mem_before_flush);
 
         // Create first value table
         auto first_value_table = value_table::make_new(db->_values_path, 0);
@@ -109,7 +110,7 @@ namespace hedge::db
         // TODO: consinstency check
         db->_config = config;
 
-        db->_mem_index.reserve(config.keys_in_mem_before_flush);
+        db->_mem_index.reserve(async::executor_pool::static_pool().size(), config.keys_in_mem_before_flush);
 
         // Load SSTs
         size_t max_flush_iteration = 0;
@@ -190,21 +191,24 @@ namespace hedge::db
 
     async::task<hedge::status> database::put_async(key_t key, const byte_buffer_t& value)
     {
+        // prof::counter_guard guard(prof::get<"put_async">());
+
         if(auto size = this->_mem_index_size.load(); size >= this->_config.keys_in_mem_before_flush) // Check if the memtable needs flushing
         {
             if(this->_mem_index_size.compare_exchange_strong(size, 0))
             {
                 // It might happen that some items get pushed _before_ acquiring the lock: this implies that _mem_index_size and the actual size are desynced,
                 // but is not really problematic: it will only happen that there will be more element in the new sst than expected
-
                 std::unique_lock lk(this->_mem_index_mutex);
-                auto old_mem_index = std::move(this->_mem_index);
 
-                this->_mem_index = mem_index{};
-                this->_mem_index.reserve(this->_config.keys_in_mem_before_flush);
+                auto new_mem_index = mem_index{};
+                new_mem_index.reserve(async::executor_pool::static_pool().size(), this->_config.keys_in_mem_before_flush);
+
+                // TODO: fix race condition
+                auto old_mem_index = std::move(this->_mem_index);
+                this->_mem_index = std::move(new_mem_index);
 
                 size_t curr_flush_iteration = this->_flush_iteration.fetch_add(1, std::memory_order_relaxed);
-
                 // map's pointers are stable
                 mem_index* flushing_mem_index = nullptr;
 
@@ -257,10 +261,10 @@ namespace hedge::db
             return hedge::ok();
         };
 
-        static thread_local size_t this_thread_idx = database::_thread_count.fetch_add(1);
-        assert(this_thread_idx < this->_write_buffers.size());
+        static thread_local size_t THIS_THREAD_IDX = database::_thread_count.fetch_add(1);
+        assert(THIS_THREAD_IDX < this->_write_buffers.size());
 
-        const auto& write_buffer_ref = this->_write_buffers[this_thread_idx];
+        const auto& write_buffer_ref = this->_write_buffers[THIS_THREAD_IDX];
         if(!write_buffer_ref->is_set())
         {
             auto status = _allocate_space_for_write_buffer(*write_buffer_ref);
@@ -286,11 +290,10 @@ namespace hedge::db
 
         // --- Update Memtable 7---
         {
-            std::unique_lock lk(this->_mem_index_mutex);
-            this->_mem_index.put(key, maybe_write.value());
+            std::shared_lock lk(this->_mem_index_mutex); // The shared mutex might be counter-intuitive but this mutex is for protecting the mem_index structure from flushes
+            this->_mem_index.put(THIS_THREAD_IDX, key, maybe_write.value());
             this->_mem_index_size.fetch_add(1);
         }
-
         co_return hedge::ok();
     }
 
@@ -298,8 +301,6 @@ namespace hedge::db
     // {
     //     co_return co_await this->put_async(key, value, executor);
     // }
-
-    auto CHRONO_NOW() { return std::chrono::high_resolution_clock::now(); }
 
     async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> database::_find_value_ptr_and_value_table(key_t key)
     {
@@ -451,12 +452,13 @@ namespace hedge::db
 
         auto [value_ptr, table_ptr] = std::move(maybe_value_ptr_table.value());
 
+        static thread_local size_t THIS_THREAD_IDX = database::_thread_count.fetch_add(1);
+
         // TODO: As written above, we might want to allow deleting non-existing keys
         // Hence, we might want to always run this step
-        {
-            std::unique_lock lk(this->_mem_index_mutex);
-            this->_mem_index.put(key, value_ptr_t::apply_delete(value_ptr));
-        }
+        this->_mem_index.put(THIS_THREAD_IDX, key, value_ptr_t::apply_delete(value_ptr));
+        this->_mem_index_size.fetch_add(1);
+
         co_return hedge::ok();
     }
 
@@ -523,7 +525,7 @@ namespace hedge::db
     {
         auto t0 = std::chrono::high_resolution_clock::now();
 
-        this->_logger.log("Flushing mem index to ", this->_indices_path);
+        this->_logger.log("Flushing mem index ", flush_iteration, " to ", this->_indices_path, " with ", memtable_to_flush->size(), " keys");
 
         auto partitioned_sorted_indices = index_ops::flush_mem_index(this->_indices_path,
                                                                      memtable_to_flush,
@@ -719,14 +721,13 @@ namespace hedge::db
             // - A key is in more than two sorted indices and is deleted in one of them
             // The key would appear again, because we lost track of it after merging the first two indices
 
-            this->_logger.log("Triggering compaction of ", std::to_string(included_indices), " indices for ", std::to_string(cumulative_size / 1000), "K key pairs");
-            // print the included indices:
-            for(auto it = partition_vec.rbegin(); it != partition_vec.rbegin() + included_indices; ++it)
-            {
-                this->_logger.log(" - Index path: ", (*it)->path().string(),
-                                  ", epoch: ", (*it)->epoch(),
-                                  ", size: ", (*it)->size() / 1000, "K key pairs");
-            }
+            // this->_logger.log("Triggering compaction of ", std::to_string(included_indices), " indices for ", std::to_string(cumulative_size / 1000), "K key pairs");
+            // for(auto it = partition_vec.rbegin(); it != partition_vec.rbegin() + included_indices; ++it)
+            // {
+            //     this->_logger.log(" - Index path: ", (*it)->path().string(),
+            //                       ", epoch: ", (*it)->epoch(),
+            //                       ", size: ", (*it)->size() / 1000, "K key pairs");
+            // }
             const auto& executor = this->_compation_executor_pool[compaction_executor_id++ % this->_compation_executor_pool.size()];
             executor->submit_io_task(make_compaction_sub_task(included_indices, partition_vec, wg));
         }
@@ -790,17 +791,37 @@ namespace hedge::db
         return total_bytes_written.load();
     }
 
-    std::future<expected<size_t>> database::compact_sorted_indices(bool ignore_ratio)
+    std::future<expected<size_t>> database::compact_sorted_indices(bool ignore_size_ratio)
     {
         auto compaction_promise_ptr = std::make_shared<std::promise<hedge::expected<size_t>>>();
         std::future<hedge::expected<size_t>> compaction_future = compaction_promise_ptr->get_future();
 
         this->_compaction_worker.submit(
-            [db = this->shared_from_this(), promise = std::move(compaction_promise_ptr), ignore_ratio]()
+            [db = this->shared_from_this(), promise = std::move(compaction_promise_ptr), ignore_size_ratio]()
             {
+                size_t pending_flushes;
+                {
+                    std::shared_lock lk(db->_pending_flushes_mutex);
+                    pending_flushes = db->_pending_flushes.size();
+                }
+
+                // The worker process job sequentially; so this guarantees that all pending flushes submitted til now are done
+                if(pending_flushes > 0)
+                {
+                    std::promise<void> flush_promise;
+                    std::future<void> flush_future = flush_promise.get_future();
+                    db->_flush_worker.submit(
+                        [&]()
+                        {
+                            db->_logger.log("Waiting for ", pending_flushes, " pending flushes to complete before starting compaction.");
+                            flush_promise.set_value();
+                        });
+                    flush_future.get();
+                }
+
                 auto start_processing_t = std::chrono::high_resolution_clock::now();
 
-                auto maybe_bytes_written = db->_compaction_job(ignore_ratio);
+                auto maybe_bytes_written = db->_compaction_job(ignore_size_ratio);
                 if(!maybe_bytes_written)
                     db->_logger.log("Compaction job failed: ", maybe_bytes_written.error().to_string());
 
