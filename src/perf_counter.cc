@@ -163,6 +163,12 @@ namespace hedge::prof
         std::string_view{"merge_mb_written"},
         std::string_view{"make_fs_page_from_span"},
         std::string_view{"inner_merge_loop"},
+        std::string_view("memtable_put"),
+        std::string_view("put_async"),
+        std::string_view("executor_pop_tasks"),
+        std::string_view("swap_memtable"),
+        std::string_view("test_task"),
+        std::string_view("submit_job"),
     };
 
     static constexpr fixed_set<std::string_view, keys.size()> _metrics_set = fixed_set(keys);

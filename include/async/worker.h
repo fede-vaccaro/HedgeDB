@@ -1,5 +1,6 @@
 #pragma once
 
+#include "io_executor.h"
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -12,17 +13,16 @@ namespace hedge::async
 
     class worker
     {
-        // static constexpr size_t MAX_JOBS = 16;
-        static constexpr size_t MAX_JOBS = std::numeric_limits<size_t>::max();
-
         using job_t = std::function<void()>;
 
+        alignas(64) std::atomic_size_t _job_count{0};
         std::thread _worker;
 
         bool _running{true};
-        std::condition_variable _cv;
         std::mutex _queue_m;
+
         std::deque<job_t> _job_queue;
+        async::mpsc_queue<job_t, 32> _fast_job_queue;
 
     public:
         worker();

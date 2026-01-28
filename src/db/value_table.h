@@ -199,7 +199,7 @@ namespace hedge::db
     };
 
     // Per thread write buffer
-    class write_buffer
+    class alignas(64) write_buffer
     {
         std::unique_ptr<uint8_t> _buffer{nullptr};
         size_t _buffer_capacity{0};

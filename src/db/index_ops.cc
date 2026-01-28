@@ -172,12 +172,15 @@ namespace hedge::db
         auto* buf_ptr = buf.data();
 
         size_t idx = 0;
-        for(auto [k, v] : index->_index)
-            buf_ptr[idx++] = {.key = k, .value_ptr = v};
+        
+        for(auto & i : index->_index)
+        {
+            for(auto [k, v] : i)
+                buf_ptr[idx++] = {.key = k, .value_ptr = v};
+        }
 
-        std::sort(
-            buf.begin(),
-            buf.end(),
+        std::ranges::sort(
+            buf,
             [](const index_entry_t& lhs, const index_entry_t& rhs)
             {
                 if(lhs.key < rhs.key)

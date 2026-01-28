@@ -112,7 +112,7 @@ namespace hedge::db
         /// Mutex protecting access to the mem_index (memtable).
         async::rw_spinlock _mem_index_mutex;
         mem_index _mem_index;
-        std::atomic_size_t _mem_index_size{0};
+        alignas(64) std::atomic_size_t _mem_index_size{0};
 
         std::shared_mutex _pending_flushes_mutex;
         std::map<size_t, mem_index> _pending_flushes; ///< Tracks memtables currently being flushed to disk.

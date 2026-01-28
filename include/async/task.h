@@ -99,7 +99,7 @@ namespace hedge::async
     {
         using promise_t = task_promise<task, RETURN_VALUE>;
         using handle_t = std::coroutine_handle<promise_t>;
-        handle_t _handle;
+        handle_t _handle{};
 
         explicit task(handle_t h) : _handle(h)
         {
@@ -109,6 +109,8 @@ namespace hedge::async
 
     public:
         using promise_type = promise_t;
+
+        task() = default;
         task(task&& r) noexcept : _handle{std::exchange(r._handle, {})} {}
         ~task()
         {
