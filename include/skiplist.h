@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <csignal>
 #include <cstddef>
@@ -44,11 +45,7 @@ namespace hedge
         std::unique_ptr<uint8_t[], decltype(&std::free)> _data = std::unique_ptr<uint8_t[], decltype(&std::free)>(nullptr, nullptr);
 
     public:
-        ~arena()
-        {
-            std::cout << "Arena allocated bytes: " << this->_capacity / 1024 << " KB\n";
-            std::cout << "Arena used bytes: " << this->_head / 1024 << " KB\n";
-        }
+        explicit arena() = default;
 
         explicit arena(size_t size_bytes) : _capacity(size_bytes)
         {
@@ -56,6 +53,10 @@ namespace hedge
 
             std::fill_n(this->_data.get(), this->_capacity, 0);
         }
+
+        arena(arena&&) = default;
+        arena& operator=(arena&&) = default;
+
         [[nodiscard]] void* at(size_t idx)
         {
             return this->_data.get() + idx;
@@ -77,8 +78,15 @@ namespace hedge
 
             return cur;
         }
+
+        ~arena()
+        {
+            std::cout << "Arena allocated bytes: " << this->_capacity / 1024 << " KB\n";
+            std::cout << "Arena used bytes: " << this->_head / 1024 << " KB\n";
+        }
     };
 
+    // This is a concurrent single-writer multiple-reader skiplist
     template <typename T>
     struct skiplist
     {
@@ -94,10 +102,11 @@ namespace hedge
         using node_t = node<T>;
 
         config _cfg;
+
         arena _node_ptr_pool;
         node_t* _head;
         uint32_t _max_levels;
-        size_t _size{0};
+        std::atomic_size_t _size{0};
 
         std::vector<uint8_t> _precomputed_random_levels;
 
@@ -122,9 +131,9 @@ namespace hedge
 
             // compute needed capacity
             constexpr double margin = 1.1;
-            size_t bytes_capacity = this->_cfg.item_capacity * (sizeof(T) + avg_ptr_per_node) * margin;
+            size_t bytes_capacity = this->_cfg.item_capacity * (sizeof(T) + avg_ptr_per_node * sizeof(uint32_t)) * margin;
 
-            this->_node_ptr_pool.allocate(bytes_capacity);
+            this->_node_ptr_pool = arena(bytes_capacity);
 
             auto head_idx = this->_node_ptr_pool.allocate(node_t::sizeof_at_level(this->_max_levels - 1));
 
@@ -153,7 +162,18 @@ namespace hedge
             }
         }
 
-        void insert(const T& data)
+        [[nodiscard]] size_t capacity() const
+        {
+            return this->_cfg.item_capacity;
+        }
+
+        [[nodiscard]] size_t size() const
+        {
+            return this->_size.load(std::memory_order::relaxed);
+        }
+
+        template <typename COMPARATOR>
+        void insert(const T& data, COMPARATOR&& C)
         {
             size_t dest_level = skiplist::_random_level();
 
@@ -166,8 +186,8 @@ namespace hedge
 
             int k = this->_max_levels - 1;
 
-            node_t* x{this->_head}; // X is the current node
-            node_t* z{};            // Z is the next
+            node_t* x{this->_head}; // X is the node we are currently reading
+            node_t* z{};            // Z is the one after at the same level (if any)
 
             // Starts from max level
             // Position search and insertion happen at the same time
@@ -181,19 +201,19 @@ namespace hedge
                 z = this->_node_at(z_idx);
 
                 // Iterate and find the position at the current level
-                while(z_idx != node_t::EMPTY_IDX && data >= z->data)
+                while(z_idx != node_t::EMPTY_IDX && !(C(data, z->data)))
                 {
                     // std::cout << "Traversing at level " << k << ": " << z.to_string(k) << "\n";
                     x = z;
                     z_idx = z->next[k];
 
-                    [[maybe_unused]] auto check_z_idx_is_valued = [&]()
-                    {
-                        // std::cout << "next_z_idx: " << z_idx << " z: " << z->to_string(dest_level) << std::endl;
-                        // std::cout << "x: " << x->to_string(dest_level) << std::endl;
+                    // [[maybe_unused]] auto check_z_idx_is_valued = [&]()
+                    // {
+                    // std::cout << "next_z_idx: " << z_idx << " z: " << z->to_string(dest_level) << std::endl;
+                    // std::cout << "x: " << x->to_string(dest_level) << std::endl;
 
-                        return z_idx != 0;
-                    };
+                    // return z_idx != 0;
+                    // };
 
                     // assert(check_z_idx_is_valued());
                     z = this->_node_at(z_idx);
@@ -204,17 +224,20 @@ namespace hedge
                     updates[k] = std::pair<node_t*, uint32_t>{x, z_idx};
             }
 
+            // It is crucial to publish the update bottom-up
             for(int k = 0; k < (int)updates.size(); ++k)
             {
                 auto [x, z_idx] = updates[k];
-                new_node->next[k] = z_idx;
-                x->next[k] = new_node_idx;
+
+                std::atomic_ref<uint32_t>(new_node->next[k]).store(z_idx, std::memory_order::release);
+                std::atomic_ref<uint32_t>(x->next[k]).store(new_node_idx, std::memory_order::release); // <-- publish operation
             }
 
-            ++this->_size;
+            this->_size.fetch_add(1, std::memory_order::relaxed);
         }
 
-        [[nodiscard]] std::optional<int> find(int data) const
+        template <typename COMPARATOR, typename EQUIVALENCE>
+        [[nodiscard]] std::optional<T> find_if(T data, COMPARATOR&& C, EQUIVALENCE&& EQ) const
         {
 
             const node_t* x{this->_head}; // X is the current node
@@ -222,12 +245,12 @@ namespace hedge
 
             for(int k = this->_max_levels - 1; k > -1; --k)
             {
-                uint32_t z_idx = x->next[k];
+                uint32_t z_idx = std::atomic_ref<const uint32_t>(x->next[k]).load(std::memory_order::acquire);
                 z = this->_node_at(z_idx);
 
-                while(z_idx != node_t::EMPTY_IDX && !(data < z->data))
+                while(z_idx != node_t::EMPTY_IDX && !(C(data, z->data)))
                 {
-                    if(z->data == data)
+                    if(EQ(z->data, data))
                         return data;
 
                     x = z;
@@ -237,6 +260,14 @@ namespace hedge
             }
 
             return std::nullopt;
+        }
+
+        template <typename COMPARATOR>
+        [[nodiscard]] std::optional<T> find(T data, COMPARATOR&& C) const
+        {
+            return this->find_if(std::move(data), std::forward<COMPARATOR>(C),
+                                 [](const T& a, const T& b)
+                                 { return a == b; });
         }
 
         [[nodiscard]] size_t levels() const
@@ -251,7 +282,7 @@ namespace hedge
 
             while(curr_node_idx != node_t::EMPTY_IDX)
             {
-                int data = curr->data;
+                T data = curr->data;
                 co_yield data;
 
                 curr_node_idx = curr->next[level];
