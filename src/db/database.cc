@@ -363,6 +363,11 @@ namespace hedge::db
                     break; // Found the key in this index, no need to check older indices
                 }
             }
+
+            // TODO: if any of the indices in `sorted_indices_local` have std::shared_ptr::use_count() == 1, 
+            // we can defer the deallocation to a background task to avoid blocking the current task.
+            // I love this shit
+            // Same for the value tables below
         }
 
         if(!value_ptr_opt.has_value())
@@ -407,7 +412,7 @@ namespace hedge::db
 
         auto [value_ptr, table_ptr] = std::move(maybe_value_ptr_table.value());
 
-        // Try reading from write_buffer
+        // Try reading from any of the write_buffers
         for(auto& write_buf : this->_write_buffers)
         {
             auto maybe_file = write_buf->try_read(value_ptr);
