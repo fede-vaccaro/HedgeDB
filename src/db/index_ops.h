@@ -4,6 +4,7 @@
 
 #include "cache.h"
 #include "mem_index.h"
+#include "skiplist.h"
 #include "sorted_index.h"
 #include "types.h"
 #include "utils.h"
@@ -89,6 +90,13 @@ namespace hedge::db
                                                                           size_t flush_iteration,
                                                                           const std::shared_ptr<db::shared_page_cache>& cache,
                                                                           bool use_odirect = false);
+
+        static hedge::expected<std::vector<sorted_index>> flush_mem_indices(const std::filesystem::path& base_path,
+                                                                            const std::vector<skiplist<key_t, value_ptr_t>*>& indices,
+                                                                            size_t num_partition_exponent,
+                                                                            size_t flush_iteration,
+                                                                            const std::shared_ptr<db::shared_page_cache>& cache,
+                                                                            bool use_odirect = false);
 
         /**
          * @brief Configuration options for the `two_way_merge_async` and `two_way_merge` operations.

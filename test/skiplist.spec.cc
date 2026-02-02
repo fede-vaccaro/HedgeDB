@@ -40,27 +40,29 @@ namespace hedge
 
         TEST_F(SkiplistUuidTest, BasicUuidInsertAndFind)
         {
-            hedge::skiplist<uuids::uuid>::config cfg;
+            hedge::skiplist<uuids::uuid, int>::config cfg;
             cfg.item_capacity = 1000;
-            hedge::skiplist<uuids::uuid> list(cfg);
+            hedge::skiplist<uuids::uuid, int> list(cfg);
             UuidComparator cmp;
 
             auto id1 = random_uuid();
             auto id2 = random_uuid();
             auto id3 = random_uuid();
 
-            list.insert(id1, cmp);
-            list.insert(id2, cmp);
+            list.insert(id1, 1);
+            list.insert(id2, 2);
 
             ASSERT_EQ(list.size(), 2);
 
             auto res1 = list.find(id1, cmp);
             ASSERT_TRUE(res1.has_value());
-            ASSERT_EQ(res1.value(), id1);
+            ASSERT_EQ(res1.value().first, id1);
+            ASSERT_EQ(res1.value().second, 1);
 
             auto res2 = list.find(id2, cmp);
             ASSERT_TRUE(res2.has_value());
-            ASSERT_EQ(res2.value(), id2);
+            ASSERT_EQ(res2.value().first, id2);
+            ASSERT_EQ(res2.value().second, 2);
 
             auto res3 = list.find(id3, cmp); // Not inserted
             ASSERT_FALSE(res3.has_value());
@@ -70,10 +72,10 @@ namespace hedge
         {
             // Realistic load test with 200,000 UUIDs
             const size_t N = 200'000;
-            hedge::skiplist<uuids::uuid>::config cfg;
+            hedge::skiplist<uuids::uuid, int>::config cfg;
             cfg.item_capacity = N;
             cfg.p = 0.5; // Probabilistic tuning for density
-            hedge::skiplist<uuids::uuid> list(cfg);
+            hedge::skiplist<uuids::uuid, int> list(cfg);
             UuidComparator cmp;
 
             std::vector<uuids::uuid> keys;
@@ -90,7 +92,7 @@ namespace hedge
 
             for(const auto& key : keys)
             {
-                list.insert(key, cmp);
+                list.insert(key, 1);
             }
 
             auto end = std::chrono::high_resolution_clock::now();
@@ -108,7 +110,7 @@ namespace hedge
             {
                 auto res = list.find(key, cmp);
                 ASSERT_TRUE(res.has_value()) << "Failed to find UUID: " << uuids::to_string(key);
-                ASSERT_EQ(res.value(), key);
+                ASSERT_EQ(res.value().first, key);
             }
 
             end = std::chrono::high_resolution_clock::now();
@@ -119,9 +121,9 @@ namespace hedge
 
         TEST_F(SkiplistUuidTest, SortedIteratorUuid)
         {
-            hedge::skiplist<uuids::uuid>::config cfg;
+            hedge::skiplist<uuids::uuid, int>::config cfg;
             cfg.item_capacity = 100;
-            hedge::skiplist<uuids::uuid> list(cfg);
+            hedge::skiplist<uuids::uuid, int> list(cfg);
             UuidComparator cmp;
 
             std::vector<uuids::uuid> inputs;
@@ -129,7 +131,7 @@ namespace hedge
                 inputs.push_back(random_uuid());
 
             for(const auto& id : inputs)
-                list.insert(id, cmp);
+                list.insert(id, 1);
 
             // Expected order is sorted by operator<
             std::sort(inputs.begin(), inputs.end());
@@ -139,7 +141,7 @@ namespace hedge
 
             for(auto val : reader)
             {
-                outputs.push_back(val);
+                outputs.push_back(val.first);
             }
 
             ASSERT_EQ(outputs.size(), inputs.size());
@@ -154,9 +156,9 @@ namespace hedge
             const size_t N = 50'000;
             const int NUM_READERS = 4;
 
-            hedge::skiplist<uuids::uuid>::config cfg;
+            hedge::skiplist<uuids::uuid, int>::config cfg;
             cfg.item_capacity = N;
-            hedge::skiplist<uuids::uuid> list(cfg);
+            hedge::skiplist<uuids::uuid, int> list(cfg);
             UuidComparator cmp;
 
             // Pre-generate data to avoid lock contention on RNG during test
@@ -191,7 +193,7 @@ namespace hedge
             auto start = std::chrono::high_resolution_clock::now();
             for(const auto& key : keys)
             {
-                list.insert(key, cmp);
+                list.insert(key, 1);
             }
             writer_done.store(true, std::memory_order::release);
             auto end = std::chrono::high_resolution_clock::now();
@@ -213,7 +215,7 @@ namespace hedge
 
             for(double p : p_values)
             {
-                hedge::skiplist<uuids::uuid>::config cfg;
+                hedge::skiplist<uuids::uuid, int>::config cfg;
                 cfg.item_capacity = N;
                 cfg.p = p;
                 cfg.level_cap = std::nullopt; // No max level cap
@@ -221,7 +223,7 @@ namespace hedge
                 std::cout << "\n---------------------------------------------------" << std::endl;
                 std::cout << "Testing with P=" << p << ", N=" << N << ", No Level Cap" << std::endl;
 
-                hedge::skiplist<uuids::uuid> list(cfg);
+                hedge::skiplist<uuids::uuid, int> list(cfg);
                 UuidComparator cmp;
 
                 std::vector<uuids::uuid> keys;
@@ -236,7 +238,7 @@ namespace hedge
                 auto start = std::chrono::high_resolution_clock::now();
                 for(const auto& key : keys)
                 {
-                    list.insert(key, cmp);
+                    list.insert(key, 1);
                 }
                 auto end = std::chrono::high_resolution_clock::now();
                 auto insert_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -252,10 +254,37 @@ namespace hedge
                 auto probe = keys[N / 2];
                 auto res = list.find(probe, cmp);
                 ASSERT_TRUE(res.has_value());
-                ASSERT_EQ(res.value(), probe);
+                ASSERT_EQ(res.value().first, probe);
             }
         }
 
+        TEST_F(SkiplistUuidTest, UpdateValueOnDuplicateKey)
+        {
+            hedge::skiplist<uuids::uuid, int>::config cfg;
+            cfg.item_capacity = 100;
+            hedge::skiplist<uuids::uuid, int> list(cfg);
+            UuidComparator cmp;
+
+            auto id1 = random_uuid();
+
+            // Use std::greater<int> to simulate "newer is larger" (200 > 100) -> 200 should come first in list
+            list.insert(id1, 100, std::less<uuids::uuid>{}, std::greater<int>{});
+            ASSERT_EQ(list.size(), 1);
+
+            auto res1 = list.find(id1, cmp);
+            ASSERT_TRUE(res1.has_value());
+            ASSERT_EQ(res1.value().second, 100);
+
+            // Update value for existing key
+            // This will append a new node
+            // 200 > 100, so (key, 200) < (key, 100) using greater<int> as value comparator
+            list.insert(id1, 200, std::less<uuids::uuid>{}, std::greater<int>{});
+            ASSERT_EQ(list.size(), 2); // Size should INCREASE now (duplicates allowed)
+
+            auto res2 = list.find(id1, cmp);
+            ASSERT_TRUE(res2.has_value());
+            ASSERT_EQ(res2.value().second, 200); // Value should be the newest one (200 > 100)
+        }
 
     } // namespace test
 } // namespace hedge

@@ -72,7 +72,7 @@ namespace hedge::db
             this->_index.resize(thread_count);
 
             assert(reinterpret_cast<uintptr_t>(this->_locks.get()) % 64 == 0);
-            assert(reinterpret_cast<uintptr_t>(this->_index.data()) % 64 == 0);
+            assert(reinterpret_cast<uintptr_t>(this->_index.data()) % 64 == 0); 
 
             constexpr auto SLACK = 0.05;
             const auto size_w_slack = static_cast<size_t>(size * (1.0 + SLACK));

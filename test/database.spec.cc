@@ -314,7 +314,7 @@ namespace hedge::db
         test_suite,
         database_test,
         testing::Combine(
-            testing::Values(10'000'000), // n keys
+            testing::Values(20'000'000), // n keys
             testing::Values(100),        // payload size
             testing::Values(2'000'000)   // memtable capacity
             ),
