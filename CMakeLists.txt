@@ -135,7 +135,11 @@ target_link_libraries(cache_test uring gtest gtest_main)
 
 # database tests
 add_executable(database_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/database.spec.cc)
-target_link_libraries(database_test uring gtest gtest_main tcmalloc)
+target_link_libraries(database_test uring gtest gtest_main tcmalloc atomic)
+
+# skiplist tests
+add_executable(skiplist_test test/skiplist.spec.cc)
+target_link_libraries(skiplist_test gtest gtest_main)
 
 # # library TODO re-enable
 # add_library(hedgedb STATIC ${IO_EXECUTOR_SRCS} ${DB_SOURCES} src/api/api.cc)

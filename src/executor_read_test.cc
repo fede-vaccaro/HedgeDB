@@ -21,6 +21,7 @@
 #include "async/io_executor.h"
 #include "async/mailbox_impl.h"
 #include "async/task.h"
+#include "perf_counter.h"
 
 using namespace std::string_literals;
 
@@ -87,14 +88,102 @@ public:
 
 std::atomic_uint64_t atomic_counter = 0;
 
-hedge::async::task<void> get_obj(hedge::async::read_request r, [[maybe_unused]] hedge::async::read_request r2, [[maybe_unused]] hedge::async::executor_context& executor, working_group& wg)
+std::vector<int> createAlignedFiles()
 {
-    [[maybe_unused]] auto data_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE, PAGE_SIZE));
-    r.data = data_ptr;
+    const size_t TOTAL_GIB = 16;
+    const size_t FILE_SIZE_MIB = 32;
+    const size_t BYTES_PER_MIB = 1024 * 1024;
+    const size_t FILE_SIZE_BYTES = FILE_SIZE_MIB * BYTES_PER_MIB;
+    const int NUM_FILES = (TOTAL_GIB * 1024) / FILE_SIZE_MIB;
 
-    [[maybe_unused]] auto response_f = co_await executor.submit_request(r);
+    std::vector<int> fds;
+    fds.reserve(NUM_FILES);
 
-    free(data_ptr);
+    // Allocate a page-aligned buffer for writing
+    void* buffer = nullptr;
+    if(posix_memalign(&buffer, PAGE_SIZE, FILE_SIZE_BYTES) != 0)
+    {
+        throw std::runtime_error("Failed to allocate page-aligned memory.");
+    }
+
+    // Fill the buffer with the pattern (i % 256)
+    unsigned char* bytePtr = static_cast<unsigned char*>(buffer);
+    for(size_t i = 0; i < FILE_SIZE_BYTES; ++i)
+    {
+        bytePtr[i] = static_cast<unsigned char>(i % 256);
+    }
+
+    std::cout << "Starting file creation..." << std::endl;
+
+    for(int i = 0; i < NUM_FILES; ++i)
+    {
+        std::string filename = "/tmp/fio/data_file_" + std::to_string(i) + ".bin";
+
+        // Open file: Read/Write, Create if doesn't exist, Truncate if it does
+        int fd = open(filename.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, S_IRUSR | S_IWUSR);
+
+        if(fd == -1)
+        {
+            std::cerr << "\nError opening file " << filename << ". Check ulimit -n." << std::endl;
+            break;
+        }
+
+        auto r = fallocate(fd, 0, 0, FILE_SIZE_BYTES);
+        if(r != 0)
+        {
+            std::cerr << "\nError allocating space for file " << filename << std::endl;
+            close(fd);
+            break;
+        }
+
+        // Write the aligned buffer to the file
+        ssize_t bytesWritten = write(fd, buffer, FILE_SIZE_BYTES);
+        if(bytesWritten == -1)
+        {
+            std::cerr << "\nError writing to file " << filename << std::endl;
+            close(fd);
+            break;
+        }
+
+        fds.push_back(fd);
+
+        // Progress Reporting
+        float progress = (static_cast<float>(i + 1) / NUM_FILES) * 100.0f;
+        std::cout << "\rProgress: " << std::fixed << std::setprecision(2)
+                  << progress << "% (" << (i + 1) << "/" << NUM_FILES << " files)" << std::flush;
+    }
+
+    std::cout << "\nFinished. Total file descriptors held: " << fds.size() << std::endl;
+
+    // Free the allocated buffer (files remain open via fds)
+    free(buffer);
+
+    return fds;
+}
+
+hedge::async::task<void> get_obj([[maybe_unused]] hedge::async::read_request r, [[maybe_unused]] hedge::async::read_request r2, [[maybe_unused]] hedge::async::executor_context& executor, working_group& wg)
+{
+    std::array<char, 1241> buffer{};
+    hedge::prof::do_not_optimize(buffer);
+
+    // hedge::prof::counter_guard guard(hedge::prof::get<"test_task">());
+    auto t0 = std::chrono::high_resolution_clock::now();
+    hedge::prof::do_not_optimize(t0);
+
+    while(true)
+    {
+        auto t1 = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0);
+        if(duration.count() > 100)
+            break;
+    }
+
+    // [[maybe_unused]] auto data_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE, PAGE_SIZE));
+    // r.data = data_ptr;
+
+    // [[maybe_unused]] auto response_f = co_await executor.submit_request(r);
+
+    // free(data_ptr);
     // auto response2 = co_await executor.submit_request(r2);
 
     // auto response3 = co_await executor.submit_request(r);
@@ -134,7 +223,7 @@ int main()
 {
     working_group wg;
 
-    const uint32_t QUEUE_DEPTH = 128;
+    const uint32_t QUEUE_DEPTH = 64;
     std::vector<std::shared_ptr<hedge::async::executor_context>> contexts;
 
     contexts.reserve(8);
@@ -142,7 +231,7 @@ int main()
         contexts.emplace_back(hedge::async::executor_context::make_new(QUEUE_DEPTH));
 
     std::vector<int> fds;
-    size_t file_size = 0;
+    [[maybe_unused]] size_t file_size = 0;
     for(int i = 0; i < 1; ++i)
     {
         auto [fd, size] = open_fd(INDEX_PATH, true);
@@ -151,10 +240,17 @@ int main()
         file_size = size;
     }
 
-    auto rng = std::mt19937(std::random_device{}());
-    auto dist = std::uniform_int_distribution<size_t>(0, file_size / PAGE_SIZE - 10);
+    auto t0 = std::chrono::high_resolution_clock::now();
+    // auto fds = createAlignedFiles();
+    auto t1 = std::chrono::high_resolution_clock::now();
+    auto duration_setup = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+    std::cout << "Created " << fds.size() << " files in " << duration_setup.count() / 1000.0 << " ms." << std::endl;
+    std::cout << "Throughput: " << (static_cast<double>(fds.size() * (32 * 1024 * 1024)) / (1024.0 * 1024.0)) / (duration_setup.count() / 1000000.0) << " MiB/sec." << std::endl;
 
-    auto N_REQUESTS = 10000000UL;
+    auto rng = std::mt19937(std::random_device{}());
+    auto dist = std::uniform_int_distribution<size_t>(0, (1024 * 1024 * 32UL / PAGE_SIZE) - 1);
+
+    auto N_REQUESTS = 20'000'000UL;
     wg.set(N_REQUESTS);
 
     std::vector<size_t> offsets;
@@ -171,19 +267,29 @@ int main()
         offsets2.push_back(dist(rng) * PAGE_SIZE);
     }
 
-    auto t0 = std::chrono::steady_clock::now();
+    t0 = std::chrono::high_resolution_clock::now();
+    hedge::prof::do_not_optimize(t0);
+    size_t j = 0;
     for(size_t i = 0; i < N_REQUESTS; i++)
     {
-        auto& context = contexts[i % contexts.size()];
+        auto* context = contexts[j++ % contexts.size()].get();
         auto task = get_obj(
             hedge::async::read_request{.fd = fds[i % fds.size()], .offset = offsets[i], .size = PAGE_SIZE},
             hedge::async::read_request{.fd = fds[i % fds.size()], .offset = offsets2[i], .size = PAGE_SIZE},
             *context, wg);
-        context->submit_io_task(std::move(task));
+        // hedge::prof::do_not_optimize(task);
+        while(!context->try_submit_io_task(task))
+        {
+            context = contexts[j++ % contexts.size()].get();
+        };
+        // context->submit_io_task(std::move(task));
     }
     std::cout << "Submitted " << N_REQUESTS << " jobs\n";
     wg.wait();
-    auto t1 = std::chrono::steady_clock::now();
+    t1 = std::chrono::high_resolution_clock::now();
+    hedge::prof::do_not_optimize(t1);
+
+    std::cout << "All tasks completed, shutting down executors..." << std::endl;
 
     for(auto& context : contexts)
         context->shutdown();
@@ -192,4 +298,6 @@ int main()
     std::cout << "Processed " << N_REQUESTS << " requests in " << duration.count() / 1000.0 << " ms." << std::endl;
     std::cout << "Average time per request: " << static_cast<double>(duration.count()) / N_REQUESTS << " us." << std::endl;
     std::cout << "Average throughput: " << static_cast<size_t>(static_cast<double>(N_REQUESTS) / (duration.count() / 1000000.0)) << " requests/sec." << std::endl;
+
+    hedge::prof::print_internal_perf_stats();
 }
