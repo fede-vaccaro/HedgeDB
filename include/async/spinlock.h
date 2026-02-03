@@ -2,6 +2,7 @@
 #pragma once 
 
 #include <atomic>
+#include <emmintrin.h>
 #include <stdlib.h>
 #include <time.h>
 
@@ -11,7 +12,7 @@ namespace hedge::async
     static constexpr timespec ns = {.tv_sec=0, .tv_nsec=1};
     inline void nanosleep(int& i)
     {
-        if(++i == 16)
+        if(++i == 32)
         {
             i = 0;
             nanosleep(&ns, NULL);
