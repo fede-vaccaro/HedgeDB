@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "async/spinlock.h"
+#include "db/arena_allocator.h"
 
 namespace hedge::db
 {
@@ -63,14 +64,14 @@ namespace hedge::db
          */
         struct entry_t
         {
-            T data;
-            std::atomic<uint32_t> next{NULL_IDX};
-            node* child = nullptr;
+            T _data;
+            std::atomic<uint32_t> _next{NULL_IDX};
+            node* _child = nullptr;
 
             // Default constructor
             entry_t() = default;
             // Construct with value
-            explicit entry_t(const T& val) : data(val) {}
+            explicit entry_t(const T& val) : _data(val) {}
         };
 
         /**
@@ -84,11 +85,11 @@ namespace hedge::db
 
             struct header_t
             {
-                std::atomic<uint32_t> head_idx{NULL_IDX}; // Index of the first element (smallest key)
-                std::atomic<uint32_t> free_idx{0};        // Index of the first free slot
-                std::atomic<uint32_t> count{0};           // Number of keys stored
-                bool is_leaf = true;                      // Is this a leaf node?
-                node* left_child = nullptr;               // Pointer to child with values < head key (C0)
+                std::atomic<uint32_t> _head_idx{NULL_IDX}; // Index of the first element (smallest key)
+                std::atomic<uint32_t> _free_idx{0};        // Index of the first free slot
+                std::atomic<uint32_t> _count{0};           // Number of keys stored
+                bool _is_leaf = true;                      // Is this a leaf node?
+                node* _left_child = nullptr;               // Pointer to child with values < head key (C0)
             } _header;
 
             // Calculate capacity
@@ -101,24 +102,24 @@ namespace hedge::db
             static constexpr size_t RAW_CAPACITY = (NODE_SIZE - HEADER_SIZE) / sizeof(entry_t);
             static constexpr size_t CAPACITY = (RAW_CAPACITY % 2 == 0) ? RAW_CAPACITY - 1 : RAW_CAPACITY;
 
-            std::array<entry_t, CAPACITY> entries;
+            std::array<entry_t, CAPACITY> _entries;
 
             node()
             {
                 // Initialize free list
                 for(uint32_t i = 0; i < CAPACITY - 1; ++i)
                 {
-                    this->entries[i].next.store(i + 1, std::memory_order_relaxed);
+                    this->_entries[i]._next.store(i + 1, std::memory_order_relaxed);
                 }
                 if(CAPACITY > 0)
                 {
-                    this->entries[CAPACITY - 1].next.store(NULL_IDX, std::memory_order_relaxed);
+                    this->_entries[CAPACITY - 1]._next.store(NULL_IDX, std::memory_order_relaxed);
                 }
             }
 
             bool is_full() const
             {
-                return this->_header.count.load(std::memory_order_relaxed) >= CAPACITY;
+                return this->_header._count.load(std::memory_order_relaxed) >= CAPACITY;
             }
 
             /**
@@ -129,12 +130,12 @@ namespace hedge::db
             {
                 while(true)
                 {
-                    uint32_t free = this->_header.free_idx.load(std::memory_order_acquire);
+                    uint32_t free = this->_header._free_idx.load(std::memory_order_acquire);
                     if(free == NULL_IDX)
                         return false;
 
-                    uint32_t next_free = this->entries[free].next.load(std::memory_order_relaxed);
-                    if(this->_header.free_idx.compare_exchange_weak(free, next_free, std::memory_order_release, std::memory_order_relaxed))
+                    uint32_t next_free = this->_entries[free]._next.load(std::memory_order_relaxed);
+                    if(this->_header._free_idx.compare_exchange_weak(free, next_free, std::memory_order_release, std::memory_order_relaxed))
                     {
                         idx = free;
                         return true;
@@ -147,9 +148,9 @@ namespace hedge::db
              */
             void _free_slot(uint32_t idx)
             {
-                uint32_t current_free = this->_header.free_idx.load(std::memory_order_relaxed);
-                this->entries[idx].next.store(current_free, std::memory_order_relaxed);
-                this->_header.free_idx.store(idx, std::memory_order_relaxed);
+                uint32_t current_free = this->_header._free_idx.load(std::memory_order_relaxed);
+                this->_entries[idx]._next.store(current_free, std::memory_order_relaxed);
+                this->_header._free_idx.store(idx, std::memory_order_relaxed);
             }
 
             friend class btree<T, READ_ONLY>;
@@ -167,40 +168,40 @@ namespace hedge::db
                     return false;
                 }
 
-                this->entries[new_idx].data = key;
-                this->entries[new_idx].child = child;
+                this->_entries[new_idx]._data = key;
+                this->_entries[new_idx]._child = child;
 
                 // Insert into sorted list
                 while(true)
                 {
                     uint32_t prev = NULL_IDX;
-                    uint32_t curr = this->_header.head_idx.load(std::memory_order_acquire);
+                    uint32_t curr = this->_header._head_idx.load(std::memory_order_acquire);
 
                     while(curr != NULL_IDX)
                     {
-                        if(this->entries[curr].data >= key)
+                        if(this->_entries[curr]._data >= key)
                             break;
                         prev = curr;
-                        curr = this->entries[curr].next.load(std::memory_order_acquire);
+                        curr = this->_entries[curr]._next.load(std::memory_order_acquire);
                     }
 
-                    this->entries[new_idx].next.store(curr, std::memory_order_release);
+                    this->_entries[new_idx]._next.store(curr, std::memory_order_release);
 
                     bool success = false;
                     if(prev == NULL_IDX)
                     {
                         // Insert at head
-                        success = this->_header.head_idx.compare_exchange_strong(curr, new_idx, std::memory_order_release, std::memory_order_acquire);
+                        success = this->_header._head_idx.compare_exchange_strong(curr, new_idx, std::memory_order_release, std::memory_order_acquire);
                     }
                     else
                     {
                         // Insert after prev
-                        success = this->entries[prev].next.compare_exchange_strong(curr, new_idx, std::memory_order_release, std::memory_order_acquire);
+                        success = this->_entries[prev]._next.compare_exchange_strong(curr, new_idx, std::memory_order_release, std::memory_order_acquire);
                     }
 
                     if(success)
                     {
-                        this->_header.count.fetch_add(1, std::memory_order_relaxed);
+                        this->_header._count.fetch_add(1, std::memory_order_relaxed);
                         break;
                     }
                     // Retry
@@ -227,36 +228,36 @@ namespace hedge::db
             {
                 // Lock removed for external locking control (Crabbing)
 
-                if(this->_header.is_leaf)
+                if(this->_header._is_leaf)
                 {
                     return nullptr;
                 }
 
-                uint32_t head = this->_header.head_idx.load(std::memory_order_acquire);
+                uint32_t head = this->_header._head_idx.load(std::memory_order_acquire);
                 if(head == NULL_IDX)
                 {
-                    return this->_header.left_child;
+                    return this->_header._left_child;
                 }
 
-                if(key < this->entries[head].data)
+                if(key < this->_entries[head]._data)
                 {
-                    return this->_header.left_child;
+                    return this->_header._left_child;
                 }
 
                 uint32_t curr = head;
                 while(true)
                 {
-                    uint32_t next = this->entries[curr].next.load(std::memory_order_acquire);
+                    uint32_t next = this->_entries[curr]._next.load(std::memory_order_acquire);
                     if(next == NULL_IDX)
                     {
                         // Last element
-                        return this->entries[curr].child;
+                        return this->_entries[curr]._child;
                     }
 
-                    if(key < this->entries[next].data)
+                    if(key < this->_entries[next]._data)
                     {
                         // key is between curr and next
-                        return this->entries[curr].child;
+                        return this->_entries[curr]._child;
                     }
                     curr = next;
                 }
@@ -269,16 +270,16 @@ namespace hedge::db
              */
             bool _find(const T& key) const
             {
-                uint32_t curr = this->_header.head_idx.load(std::memory_order_acquire);
+                uint32_t curr = this->_header._head_idx.load(std::memory_order_acquire);
                 while(curr != NULL_IDX)
                 {
                     // Since entries are sorted:
-                    if(this->entries[curr].data == key)
+                    if(this->_entries[curr]._data == key)
                         return true;
-                    if(this->entries[curr].data > key)
+                    if(this->_entries[curr]._data > key)
                         return false;
 
-                    curr = this->entries[curr].next.load(std::memory_order_acquire);
+                    curr = this->_entries[curr]._next.load(std::memory_order_acquire);
                 }
                 return false;
             }
@@ -287,77 +288,77 @@ namespace hedge::db
             std::vector<T> get_values() const
             {
                 std::vector<T> v;
-                uint32_t curr = this->_header.head_idx.load(std::memory_order_relaxed);
+                uint32_t curr = this->_header._head_idx.load(std::memory_order_relaxed);
                 while(curr != NULL_IDX)
                 {
-                    v.push_back(this->entries[curr].data);
-                    curr = this->entries[curr].next.load(std::memory_order_relaxed);
+                    v.push_back(this->_entries[curr]._data);
+                    curr = this->_entries[curr]._next.load(std::memory_order_relaxed);
                 }
                 return v;
             }
         };
 
-        std::atomic<node*> root{nullptr};
-        mutable async::rw_spinlock root_lock;
+    private:
+        std::atomic<node*> _root{nullptr};
+        mutable async::rw_spinlock _root_lock;
+        arena_allocator<node> _allocator;
 
-        btree()
+    public:
+        explicit btree(size_t memory_budget = 1024 * 1024 * 1024) : _allocator(memory_budget)
         {
-            this->root.store(new node());
+            node* r = this->_allocator.allocate();
+            if (!r)
+            {
+                throw std::bad_alloc();
+            }
+            new (r) node();
+            this->_root.store(r);
         }
 
         ~btree()
         {
-            node* r = this->root.load();
-            if(r)
-                this->destroy_recursive(r);
-        }
-
-        void destroy_recursive(node* n)
-        {
-            if(!n->_header.is_leaf)
-            {
-                if(n->_header.left_child)
-                    this->destroy_recursive(n->_header.left_child);
-                uint32_t curr = n->_header.head_idx.load(std::memory_order_relaxed);
-                while(curr != NULL_IDX)
-                {
-                    if(n->entries[curr].child)
-                        this->destroy_recursive(n->entries[curr].child);
-                    curr = n->entries[curr].next.load(std::memory_order_relaxed);
-                }
-            }
-            delete n;
+            // ArenaAllocator destructor handles all memory release.
+            // Note: T destructors are NOT called (Fast Deallocation).
         }
 
         /**
          * @brief Inserts a value into the B-Tree.
          * Uses preemptive splitting with Lock Coupling (Crabbing).
+         * @return true if successful, false if allocation failed (OOM).
          */
-        void insert(const T& value)
+        bool insert(const T& value)
         {
             while(true)
             {
-                node* curr = this->root.load(std::memory_order_acquire);
+                node* curr = this->_root.load(std::memory_order_acquire);
 
                 // 1. Check root full (Optimistic)
                 if(curr->is_full())
                 {
-                    _unique_lock lock(this->root_lock);
-                    curr = this->root.load(std::memory_order_relaxed);
+                    _unique_lock lock(this->_root_lock);
+                    curr = this->_root.load(std::memory_order_relaxed);
                     if(curr->is_full())
                     {
                         node* old_root = curr;
-                        node* new_root = new node();
-                        new_root->_header.is_leaf = false;
-                        new_root->_header.left_child = old_root;
+                        
+                        node* new_root = this->_allocator.allocate();
+                        if(!new_root) return false;
+
+                        new (new_root) node();
+                        new_root->_header._is_leaf = false;
+                        new_root->_header._left_child = old_root;
 
                         // Root split
                         if(this->_split_child(new_root, old_root))
                         {
-                            this->root.store(new_root, std::memory_order_release);
+                            this->_root.store(new_root, std::memory_order_release);
                             continue; // Restart with new root
                         }
-                        delete new_root;
+                        
+                        // Split failed (likely OOM in _split_child_impl allocating sibling)
+                        // We cannot easily recover the allocated new_root in the arena,
+                        // but it will be freed when the arena is destroyed.
+                        return false;
                     }
                 }
 
@@ -365,7 +366,7 @@ namespace hedge::db
                 _shared_lock curr_lock(curr->_lock);
 
                 // Check if root changed (stale root pointer)
-                if(curr != this->root.load(std::memory_order_relaxed))
+                if(curr != this->_root.load(std::memory_order_relaxed))
                 {
                     curr_lock.unlock();
                     continue;
@@ -381,10 +382,10 @@ namespace hedge::db
                 bool restart = false;
                 while(true)
                 {
-                    if(curr->_header.is_leaf)
+                    if(curr->_header._is_leaf)
                     {
                         if(curr->_insert_impl(value))
-                            return; // Success
+                            return true; // Success
                         // Leaf became full during concurrent insertion
                         restart = true;
                         break;
@@ -413,7 +414,10 @@ namespace hedge::db
 
                         if(re_child->is_full())
                         {
-                            _split_child_impl(curr, re_child);
+                            if(!this->_split_child_impl(curr, re_child))
+                            {
+                                return false; // OOM during split
+                            }
                         }
                         restart = true;
                         break;
@@ -444,11 +448,11 @@ namespace hedge::db
                 bool restart_search = false;
                 while(true)
                 {
-                    node* curr = this->root.load(std::memory_order_acquire);
+                    node* curr = this->_root.load(std::memory_order_acquire);
                     _shared_lock curr_lock(curr->_lock);
 
                     // Check if root changed (stale root pointer)
-                    if(curr != this->root.load(std::memory_order_relaxed))
+                    if(curr != this->_root.load(std::memory_order_relaxed))
                     {
                         continue; // Restart
                     }
@@ -461,7 +465,7 @@ namespace hedge::db
                             return true;
                         }
 
-                        if(curr->_header.is_leaf)
+                        if(curr->_header._is_leaf)
                         {
                             // If not found in leaf, it might be due to a split race.
                             // If this is the first attempt, we might want to retry.
@@ -499,7 +503,7 @@ namespace hedge::db
         }
 
         // For testing
-        node* get_root() const { return this->root.load(std::memory_order_acquire); }
+        node* get_root() const { return this->_root.load(std::memory_order_acquire); }
 
     private:
         /**
@@ -513,65 +517,68 @@ namespace hedge::db
             // Child is full. We split it into Child (keeps lower half) and NewSibling (upper half).
             // Median moves to Parent.
 
-            node* new_sibling = new node();
-            new_sibling->_header.is_leaf = child->_header.is_leaf;
+            node* new_sibling = this->_allocator.allocate();
+            if(!new_sibling) return false;
+
+            new (new_sibling) node();
+            new_sibling->_header._is_leaf = child->_header._is_leaf;
 
             // Collect all items from child to distribute them
             size_t mid = node::CAPACITY / 2;
 
-            uint32_t curr = child->_header.head_idx.load(std::memory_order_relaxed);
+            uint32_t curr = child->_header._head_idx.load(std::memory_order_relaxed);
 
             // Traverse to median
             for(size_t i = 0; i < mid; ++i)
             {
-                curr = child->entries[curr].next.load(std::memory_order_relaxed);
+                curr = child->_entries[curr]._next.load(std::memory_order_relaxed);
             }
 
             // 'curr' is the median node.
-            T median_val = child->entries[curr].data;
+            T median_val = child->_entries[curr]._data;
 
             // Move items after median to new_sibling
-            uint32_t move_start = child->entries[curr].next.load(std::memory_order_relaxed);
+            uint32_t move_start = child->_entries[curr]._next.load(std::memory_order_relaxed);
 
             // The median entry in 'child' is technically "removed" (moved to parent).
             // The median's child pointer becomes the 'left_child' of new_sibling.
-            new_sibling->_header.left_child = child->entries[curr].child;
+            new_sibling->_header._left_child = child->_entries[curr]._child;
 
             // Transfer the list from move_start to new_sibling
             uint32_t next_to_move = move_start;
             while(next_to_move != NULL_IDX)
             {
-                new_sibling->_insert_impl(child->entries[next_to_move].data, child->entries[next_to_move].child);
-                next_to_move = child->entries[next_to_move].next.load(std::memory_order_relaxed);
+                new_sibling->_insert_impl(child->_entries[next_to_move]._data, child->_entries[next_to_move]._child);
+                next_to_move = child->_entries[next_to_move]._next.load(std::memory_order_relaxed);
             }
 
             // Fix up child (truncate at prev)
             // We need to find prev to cut the list.
             uint32_t prev = NULL_IDX;
-            uint32_t temp = child->_header.head_idx.load(std::memory_order_relaxed);
+            uint32_t temp = child->_header._head_idx.load(std::memory_order_relaxed);
             while(temp != curr)
             {
                 prev = temp;
-                temp = child->entries[temp].next.load(std::memory_order_relaxed);
+                temp = child->_entries[temp]._next.load(std::memory_order_relaxed);
             }
 
             // If prev is valid (mid > 0)
             if(prev != NULL_IDX)
             {
-                child->entries[prev].next.store(NULL_IDX, std::memory_order_relaxed);
+                child->_entries[prev]._next.store(NULL_IDX, std::memory_order_relaxed);
             }
             else
             {
-                child->_header.head_idx.store(NULL_IDX, std::memory_order_relaxed);
+                child->_header._head_idx.store(NULL_IDX, std::memory_order_relaxed);
             }
 
             // Free median slot and all subsequent slots in child
             uint32_t to_free = curr;
             while(to_free != NULL_IDX)
             {
-                uint32_t nxt = child->entries[to_free].next.load(std::memory_order_relaxed);
+                uint32_t nxt = child->_entries[to_free]._next.load(std::memory_order_relaxed);
                 child->_free_slot(to_free);
-                child->_header.count.fetch_sub(1, std::memory_order_relaxed);
+                child->_header._count.fetch_sub(1, std::memory_order_relaxed);
                 to_free = nxt;
             }
 
@@ -591,7 +598,7 @@ namespace hedge::db
             if(!child->is_full())
                 return true;
 
-            return _split_child_impl(parent, child);
+            return this->_split_child_impl(parent, child);
         }
     };
 
