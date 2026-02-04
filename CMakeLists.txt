@@ -155,4 +155,7 @@ target_link_libraries(skiplist_test gtest gtest_main)
 #     ARCHIVE 
 #     DESTINATION lib
 # )
-# install(DIRECTORY include/ DESTINATION include)
+
+# btree tests
+add_executable(btree_test test/btree.spec.cc)
+target_link_libraries(btree_test gtest gtest_main tcmalloc)

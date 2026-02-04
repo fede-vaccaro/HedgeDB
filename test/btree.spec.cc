@@ -13,18 +13,18 @@ using namespace hedge::db;
 TEST(BTreeNodeTest, Initialization)
 {
     btree<int>::node n;
-    EXPECT_TRUE(n._header.is_leaf);
-    EXPECT_EQ(n._header.count, 0);
-    EXPECT_EQ(n._header.head_idx, btree<int>::NULL_IDX);
+    EXPECT_TRUE(n._header._is_leaf);
+    EXPECT_EQ(n._header._count, 0);
+    EXPECT_EQ(n._header._head_idx, btree<int>::NULL_IDX);
     EXPECT_FALSE(n.is_full());
 }
 
 TEST(BTreeNodeTest, InsertOrdered)
 {
     btree<int>::node n;
-    n.insert(10);
-    n.insert(5);
-    n.insert(20);
+    EXPECT_TRUE(n.insert(10));
+    EXPECT_TRUE(n.insert(5));
+    EXPECT_TRUE(n.insert(20));
 
     auto values = n.get_values();
     ASSERT_EQ(values.size(), 3);
@@ -40,9 +40,9 @@ TEST(BTreeNodeTest, Capacity)
     size_t count = 0;
     while(!n.is_full())
     {
-        n.insert(count++);
+        EXPECT_TRUE(n.insert(count++));
     }
-    EXPECT_EQ(n._header.count, btree<long>::node::CAPACITY);
+    EXPECT_EQ(n._header._count, btree<long>::node::CAPACITY);
     EXPECT_TRUE(n.is_full());
 
     // Check values
@@ -62,21 +62,19 @@ TEST(BTreeTest, InsertRootSplit)
     // Fill root
     for(size_t i = 0; i < capacity; ++i)
     {
-        tree.insert(i);
+        EXPECT_TRUE(tree.insert(i));
     }
 
     // Next insert should cause split
-    tree.insert(capacity);
+    EXPECT_TRUE(tree.insert(capacity));
 
     auto root = tree.get_root();
-    EXPECT_FALSE(root->_header.is_leaf);
-    EXPECT_EQ(root->_header.count, 1); // Median promoted
+    EXPECT_FALSE(root->_header._is_leaf);
+    EXPECT_EQ(root->_header._count, 1); // Median promoted
 
     // Check if values are preserved
-    // We can't easily traverse without exposing more internals or adding a visitor/iterator.
-    // But we can check structure lightly.
-    EXPECT_NE(root->_header.left_child, nullptr);
-    EXPECT_NE(root->entries[root->_header.head_idx].child, nullptr);
+    EXPECT_NE(root->_header._left_child, nullptr);
+    EXPECT_NE(root->_entries[root->_header._head_idx]._child, nullptr);
 }
 
 TEST(BTreeTest, LargeInsertRandom)
@@ -95,34 +93,34 @@ TEST(BTreeTest, LargeInsertRandom)
 
     for(int x : data)
     {
-        tree.insert(x);
+        EXPECT_TRUE(tree.insert(x));
     }
 
     // Basic verification: root should be internal
-    EXPECT_FALSE(tree.get_root()->_header.is_leaf);
+    EXPECT_FALSE(tree.get_root()->_header._is_leaf);
 }
 
 // Helper to collect all values from tree in order
 template <typename T>
 void collect_values(typename btree<T>::node* n, std::vector<T>& out)
 {
-    if(n->_header.is_leaf)
+    if(n->_header._is_leaf)
     {
         auto v = n->get_values();
         out.insert(out.end(), v.begin(), v.end());
     }
     else
     {
-        if(n->_header.left_child)
-            collect_values<T>(n->_header.left_child, out);
+        if(n->_header._left_child)
+            collect_values<T>(n->_header._left_child, out);
 
-        uint32_t curr = n->_header.head_idx;
+        uint32_t curr = n->_header._head_idx;
         while(curr != btree<T>::NULL_IDX)
         {
-            out.push_back(n->entries[curr].data);
-            if(n->entries[curr].child)
-                collect_values<T>(n->entries[curr].child, out);
-            curr = n->entries[curr].next;
+            out.push_back(n->_entries[curr]._data);
+            if(n->_entries[curr]._child)
+                collect_values<T>(n->_entries[curr]._child, out);
+            curr = n->_entries[curr]._next;
         }
     }
 }
@@ -134,7 +132,7 @@ TEST(BTreeTest, IntegrityCheck)
     std::vector<int> expected;
     for(int i = 0; i < N; ++i)
     {
-        tree.insert(i);
+        EXPECT_TRUE(tree.insert(i));
         expected.push_back(i);
     }
 
@@ -158,7 +156,7 @@ TEST(BTreeTest, IntegrityCheckRandom)
 
     for(int x : input)
     {
-        tree.insert(x);
+        EXPECT_TRUE(tree.insert(x));
     }
 
     std::sort(input.begin(), input.end());
@@ -179,7 +177,10 @@ TEST(BTreeTest, BenchmarkInsert200K)
 
     for(size_t i = 0; i < N; ++i)
     {
-        tree.insert(i);
+        if (!tree.insert(i)) {
+             std::cerr << "Allocation failed at " << i << std::endl;
+             std::abort();
+        }
     }
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -201,7 +202,7 @@ TEST(BTreeTest, ConcurrentInsertCorrectness)
     {
         for(int i = start; i < end; ++i)
         {
-            tree.insert(i);
+            if(!tree.insert(i)) std::abort();
         }
     };
 
@@ -255,7 +256,7 @@ TEST(BTreeTest, ConcurrentReadWrite)
             int end = start + ITEMS_PER_THREAD;
             for(int j = start; j < end; ++j)
             {
-                tree.insert(j);
+                if(!tree.insert(j)) std::abort();
                 if(j % 100 == 0) std::this_thread::yield();
             } });
     }
@@ -328,7 +329,7 @@ TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
                 // Ensure value is EVEN for positive tests
                 if (val % 2 != 0) val++; 
 
-                tree.insert(val);
+                if(!tree.insert(val)) std::abort();
                 
                 // Publish value
                 logs[i].values[j] = val;
@@ -428,7 +429,7 @@ namespace
             } // Spin wait
             for(size_t i = start; i < end; ++i)
             {
-                tree.insert(i);
+                if(!tree.insert(i)) std::abort();
             }
         };
 
@@ -461,7 +462,7 @@ namespace
         // 1. Populate tree
         for(size_t i = 0; i < tree_size; ++i)
         {
-            tree.insert(i);
+            if(!tree.insert(i)) std::abort();
         }
 
         std::vector<std::thread> threads;
@@ -518,7 +519,7 @@ namespace
         // 1. Populate tree
         for(size_t i = 0; i < tree_size; ++i)
         {
-            tree.insert(i);
+            if(!tree.insert(i)) std::abort();
         }
 
         // CAST TO READ ONLY
@@ -567,6 +568,8 @@ namespace
     }
     void run_deallocation_benchmark(size_t total_items, int num_threads)
     {
+        // Increase budget for large test
+        // 5M items = ~160MB of nodes. 1GB default is fine.
         auto* tree = new btree<size_t>();
         std::vector<std::thread> threads;
         std::atomic<bool> start_flag{false};
@@ -578,7 +581,7 @@ namespace
             } // Spin wait
             for(size_t i = start; i < end; ++i)
             {
-                tree->insert(i);
+                if(!tree->insert(i)) std::abort();
             }
         };
 
