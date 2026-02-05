@@ -32,7 +32,7 @@ namespace hedge::db
      * - Result of split: 1 median to parent, b entries in left, b entries in right.
      *
      * @tparam T The type of value stored in the tree. Must be comparable.
-     * @tparam ReadOnly If true, all internal locks are disabled (no-op). Useful for read-only benchmarks.
+     * @tparam ReadOnly If true, all internal locks are disabled (no-op). Useful if the BTree represents a frozen memtable.
      */
     template <typename T, bool READ_ONLY = false>
     class btree
@@ -54,6 +54,7 @@ namespace hedge::db
             void unlock() {}
         };
 
+        // 
         using _shared_lock = std::conditional_t<READ_ONLY, noop_lock, std::shared_lock<async::rw_spinlock>>;
         using _unique_lock = std::conditional_t<READ_ONLY, noop_lock, std::unique_lock<async::rw_spinlock>>;
 
