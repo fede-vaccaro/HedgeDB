@@ -34,10 +34,13 @@ namespace hedge::db
      * @tparam T The type of value stored in the tree. Must be comparable.
      * @tparam ReadOnly If true, all internal locks are disabled (no-op). Useful if the BTree represents a frozen memtable.
      */
-    template <typename T, bool READ_ONLY = false>
+    template <typename K, typename V, typename KEY_COMPARATOR = std::less<K>, bool READ_ONLY = false>
     class btree
     {
     public:
+        using kv_pair_t = std::pair<K, V>;
+        using comparator_t = KEY_COMPARATOR;
+
         static constexpr size_t NODE_SIZE = 1024;
         static constexpr uint32_t NULL_IDX = std::numeric_limits<uint32_t>::max();
 
@@ -54,7 +57,7 @@ namespace hedge::db
             void unlock() {}
         };
 
-        // 
+        //
         using _shared_lock = std::conditional_t<READ_ONLY, noop_lock, std::shared_lock<async::rw_spinlock>>;
         using _unique_lock = std::conditional_t<READ_ONLY, noop_lock, std::unique_lock<async::rw_spinlock>>;
 
@@ -65,14 +68,15 @@ namespace hedge::db
          */
         struct entry_t
         {
-            T _data;
+            K key;
+            V value;
             std::atomic<uint32_t> _next{NULL_IDX};
             node* _child = nullptr;
 
             // Default constructor
             entry_t() = default;
             // Construct with value
-            explicit entry_t(const T& val) : _data(val) {}
+            explicit entry_t(const K& k, const V& v) : key(k), value(v) {}
         };
 
         /**
@@ -154,14 +158,14 @@ namespace hedge::db
                 this->_header._free_idx.store(idx, std::memory_order_relaxed);
             }
 
-            friend class btree<T, READ_ONLY>;
+            friend class btree<K, V, KEY_COMPARATOR, READ_ONLY>;
 
             /**
              * @brief Inserts a key and child pointer into the sorted linked list.
              * @param key The value to insert.
              * @param child The child pointer associated with this key (values > key).
              */
-            bool _insert_impl(const T& key, node* child = nullptr)
+            bool _insert_impl(const K& key, const V& value, node* child = nullptr)
             {
                 uint32_t new_idx;
                 if(!this->_allocate_slot(new_idx))
@@ -169,10 +173,11 @@ namespace hedge::db
                     return false;
                 }
 
-                this->_entries[new_idx]._data = key;
+                this->_entries[new_idx].key = key;
+                this->_entries[new_idx].value = value;
                 this->_entries[new_idx]._child = child;
 
-                // Insert into sorted list
+                // Upsert into sorted list
                 while(true)
                 {
                     uint32_t prev = NULL_IDX;
@@ -180,7 +185,13 @@ namespace hedge::db
 
                     while(curr != NULL_IDX)
                     {
-                        if(this->_entries[curr]._data >= key)
+                        if(this->_entries[curr].key == key)
+                        {
+                            auto ref = std::atomic_ref<V>(this->_entries[curr].value);
+                            ref.exchange(value, std::memory_order::relaxed);
+                            break;
+                        }
+                        if(KEY_COMPARATOR{}(key, this->_entries[curr].key))
                             break;
                         prev = curr;
                         curr = this->_entries[curr]._next.load(std::memory_order_acquire);
@@ -214,10 +225,10 @@ namespace hedge::db
             /**
              * @brief Inserts a key and child pointer into the sorted linked list (Thread-safe wrapper).
              */
-            bool insert(const T& key, node* child = nullptr)
+            bool insert(const K& key, const V& value, node* child = nullptr)
             {
                 _shared_lock lock(this->_lock);
-                return this->_insert_impl(key, child);
+                return this->_insert_impl(key, value, child);
             }
 
             /**
@@ -225,7 +236,7 @@ namespace hedge::db
              * @param key The key to search for.
              * @return Pointer to the child node.
              */
-            node* _find_child(const T& key)
+            node* _find_child(const K& key)
             {
                 // Lock removed for external locking control (Crabbing)
 
@@ -240,7 +251,7 @@ namespace hedge::db
                     return this->_header._left_child;
                 }
 
-                if(key < this->_entries[head]._data)
+                if(KEY_COMPARATOR{}(key, this->_entries[head].key))
                 {
                     return this->_header._left_child;
                 }
@@ -255,7 +266,7 @@ namespace hedge::db
                         return this->_entries[curr]._child;
                     }
 
-                    if(key < this->_entries[next]._data)
+                    if(KEY_COMPARATOR{}(key, this->_entries[next].key))
                     {
                         // key is between curr and next
                         return this->_entries[curr]._child;
@@ -269,30 +280,31 @@ namespace hedge::db
              * @param key The key to search for.
              * @return true if found.
              */
-            bool _find(const T& key) const
+            std::optional<V> _find(const K& key) const
             {
                 uint32_t curr = this->_header._head_idx.load(std::memory_order_acquire);
                 while(curr != NULL_IDX)
                 {
                     // Since entries are sorted:
-                    if(this->_entries[curr]._data == key)
-                        return true;
-                    if(this->_entries[curr]._data > key)
-                        return false;
+                    if(this->_entries[curr].key == key)
+                        return this->_entries[curr].value;
+                    if(KEY_COMPARATOR{}(key, this->_entries[curr].key))
+                        return std::nullopt;
 
                     curr = this->_entries[curr]._next.load(std::memory_order_acquire);
                 }
-                return false;
+                return std::nullopt;
             }
 
             // Helper to get all values for testing/splitting
-            std::vector<T> get_values() const
+
+            std::vector<kv_pair_t> get_values() const
             {
-                std::vector<T> v;
+                std::vector<kv_pair_t> v;
                 uint32_t curr = this->_header._head_idx.load(std::memory_order_relaxed);
                 while(curr != NULL_IDX)
                 {
-                    v.push_back(this->_entries[curr]._data);
+                    v.emplace_back(this->_entries[curr].key, this->_entries[curr].value);
                     curr = this->_entries[curr]._next.load(std::memory_order_relaxed);
                 }
                 return v;
@@ -303,16 +315,17 @@ namespace hedge::db
         std::atomic<node*> _root{nullptr};
         mutable async::rw_spinlock _root_lock;
         arena_allocator<node> _allocator;
+        std::atomic_size_t _item_count{0};
 
     public:
         explicit btree(size_t memory_budget = 1024 * 1024 * 1024) : _allocator(memory_budget)
         {
             node* r = this->_allocator.allocate();
-            if (!r)
+            if(r == nullptr)
             {
                 throw std::bad_alloc();
             }
-            new (r) node();
+            new(r) node();
             this->_root.store(r);
         }
 
@@ -322,12 +335,17 @@ namespace hedge::db
             // Note: T destructors are NOT called (Fast Deallocation).
         }
 
+        size_t size()
+        {
+            this->_item_count.load(std::memory_order::relaxed);
+        }
+
         /**
          * @brief Inserts a value into the B-Tree.
          * Uses preemptive splitting with Lock Coupling (Crabbing).
          * @return true if successful, false if allocation failed (OOM).
          */
-        bool insert(const T& value)
+        bool insert(const K& key, const V& value)
         {
             while(true)
             {
@@ -341,11 +359,12 @@ namespace hedge::db
                     if(curr->is_full())
                     {
                         node* old_root = curr;
-                        
-                        node* new_root = this->_allocator.allocate();
-                        if(!new_root) return false;
 
-                        new (new_root) node();
+                        node* new_root = this->_allocator.allocate();
+                        if(new_root == nullptr)
+                            return false;
+
+                        new(new_root) node();
                         new_root->_header._is_leaf = false;
                         new_root->_header._left_child = old_root;
 
@@ -355,7 +374,7 @@ namespace hedge::db
                             this->_root.store(new_root, std::memory_order_release);
                             continue; // Restart with new root
                         }
-                        
+
                         // Split failed (likely OOM in _split_child_impl allocating sibling)
                         // We cannot easily recover the allocated new_root in the arena,
                         // but it will be freed when the arena is destroyed.
@@ -385,15 +404,17 @@ namespace hedge::db
                 {
                     if(curr->_header._is_leaf)
                     {
-                        if(curr->_insert_impl(value))
+                        if(curr->_insert_impl(key, value))
+                        {
+                            this->_item_count.fetch_add(1, std::memory_order::relaxed);
                             return true; // Success
-                        // Leaf became full during concurrent insertion
+                        } // Leaf became full during concurrent insertion
                         restart = true;
                         break;
                     }
 
                     // Internal node
-                    node* child = curr->_find_child(value);
+                    node* child = curr->_find_child(key);
                     _shared_lock child_lock(child->_lock);
 
                     if(child->is_full())
@@ -410,7 +431,7 @@ namespace hedge::db
                         } // Parent full, restart to split parent
 
                         // Re-find child (it might have changed)
-                        node* re_child = curr->_find_child(value);
+                        node* re_child = curr->_find_child(key);
                         _unique_lock c_lock(re_child->_lock);
 
                         if(re_child->is_full())
@@ -436,10 +457,10 @@ namespace hedge::db
         }
 
         /**
-         * @brief Checks if a value exists in the B-Tree.
+         * @brief Checks if a value associated to a key exists in the B-Tree.
          * Thread-safe using Lock Coupling (Crabbing) with Shared Locks.
          */
-        bool contains(const T& value) const
+        std::optional<V> get(const K& key) const
         {
             // Retry logic to handle rare race conditions where a node split might cause
             // a concurrent reader to see a truncated list (NULL pointer) in a leaf
@@ -461,9 +482,10 @@ namespace hedge::db
                     while(true)
                     {
                         // Check if value is in the current node (Internal or Leaf)
-                        if(curr->_find(value))
+                        auto result = curr->_find(key);
+                        if(result)
                         {
-                            return true;
+                            return result;
                         }
 
                         if(curr->_header._is_leaf)
@@ -484,11 +506,11 @@ namespace hedge::db
                                 restart_search = true;
                                 break;
                             }
-                            return false;
+                            return std::nullopt;
                         }
 
                         // Internal node
-                        node* child = curr->_find_child(value);
+                        node* child = curr->_find_child(key);
                         _shared_lock child_lock(child->_lock);
 
                         // Crab
@@ -500,7 +522,7 @@ namespace hedge::db
                         break; // Break from inner while(true), continue for loop
                 }
             }
-            return false;
+            return std::nullopt;
         }
 
         // For testing
@@ -519,9 +541,10 @@ namespace hedge::db
             // Median moves to Parent.
 
             node* new_sibling = this->_allocator.allocate();
-            if(!new_sibling) return false;
+            if(new_sibling == nullptr)
+                return false;
 
-            new (new_sibling) node();
+            new(new_sibling) node();
             new_sibling->_header._is_leaf = child->_header._is_leaf;
 
             // Collect all items from child to distribute them
@@ -536,7 +559,8 @@ namespace hedge::db
             }
 
             // 'curr' is the median node.
-            T median_val = child->_entries[curr]._data;
+            K median_key = child->_entries[curr].key;
+            V median_val = child->_entries[curr].value;
 
             // Move items after median to new_sibling
             uint32_t move_start = child->_entries[curr]._next.load(std::memory_order_relaxed);
@@ -549,7 +573,7 @@ namespace hedge::db
             uint32_t next_to_move = move_start;
             while(next_to_move != NULL_IDX)
             {
-                new_sibling->_insert_impl(child->_entries[next_to_move]._data, child->_entries[next_to_move]._child);
+                new_sibling->_insert_impl(child->_entries[next_to_move].key, child->_entries[next_to_move].value, child->_entries[next_to_move]._child);
                 next_to_move = child->_entries[next_to_move]._next.load(std::memory_order_relaxed);
             }
 
@@ -584,7 +608,7 @@ namespace hedge::db
             }
 
             // Insert median into parent while holding the lock
-            return parent->_insert_impl(median_val, new_sibling);
+            return parent->_insert_impl(median_key, median_val, new_sibling);
         }
 
         /**
