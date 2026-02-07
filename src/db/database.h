@@ -2,23 +2,21 @@
 
 #include <chrono>
 #include <cstdint>
-#include <error.hpp>
 #include <filesystem>
 #include <future>
-#include <logger.h>
 #include <map>
 #include <memory>
+
+#include <error.hpp>
+#include <logger.h>
 #include <shared_mutex>
 #include <sys/types.h> // POSIX types, consider if needed or include specific headers like <fcntl.h> if used
 
 #include "async/io_executor.h"
-#include "async/spinlock.h"
 #include "async/task.h"
 #include "async/worker.h"
 #include "cache.h"
 #include "mem_index.h"
-#include "memtable_flusher.h"
-#include "skiplist.h"
 #include "sorted_index.h"
 #include "types.h"
 #include "value_table.h"
@@ -105,31 +103,18 @@ namespace hedge::db
         std::atomic<std::shared_ptr<value_table>> _pipelined_value_table; // TODO: switch to hedge::expected<...> for signaling potential flush errors
 
         // --- Write buffers ---
-        /// Each thread has its own write buffer to batch writes to the current value table.
+        /// Each thread should have
         static constexpr size_t WRITE_BUFFER_DEFAULT_SIZE = 16 * 4096;
         inline static std::atomic_size_t _thread_count{0};
         std::vector<std::unique_ptr<write_buffer>> _write_buffers;
 
-        /// Mutex protecting access to the mem_index (memtable).
-        size_t _memtables_before_flush{};
-        // Per thread mem-tables
-        skiplist<key_t, value_ptr_t>::config _memtable_cfg;
-        std::vector<skiplist<key_t, value_ptr_t>*> _mem_indices;
-
-        async::rw_spinlock _mem_indices_storage_mutex;
-        // The memtable lifecycle is managed here between reader/writers, pointers are in _mem_indices
-        // The readers get shared_ptr to keep the memtable alive during their operation
-        // If a pointer is flushed, than there is no writer accessing it anymore
-        std::unordered_map<skiplist<key_t, value_ptr_t>*, std::shared_ptr<skiplist<key_t, value_ptr_t>>> _mem_indices_storage;
-
-        async::rw_spinlock _pending_flushes_mutex;
-        std::map<size_t, std::shared_ptr<memtable_flush_group>> _pending_flushes; ///< Tracks memtables currently being flushed to disk.
+        // Memtable & flushes
+        memtable _memtable;
 
         // --- Background Workers ---
         /// Worker thread dedicated to handling index compaction jobs.
         async::worker _compaction_worker{};                                               ///< It just controls the flow for compaction, the actual I/O is done by the pool _compaction_executor
         async::worker _value_table_worker{};                                              ///< Worker thread for instantiating new value tables
-        async::worker _flush_worker{};                                                    ///< Worker thread for flushing the memtables
         std::vector<std::shared_ptr<async::executor_context>> _compation_executor_pool{}; ///< Pool of executors managing background compactions
 
         // Index page cache
@@ -213,7 +198,7 @@ namespace hedge::db
          * @param executor The I/O executor context used *within* the compaction job for disk I/O.
          * @return A future that resolves to the total number of bytes written during compaction, or an error if the compaction failed.
          */
-        std::future<expected<size_t>> compact_sorted_indices(bool ignore_ratio);
+        std::future<expected<size_t>> compact_sorted_indices(bool ignore_size_ratio);
 
         /**
          * @brief Factory function to create a new database instance at the specified path.
@@ -267,12 +252,7 @@ namespace hedge::db
          * @return Status indicating success or failure.
          */
         hedge::expected<std::shared_ptr<value_table>> _rotate_value_table(std::shared_ptr<value_table> rotating);
-        /**
-         * @brief Flushes the contents of the `_mem_index` to new `sorted_index` file(s) on disk.
-         * Clears the `_mem_index` afterwards. Manages partitioning and file naming.
-         * @return Status indicating success or failure.
-         */
-        hedge::status _flush_mem_index(memtable_flush_group* flush_group, size_t flush_iteration);
+
         /**
          * @brief The core logic for performing index compaction, run by the `compaction_worker`.
          * Updates the main `_sorted_indices` map upon completion.
@@ -288,6 +268,9 @@ namespace hedge::db
          * @return An async task resolving to an expected containing the pair {value_ptr, value_table_ptr} or an error (e.g., KEY_NOT_FOUND, DELETED).
          */
         async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> _find_value_ptr_and_value_table(key_t key);
+
+        static std::function<void(std::vector<sorted_index>)> make_push_indices_callback(const std::shared_ptr<database>& db);
+        static std::function<void()> make_compaction_callback(const std::shared_ptr<database>& db);
 
         // Debug stuff
         static auto check_is_sorted_by_epoch(const std::vector<sorted_index_ptr_t>& vec) -> bool

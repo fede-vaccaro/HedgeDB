@@ -56,14 +56,14 @@ namespace hedge::async
         if(ret < 0)
             throw std::runtime_error("error with io_uring_queue_init: "s + strerror(-ret));
 
+        this->_in_flight_requests.reserve(this->_queue_depth * 32);
+        this->_in_progress_tasks.reserve(this->_queue_depth * 2);
+
         this->_worker = std::thread(
             [this]()
             {
                 this->_event_loop();
             });
-
-        this->_in_flight_requests.reserve(this->_queue_depth * 32);
-        this->_in_progress_tasks.reserve(this->_queue_depth * 2);
 
         pthread_setname_np(this->_worker.native_handle(), "io-executor");
     }
@@ -277,7 +277,7 @@ namespace hedge::async
                     {
                         std::this_thread::yield();
                     }
-                    
+
                     if(this->_count_before_sleep == SLEEP_TRIGGER_LOOPS)
                     {
                         bool expected = true;

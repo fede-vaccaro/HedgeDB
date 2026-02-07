@@ -24,7 +24,7 @@ namespace hedge::db
          * @param budget Maximum bytes allowed to allocate.
          * @param extent_bytes_hint Desired size of each memory block (extent) in bytes.
          */
-        arena_allocator(size_t budget, size_t extent_bytes_hint = 2 * 1024 * 1024)
+        arena_allocator(size_t budget, size_t extent_bytes_hint = 4 * 1024 * 1024)
             : _budget(budget)
         {
             constexpr size_t MIN_EXTENT_SIZE_BYTES = hedge::ceil(4096UL, sizeof(T)) * sizeof(T);

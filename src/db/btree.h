@@ -155,7 +155,7 @@ namespace hedge::db
             {
                 uint32_t current_free = this->_header._free_idx.load(std::memory_order_relaxed);
                 this->_entries[idx]._next.store(current_free, std::memory_order_relaxed);
-                this->_header._free_idx.store(idx, std::memory_order_relaxed);
+                this->_header._free_idx.store(idx, std::memory_order_release);
             }
 
             friend class btree<K, V, KEY_COMPARATOR, READ_ONLY>;
@@ -337,7 +337,7 @@ namespace hedge::db
 
         size_t size()
         {
-            this->_item_count.load(std::memory_order::relaxed);
+            return this->_item_count.load(std::memory_order::relaxed);
         }
 
         /**
@@ -527,6 +527,223 @@ namespace hedge::db
 
         // For testing
         node* get_root() const { return this->_root.load(std::memory_order_acquire); }
+
+        // Iterator support
+        class iterator
+        {
+        public:
+            using iterator_category = std::forward_iterator_tag;
+            using value_type = std::pair<K, V>;
+            using difference_type = std::ptrdiff_t;
+            using pointer = const std::pair<K, V>*;
+            using reference = const std::pair<K, V>&;
+
+        private:
+            struct stack_frame
+            {
+                node* n;
+                uint32_t idx;
+            };
+            std::vector<stack_frame> _stack;
+
+            void _descend_left()
+            {
+                while(true)
+                {
+                    if(_stack.empty())
+                        return;
+
+                    auto& frame = _stack.back();
+                    // If we just pushed a node, we start at head_idx.
+                    // We check if it has a left child to process first.
+
+                    if(frame.idx == frame.n->_header._head_idx.load(std::memory_order_relaxed))
+                    {
+                        if(frame.n->_header._left_child)
+                        {
+                            _stack.push_back({frame.n->_header._left_child,
+                                              frame.n->_header._left_child->_header._head_idx.load(std::memory_order_relaxed)});
+                            continue;
+                        }
+                    }
+                    break;
+                }
+            }
+
+            void _cleanup()
+            {
+                while(!_stack.empty() && _stack.back().idx == NULL_IDX)
+                {
+                    _stack.pop_back();
+                }
+            }
+
+        public:
+            iterator() = default;
+
+            explicit iterator(node* root)
+            {
+                if(root)
+                {
+                    _stack.push_back({root, root->_header._head_idx.load(std::memory_order_relaxed)});
+                    _descend_left();
+                    _cleanup();
+                }
+            }
+
+            friend class btree;
+
+            bool operator==(const iterator& other) const
+            {
+                if(_stack.empty() && other._stack.empty())
+                    return true;
+                if(_stack.empty() || other._stack.empty())
+                    return false;
+                return _stack.back().n == other._stack.back().n &&
+                       _stack.back().idx == other._stack.back().idx;
+            }
+
+            bool operator!=(const iterator& other) const
+            {
+                return !(*this == other);
+            }
+
+            iterator& operator++()
+            {
+                if(_stack.empty())
+                    return *this;
+
+                auto& frame = _stack.back();
+                node* curr_node = frame.n;
+                uint32_t curr_idx = frame.idx;
+
+                // We are currently at `curr_idx`.
+                // We want to visit the child to the right of `curr_idx`.
+                node* right_child = curr_node->_entries[curr_idx]._child;
+
+                // Advance index in current node (we are done with this key)
+                frame.idx = curr_node->_entries[curr_idx]._next.load(std::memory_order_relaxed);
+
+                if(right_child)
+                {
+                    // Push right child
+                    _stack.push_back({right_child, right_child->_header._head_idx.load(std::memory_order_relaxed)});
+                    _descend_left();
+                }
+
+                _cleanup();
+                return *this;
+            }
+
+            iterator operator++(int)
+            {
+                iterator temp = *this;
+                ++(*this);
+                return temp;
+            }
+
+            value_type operator*() const
+            {
+                if(_stack.empty())
+                    return {};
+                auto& frame = _stack.back();
+                auto& entry = frame.n->_entries[frame.idx];
+                return {entry.key, entry.value};
+            }
+
+            const K& key() const
+            {
+                return _stack.back().n->_entries[_stack.back().idx].key;
+            }
+
+            const V& value() const
+            {
+                return _stack.back().n->_entries[_stack.back().idx].value;
+            }
+        };
+
+        iterator begin() const
+        {
+            return iterator(this->_root.load(std::memory_order_acquire));
+        }
+
+        iterator end() const
+        {
+            return iterator();
+        }
+
+        iterator find(const K& key) const
+        {
+            iterator it;
+            node* curr = this->_root.load(std::memory_order_acquire);
+
+            while(curr)
+            {
+                uint32_t head = curr->_header._head_idx.load(std::memory_order_acquire);
+                if(head == NULL_IDX)
+                {
+                    if(curr->_header._left_child)
+                    {
+                        it._stack.push_back({curr, NULL_IDX});
+                        curr = curr->_header._left_child;
+                        continue;
+                    }
+                    return end();
+                }
+
+                // Check head
+                if(KEY_COMPARATOR{}(key, curr->_entries[head].key)) // key < head
+                {
+                    it._stack.push_back({curr, head});
+                    curr = curr->_header._left_child;
+                    continue;
+                }
+                else if(curr->_entries[head].key == key)
+                {
+                    it._stack.push_back({curr, head});
+                    return it;
+                }
+
+                uint32_t idx = head;
+                node* next_node = nullptr;
+
+                while(idx != NULL_IDX)
+                {
+                    uint32_t next = curr->_entries[idx]._next.load(std::memory_order_acquire);
+
+                    if(next == NULL_IDX)
+                    {
+                        it._stack.push_back({curr, next});
+                        next_node = curr->_entries[idx]._child;
+                        break;
+                    }
+
+                    if(KEY_COMPARATOR{}(key, curr->_entries[next].key))
+                    {
+                        it._stack.push_back({curr, next});
+                        next_node = curr->_entries[idx]._child;
+                        break;
+                    }
+                    else if(curr->_entries[next].key == key)
+                    {
+                        it._stack.push_back({curr, next});
+                        return it;
+                    }
+
+                    idx = next;
+                }
+
+                if(next_node)
+                {
+                    curr = next_node;
+                }
+                else
+                {
+                    return end();
+                }
+            }
+            return end();
+        }
 
     private:
         /**
