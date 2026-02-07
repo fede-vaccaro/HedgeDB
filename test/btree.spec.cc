@@ -12,61 +12,63 @@ using namespace hedge::db;
 
 TEST(BTreeNodeTest, Initialization)
 {
-    btree<int>::node n;
+    btree<int, int>::node n;
     EXPECT_TRUE(n._header._is_leaf);
     EXPECT_EQ(n._header._count, 0);
-    EXPECT_EQ(n._header._head_idx, btree<int>::NULL_IDX);
+    EXPECT_EQ(n._header._head_idx, (btree<int, int>::NULL_IDX));
     EXPECT_FALSE(n.is_full());
 }
 
 TEST(BTreeNodeTest, InsertOrdered)
 {
-    btree<int>::node n;
-    EXPECT_TRUE(n.insert(10));
-    EXPECT_TRUE(n.insert(5));
-    EXPECT_TRUE(n.insert(20));
+    btree<int, int>::node n;
+    EXPECT_TRUE(n.insert(10, 10));
+    EXPECT_TRUE(n.insert(5, 5));
+    EXPECT_TRUE(n.insert(20, 20));
 
     auto values = n.get_values();
     ASSERT_EQ(values.size(), 3);
-    EXPECT_EQ(values[0], 5);
-    EXPECT_EQ(values[1], 10);
-    EXPECT_EQ(values[2], 20);
+    EXPECT_EQ(values[0].first, 5);
+    EXPECT_EQ(values[1].first, 10);
+    EXPECT_EQ(values[2].first, 20);
 }
 
 TEST(BTreeNodeTest, Capacity)
 {
-    btree<long>::node n;
+    btree<long, long>::node n;
     // Fill the node
     size_t count = 0;
     while(!n.is_full())
     {
-        EXPECT_TRUE(n.insert(count++));
+        EXPECT_TRUE(n.insert(count, count));
+        count++;
     }
-    EXPECT_EQ(n._header._count, btree<long>::node::CAPACITY);
+    EXPECT_EQ(n._header._count, (btree<long, long>::node::CAPACITY));
     EXPECT_TRUE(n.is_full());
 
     // Check values
     auto values = n.get_values();
-    EXPECT_EQ(values.size(), btree<long>::node::CAPACITY);
+    EXPECT_EQ(values.size(), (btree<long, long>::node::CAPACITY));
     for(size_t i = 0; i < count; ++i)
     {
-        EXPECT_EQ(values[i], i);
+        EXPECT_EQ(values[i].first, i);
+        EXPECT_EQ(values[i].second, i);
     }
 }
 
 TEST(BTreeTest, InsertRootSplit)
 {
-    btree<int> tree;
-    size_t capacity = btree<int>::node::CAPACITY;
+    btree<int, int> tree;
+    size_t capacity = btree<int, int>::node::CAPACITY;
 
     // Fill root
     for(size_t i = 0; i < capacity; ++i)
     {
-        EXPECT_TRUE(tree.insert(i));
+        EXPECT_TRUE(tree.insert(i, i));
     }
 
     // Next insert should cause split
-    EXPECT_TRUE(tree.insert(capacity));
+    EXPECT_TRUE(tree.insert(capacity, capacity));
 
     auto root = tree.get_root();
     EXPECT_FALSE(root->_header._is_leaf);
@@ -79,7 +81,7 @@ TEST(BTreeTest, InsertRootSplit)
 
 TEST(BTreeTest, LargeInsertRandom)
 {
-    btree<int> tree;
+    btree<int, int> tree;
     std::vector<int> data;
     const int N = 10000;
 
@@ -93,7 +95,7 @@ TEST(BTreeTest, LargeInsertRandom)
 
     for(int x : data)
     {
-        EXPECT_TRUE(tree.insert(x));
+        EXPECT_TRUE(tree.insert(x, x));
     }
 
     // Basic verification: root should be internal
@@ -101,25 +103,28 @@ TEST(BTreeTest, LargeInsertRandom)
 }
 
 // Helper to collect all values from tree in order
-template <typename T>
-void collect_values(typename btree<T>::node* n, std::vector<T>& out)
+template <typename K, typename V>
+void collect_values(typename btree<K, V>::node* n, std::vector<K>& out)
 {
     if(n->_header._is_leaf)
     {
         auto v = n->get_values();
-        out.insert(out.end(), v.begin(), v.end());
+        for(const auto& pair : v)
+        {
+            out.push_back(pair.first);
+        }
     }
     else
     {
         if(n->_header._left_child)
-            collect_values<T>(n->_header._left_child, out);
+            collect_values<K, V>(n->_header._left_child, out);
 
         uint32_t curr = n->_header._head_idx;
-        while(curr != btree<T>::NULL_IDX)
+        while(curr != btree<K, V>::NULL_IDX)
         {
-            out.push_back(n->_entries[curr]._data);
+            out.push_back(n->_entries[curr].key);
             if(n->_entries[curr]._child)
-                collect_values<T>(n->_entries[curr]._child, out);
+                collect_values<K, V>(n->_entries[curr]._child, out);
             curr = n->_entries[curr]._next;
         }
     }
@@ -127,17 +132,17 @@ void collect_values(typename btree<T>::node* n, std::vector<T>& out)
 
 TEST(BTreeTest, IntegrityCheck)
 {
-    btree<int> tree;
+    btree<int, int> tree;
     const int N = 2000;
     std::vector<int> expected;
     for(int i = 0; i < N; ++i)
     {
-        EXPECT_TRUE(tree.insert(i));
+        EXPECT_TRUE(tree.insert(i, i));
         expected.push_back(i);
     }
 
     std::vector<int> actual;
-    collect_values<int>(tree.get_root(), actual);
+    collect_values<int, int>(tree.get_root(), actual);
 
     ASSERT_EQ(actual.size(), expected.size());
     EXPECT_EQ(actual, expected);
@@ -145,7 +150,7 @@ TEST(BTreeTest, IntegrityCheck)
 
 TEST(BTreeTest, IntegrityCheckRandom)
 {
-    btree<int> tree;
+    btree<int, int> tree;
     const int N = 2000;
     std::vector<int> input;
     for(int i = 0; i < N; ++i)
@@ -156,13 +161,13 @@ TEST(BTreeTest, IntegrityCheckRandom)
 
     for(int x : input)
     {
-        EXPECT_TRUE(tree.insert(x));
+        EXPECT_TRUE(tree.insert(x, x));
     }
 
     std::sort(input.begin(), input.end());
 
     std::vector<int> actual;
-    collect_values<int>(tree.get_root(), actual);
+    collect_values<int, int>(tree.get_root(), actual);
 
     ASSERT_EQ(actual.size(), input.size());
     EXPECT_EQ(actual, input);
@@ -170,16 +175,17 @@ TEST(BTreeTest, IntegrityCheckRandom)
 
 TEST(BTreeTest, BenchmarkInsert200K)
 {
-    btree<size_t> tree;
+    btree<size_t, size_t> tree;
     const size_t N = 200000;
 
     auto start = std::chrono::high_resolution_clock::now();
 
     for(size_t i = 0; i < N; ++i)
     {
-        if (!tree.insert(i)) {
-             std::cerr << "Allocation failed at " << i << std::endl;
-             std::abort();
+        if(!tree.insert(i, i))
+        {
+            std::cerr << "Allocation failed at " << i << std::endl;
+            std::abort();
         }
     }
 
@@ -193,7 +199,7 @@ TEST(BTreeTest, BenchmarkInsert200K)
 
 TEST(BTreeTest, ConcurrentInsertCorrectness)
 {
-    btree<int> tree;
+    btree<int, int> tree;
     const int N = 100000;
     const int NUM_THREADS = 8;
     std::vector<std::thread> threads;
@@ -202,7 +208,8 @@ TEST(BTreeTest, ConcurrentInsertCorrectness)
     {
         for(int i = start; i < end; ++i)
         {
-            if(!tree.insert(i)) std::abort();
+            if(!tree.insert(i, i))
+                std::abort();
         }
     };
 
@@ -219,7 +226,7 @@ TEST(BTreeTest, ConcurrentInsertCorrectness)
 
     // Verify
     std::vector<int> actual;
-    collect_values<int>(tree.get_root(), actual);
+    collect_values<int, int>(tree.get_root(), actual);
 
     ASSERT_EQ(actual.size(), N);
 
@@ -238,7 +245,7 @@ TEST(BTreeTest, ConcurrentInsertCorrectness)
 
 TEST(BTreeTest, ConcurrentReadWrite)
 {
-    btree<int> tree;
+    btree<int, int> tree;
     const int N = 40000;
     const int WRITERS = 4;
     const int READERS = 4;
@@ -256,7 +263,7 @@ TEST(BTreeTest, ConcurrentReadWrite)
             int end = start + ITEMS_PER_THREAD;
             for(int j = start; j < end; ++j)
             {
-                if(!tree.insert(j)) std::abort();
+                if(!tree.insert(j, j)) std::abort();
                 if(j % 100 == 0) std::this_thread::yield();
             } });
     }
@@ -298,7 +305,7 @@ TEST(BTreeTest, ConcurrentReadWrite)
 
 TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
 {
-    btree<size_t> tree;
+    btree<size_t, size_t> tree;
     const size_t NUM_WRITERS = 4;
     const size_t NUM_READERS = 4;
     const size_t OPS_PER_WRITER = 100000;
@@ -329,7 +336,7 @@ TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
                 // Ensure value is EVEN for positive tests
                 if (val % 2 != 0) val++; 
 
-                if(!tree.insert(val)) std::abort();
+                if(!tree.insert(val, val)) std::abort();
                 
                 // Publish value
                 logs[i].values[j] = val;
@@ -418,7 +425,7 @@ namespace
 {
     void run_benchmark(size_t total_items, int num_threads)
     {
-        btree<size_t> tree;
+        btree<size_t, size_t> tree;
         std::vector<std::thread> threads;
         std::atomic<bool> start_flag{false};
 
@@ -429,7 +436,8 @@ namespace
             } // Spin wait
             for(size_t i = start; i < end; ++i)
             {
-                if(!tree.insert(i)) std::abort();
+                if(!tree.insert(i, i))
+                    std::abort();
             }
         };
 
@@ -458,11 +466,12 @@ namespace
 
     void run_read_benchmark(size_t tree_size, size_t total_lookups, int num_threads)
     {
-        btree<size_t> tree;
+        btree<size_t, size_t> tree;
         // 1. Populate tree
         for(size_t i = 0; i < tree_size; ++i)
         {
-            if(!tree.insert(i)) std::abort();
+            if(!tree.insert(i, i))
+                std::abort();
         }
 
         std::vector<std::thread> threads;
@@ -482,7 +491,7 @@ namespace
             for(size_t i = 0; i < count; ++i)
             {
                 // We use volatile to ensure the call isn't optimized away (though unlikely for a non-trivial function)
-                bool found = tree.contains(dist(rng));
+                bool found = tree.contains(dist(rng)).has_value();
                 if(!found)
                 {
                     // Should theoretically not happen if populated 0..N-1 and we query that range
@@ -515,15 +524,16 @@ namespace
 
     void run_readonly_benchmark(size_t tree_size, size_t total_lookups, int num_threads)
     {
-        btree<size_t> tree;
+        btree<size_t, size_t> tree;
         // 1. Populate tree
         for(size_t i = 0; i < tree_size; ++i)
         {
-            if(!tree.insert(i)) std::abort();
+            if(!tree.insert(i, i))
+                std::abort();
         }
 
         // CAST TO READ ONLY
-        auto* ro_tree = reinterpret_cast<btree<size_t, true>*>(&tree);
+        auto* ro_tree = reinterpret_cast<btree<size_t, size_t, std::less<size_t>, true>*>(&tree);
 
         std::vector<std::thread> threads;
         std::atomic<bool> start_flag{false};
@@ -541,7 +551,7 @@ namespace
 
             for(size_t i = 0; i < count; ++i)
             {
-                bool found = ro_tree->contains(dist(rng));
+                bool found = ro_tree->contains(dist(rng)).has_value();
                 (void)found;
             }
         };
@@ -570,7 +580,7 @@ namespace
     {
         // Increase budget for large test
         // 5M items = ~160MB of nodes. 1GB default is fine.
-        auto* tree = new btree<size_t>();
+        auto* tree = new btree<size_t, size_t>();
         std::vector<std::thread> threads;
         std::atomic<bool> start_flag{false};
 
@@ -581,7 +591,8 @@ namespace
             } // Spin wait
             for(size_t i = start; i < end; ++i)
             {
-                if(!tree->insert(i)) std::abort();
+                if(!tree->insert(i, i))
+                    std::abort();
             }
         };
 
