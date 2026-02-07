@@ -19,7 +19,6 @@
 #include "index_ops.h"
 #include "io_executor.h"
 #include "perf_counter.h"
-#include "skiplist.h"
 #include "sorted_index.h"
 #include "types.h"
 #include "utils.h"
@@ -55,8 +54,26 @@ namespace hedge::db
         for(auto& ex : db->_compation_executor_pool)
             ex = async::executor_context::make_new(32);
 
-        // TODO: Write a manifest file to store configuration and database state (e.g., last table ID).
-        // This might be relevant for correctly loading the database later.
+        // Init clock cache
+        if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB page cache
+            db->_page_cache = std::make_shared<shared_page_cache>(config.index_page_clock_cache_size_bytes, async::executor_pool::static_pool().size() * 4);
+
+        // Setup memindex
+        db->_memtable.~memtable();
+        auto* memtable_mem = &db->_memtable;
+        ::new(memtable_mem) memtable(
+            memtable_config{
+                .max_inserts_cap = config.keys_in_mem_before_flush,
+                .memory_budget_cap = 128 * 1024 * 1024, // default
+                .auto_compaction = config.auto_compaction,
+                .use_odirect = config.use_odirect_for_indices,
+            },
+            config.num_partition_exponent,
+            db->_indices_path,
+            &db->_flush_iteration,
+            make_push_indices_callback(db),
+            make_compaction_callback(db),
+            db->_page_cache);
 
         // Create first value table
         auto first_value_table = value_table::make_new(db->_values_path, 0);
@@ -72,10 +89,6 @@ namespace hedge::db
             return hedge::error("Failed to create next in pipeline value table: " + pipelined_value_table.error().to_string());
 
         db->_pipelined_value_table = std::move(pipelined_value_table.value());
-
-        // Init clock cache
-        if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB page cache
-            db->_page_cache = std::make_shared<shared_page_cache>(config.index_page_clock_cache_size_bytes, async::executor_pool::static_pool().size() * 4);
 
         // Init point cache (avoid this)
         if(config.index_point_cache_size_bytes > 1024 * 1024 * 1) // Mininum 1MB entry cache
@@ -95,133 +108,39 @@ namespace hedge::db
             write_buffer_ptr->set(vtable, allocated_offset.value());
         }
 
-        // init memtables
-        size_t key_per_thread = hedge::ceil(config.keys_in_mem_before_flush, async::executor_pool::static_pool().size());
-        skiplist<key_t, value_ptr_t>::config cfg;
-        cfg.item_capacity = key_per_thread;
-        db->_memtable_cfg = cfg;
-
-        db->_mem_indices.reserve(async::executor_pool::static_pool().size());
-        for(size_t i = 0; i < async::executor_pool::static_pool().size(); i++)
-        {
-            auto mem_index = std::make_shared<skiplist<key_t, value_ptr_t>>(db->_memtable_cfg);
-            db->_mem_indices_storage.emplace(mem_index.get(), mem_index);
-            db->_mem_indices.push_back(mem_index.get());
-        }
-
-        // init first flush group
-        db->_pending_flushes.emplace(0, std::make_shared<memtable_flush_group>());
-        db->_pending_flushes.begin()->second->memtables.reserve(async::executor_pool::static_pool().size());
-        db->_memtables_before_flush = async::executor_pool::static_pool().size();
-
         return db;
     }
 
-    expected<std::shared_ptr<database>> database::load(const std::filesystem::path& base_path, const db::db_config& config)
+    std::function<void(std::vector<sorted_index>)> database::make_push_indices_callback(const std::shared_ptr<database>& db)
     {
-        auto db = std::shared_ptr<database>(new database());
-
-        db->_base_path = base_path;
-        db->_indices_path = base_path / "indices";
-        db->_values_path = base_path / "values";
-
-        // TODO: consinstency check
-        db->_config = config;
-
-        // Load SSTs
-        size_t max_flush_iteration = 0;
-        for(const auto& entry : std::filesystem::directory_iterator(db->_indices_path))
+        return [db](std::vector<sorted_index> new_indices)
         {
-            if(!entry.is_directory())
-                continue;
+            std::lock_guard sorted_index_lk(db->_sorted_index_mutex);
 
-            // parse from hex to uint16_t
-            uint16_t partition_id = std::stoul(entry.path().filename().string(), nullptr, 16);
-            db->_sorted_indices[partition_id] = std::vector<sorted_index_ptr_t>{};
-
-            for(const auto& file_entry : std::filesystem::directory_iterator(entry.path()))
+            for(auto& new_sorted_index : new_indices)
             {
-                if(file_entry.is_regular_file() && file_entry.path().filename() == file_entry.path().filename())
-                {
-                    auto maybe_index = index_ops::load_sorted_index(file_entry.path(), config.use_odirect_for_indices, false);
-                    if(!maybe_index)
-                        return hedge::error("Failed to load sorted index from file " + file_entry.path().string() + ": " + maybe_index.error().to_string());
+                new_sorted_index.clear_index();
+                auto prefix = new_sorted_index.upper_bound();
 
-                    db->_sorted_indices[partition_id].push_back(std::make_shared<sorted_index>(std::move(maybe_index.value())));
+                auto sorted_index_ptr = std::make_shared<sorted_index>(std::move(new_sorted_index));
+                db->_sorted_indices[prefix].emplace_back(std::move(sorted_index_ptr));
 
-                    size_t flush_iteration = std::stoul(file_entry.path().extension().string().substr(1), nullptr, 10);
-                    max_flush_iteration = std::max(max_flush_iteration, flush_iteration);
-                }
+                assert(check_is_sorted_by_epoch(db->_sorted_indices[prefix]) && "Sorted indices vector is not sorted by epoch after memtable flush");
             }
-        }
+        };
+    }
 
-        db->_flush_iteration = max_flush_iteration + 1;
-
-        uint32_t max_last_table_id{0};
-        for(const auto& entry : std::filesystem::directory_iterator(db->_values_path))
+    std::function<void()> database::make_compaction_callback(const std::shared_ptr<database>& db)
+    {
+        return [db]()
         {
-            if(entry.is_regular_file() && entry.path().extension() == value_table::TABLE_FILE_EXTENSION)
-            {
-                auto table = value_table::load(entry.path(), fs::file::open_mode::read_only, true);
-                if(!table)
-                    return hedge::error("Failed to load value table from file " + entry.path().string() + ": " + table.error().to_string());
+            (void)db->compact_sorted_indices(false);
+        };
+    }
 
-                max_last_table_id = std::max(max_last_table_id, table.value()->id());
-                db->_value_tables[table.value()->id()] = std::move(table.value());
-            }
-        }
-
-        auto first_value_table = value_table::make_new(db->_values_path, max_last_table_id + 1);
-        if(!first_value_table)
-            return hedge::error("Failed to create initial value table: " + first_value_table.error().to_string());
-
-        db->_current_value_table = std::move(first_value_table.value());
-        db->_last_table_id = 0;
-
-        auto pipelined_value_table = value_table::make_new(db->_values_path, max_last_table_id + 2);
-        if(!pipelined_value_table)
-            return hedge::error("Failed to create next in pipeline value table: " + pipelined_value_table.error().to_string());
-
-        db->_pipelined_value_table = std::move(pipelined_value_table.value());
-
-        db->_last_table_id = max_last_table_id + 1; // pipelined table is last_table_id + 1
-
-        if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB page cache
-            db->_page_cache = std::make_shared<shared_page_cache>(config.index_page_clock_cache_size_bytes, async::executor_pool::static_pool().size() * 4);
-
-        if(config.index_point_cache_size_bytes > 1024 * 1024 * 1) // Mininum 1MB entry cache
-            db->_index_point_cache = std::make_shared<point_cache>(config.index_point_cache_size_bytes);
-
-        db->_write_buffers.resize(async::executor_pool::static_pool().size());
-
-        for(auto& write_buffer_ptr : db->_write_buffers)
-        {
-            write_buffer_ptr = std::make_unique<write_buffer>(WRITE_BUFFER_DEFAULT_SIZE);
-            auto vtable = db->_current_value_table.load();
-            auto allocated_offset = vtable->allocate_pages_for_write(WRITE_BUFFER_DEFAULT_SIZE);
-            write_buffer_ptr->set(vtable, allocated_offset.value());
-        }
-
-        // init memtables
-        size_t key_per_thread = hedge::ceil(config.keys_in_mem_before_flush, async::executor_pool::static_pool().size());
-        skiplist<key_t, value_ptr_t>::config cfg;
-        cfg.item_capacity = key_per_thread;
-        db->_memtable_cfg = cfg;
-
-        db->_mem_indices.reserve(async::executor_pool::static_pool().size());
-        for(size_t i = 0; i < async::executor_pool::static_pool().size(); i++)
-        {
-            auto mem_index = std::make_shared<skiplist<key_t, value_ptr_t>>(db->_memtable_cfg);
-            db->_mem_indices_storage.emplace(mem_index.get(), mem_index);
-            db->_mem_indices.push_back(mem_index.get());
-        }
-
-        // init first flush group
-        db->_pending_flushes.emplace(0, std::make_shared<memtable_flush_group>());
-        db->_pending_flushes.begin()->second->memtables.reserve(async::executor_pool::static_pool().size());
-        db->_memtables_before_flush = async::executor_pool::static_pool().size();
-
-        return hedge::error("Load database from path not implemented yet");
+    expected<std::shared_ptr<database>> database::load(const std::filesystem::path& /*base_path*/, const db::db_config& /*config*/)
+    {
+        return hedge::error("load not implemented");
     }
 
     async::task<hedge::status> database::put_async(key_t key, const byte_buffer_t& value)
@@ -283,74 +202,8 @@ namespace hedge::db
             maybe_write = write_buffer_ref->write(key, value);
         }
 
-        // --- Update Memtable 7---
-        auto& memtable = this->_mem_indices[THIS_THREAD_IDX];
-        if(memtable->size() + 1 == memtable->capacity()) // Memtable full
-        {
-            // Try pushing memtable to the flush group
-            while(true)
-            {
-                std::shared_ptr<memtable_flush_group> pending_flush{};
-
-                {
-                    std::shared_lock slk(this->_pending_flushes_mutex);
-                    pending_flush = this->_pending_flushes.rbegin()->second;
-                }
-
-                {
-                    // Push flush job (only once)
-                    size_t curr_size = pending_flush->size.fetch_add(1, std::memory_order::relaxed);
-                    if(curr_size >= this->_memtables_before_flush)
-                    {
-                        std::call_once(
-                            pending_flush->once,
-                            [this, pending_flush_ptr = pending_flush.get()]()
-                            {
-                                size_t curr_flush_iteration = this->_flush_iteration.fetch_add(1, std::memory_order::relaxed);
-
-                                auto new_flush_group = std::make_shared<memtable_flush_group>();
-                                new_flush_group->memtables.reserve(this->_memtables_before_flush);
-
-                                {
-                                    std::unique_lock lk(this->_pending_flushes_mutex);
-                                    this->_pending_flushes.emplace(curr_flush_iteration + 1, std::move(new_flush_group));
-                                }
-
-                                this->_flush_worker.submit(
-                                    [this, pending_flush_ptr, curr_flush_iteration]()
-                                    {
-                                        if(auto status = this->_flush_mem_index(pending_flush_ptr, curr_flush_iteration); !status)
-                                        {
-                                            this->_logger.log("An error occurred while flushing the mem_index: " + status.error().to_string());
-                                            return;
-                                        }
-
-                                        if(this->_config.auto_compaction)
-                                            (void)this->compact_sorted_indices(false);
-                                    });
-                            });
-                        continue;
-                    }
-
-                    // Push memtable pointer to flush group
-                    {
-                        std::lock_guard lk{pending_flush->flush_lock};
-                        pending_flush->memtables.emplace_back(memtable);
-                    }
-
-                    auto new_memtable = std::make_shared<skiplist<key_t, value_ptr_t>>(this->_memtable_cfg);
-                    memtable = new_memtable.get();
-                    {
-                        std::unique_lock lk(this->_mem_indices_storage_mutex);
-                        this->_mem_indices_storage.emplace(new_memtable.get(), std::move(new_memtable));
-                    }
-
-                    break;
-                }
-            }
-        }
-
-        memtable->insert(key, maybe_write.value(), std::less<key_t>{}, std::less<value_ptr_t>{});
+        // --- Update Memtable ---
+        this->_memtable.put(key, maybe_write.value());
 
         co_return hedge::ok();
     }
@@ -362,30 +215,10 @@ namespace hedge::db
 
     async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> database::_find_value_ptr_and_value_table(key_t key)
     {
+        // Step 1: Check the memtable first (contains the most recent data).
         std::optional<value_ptr_t> value_ptr_opt;
 
-        // Step 1.1: Check every available memtable
-        auto mem_indices = [&]() -> std::unordered_map<skiplist<key_t, value_ptr_t>*, std::shared_ptr<skiplist<key_t, value_ptr_t>>>
-        {
-            std::shared_lock lk(this->_mem_indices_storage_mutex);
-            return this->_mem_indices_storage;
-        }();
-
-        // Need to check all memtables, as the key could be in any of them
-        for(const auto& [_, memtable_ptr] : mem_indices)
-        {
-            auto it = memtable_ptr->find_if(key, [](const key_t& a, const key_t& b)
-                                            { return a < b; });
-            if(!value_ptr_opt.has_value() && it.has_value())
-            {
-                value_ptr_opt = it->second;
-            }
-            else if(it.has_value())
-            {
-                if(it->second < value_ptr_opt.value())
-                    value_ptr_opt = it->second;
-            }
-        }
+        value_ptr_opt = this->_memtable.get(key);
 
         // Step 2: If not found in memtable and cache, search the relevant sorted index files.
         if(!value_ptr_opt.has_value())
@@ -417,11 +250,6 @@ namespace hedge::db
                     break; // Found the key in this index, no need to check older indices
                 }
             }
-
-            // TODO: if any of the indices in `sorted_indices_local` have std::shared_ptr::use_count() == 1,
-            // we can defer the deallocation to a background task to avoid blocking the current task.
-            // I love this shit
-            // Same for the value tables below
         }
 
         if(!value_ptr_opt.has_value())
@@ -462,7 +290,7 @@ namespace hedge::db
 
         auto [value_ptr, table_ptr] = std::move(maybe_value_ptr_table.value());
 
-        // Try reading from any of the write_buffers
+        // Try reading from write_buffer
         for(auto& write_buf : this->_write_buffers)
         {
             auto maybe_file = write_buf->try_read(value_ptr);
@@ -493,28 +321,23 @@ namespace hedge::db
         return matching_partition_id;
     }
 
-    async::task<hedge::status> database::remove_async(key_t /*key*/)
+    async::task<hedge::status> database::remove_async(key_t key)
     {
-        // todo: rework
+        // First, locate the latest version of the key (value_ptr and its table).
+        // This is necessary to potentially mark the entry deleted in the value log itself (if not already handled by GC).
+        auto maybe_value_ptr_table = co_await this->_find_value_ptr_and_value_table(key);
 
-        // // First, locate the latest version of the key (value_ptr and its table).
-        // // This is necessary to potentially mark the entry deleted in the value log itself (if not already handled by GC).
-        // auto maybe_value_ptr_table = co_await this->_find_value_ptr_and_value_table(key);
+        // TODO: We might want to allow deleting non-existing keys (idempotent delete)
+        // and completely skip the lookup. This will create some overhead in the memtable
+        // bu7t should not be inconsistent
+        if(!maybe_value_ptr_table)
+            co_return maybe_value_ptr_table.error();
 
-        // // TODO: We might want to allow deleting non-existing keys (idempotent delete)
-        // // and completely skip the lookup. This will create some overhead in the memtable
-        // // bu7t should not be inconsistent
-        // if(!maybe_value_ptr_table)
-        //     co_return maybe_value_ptr_table.error();
+        auto [value_ptr, table_ptr] = std::move(maybe_value_ptr_table.value());
 
-        // auto [value_ptr, table_ptr] = std::move(maybe_value_ptr_table.value());
-
-        // static thread_local size_t THIS_THREAD_IDX = database::_thread_count.fetch_add(1);
-
-        // // TODO: As written above, we might want to allow deleting non-existing keys
-        // // Hence, we might want to always run this step
-        // this->_mem_index.put(THIS_THREAD_IDX, key, value_ptr_t::apply_delete(value_ptr));
-        // this->_mem_index_size.fetch_add(1);
+        // TODO: As written above, we might want to allow deleting non-existing keys
+        // Hence, we might want to always run this step
+        this->_memtable.put(key, value_ptr_t::apply_delete(value_ptr));
 
         co_return hedge::ok();
     }
@@ -576,73 +399,6 @@ namespace hedge::db
         // this->_logger.log("Value table rotated in ", (double)duration.count(), " us, pushing job required ", (double)submit_job_duration.count());
 
         return this->_current_value_table.load();
-    }
-
-    hedge::status database::_flush_mem_index(memtable_flush_group* flush_group, size_t flush_iteration)
-    {
-        auto t0 = std::chrono::high_resolution_clock::now();
-
-        this->_logger.log("Flushing mem index ", flush_iteration, " to ", this->_indices_path, " with ", flush_group->memtables.size(), " keys");
-
-        auto partitioned_sorted_indices = index_ops::flush_mem_indices(this->_indices_path,
-                                                                       flush_group->memtables,
-                                                                       this->_config.num_partition_exponent,
-                                                                       flush_iteration,
-                                                                       this->_page_cache,
-                                                                       this->_config.use_odirect_for_indices);
-
-        if(!partitioned_sorted_indices)
-            return hedge::error("An error occurred while flushing the mem index: " + partitioned_sorted_indices.error().to_string());
-
-        // Clear this pending flush group
-        {
-            std::lock_guard lk(this->_pending_flushes_mutex);
-            this->_pending_flushes.erase(flush_iteration);
-        }
-
-        // Prepare memtables to be cleared after releasing locks
-        // This avoids holding spin locks during free() calls
-        std::vector<std::shared_ptr<skiplist<key_t, value_ptr_t>>> memtables_to_clear;
-        memtables_to_clear.reserve(flush_group->memtables.size());
-
-        // The memtables waiting for flush and the sorted indices must be updated atomically
-        // Otherwise, there is a time window where a key coexists in both the memtable and the new sorted index
-        // This is an issue because there could be a time window where a key does not exist in any of the two structures
-        {
-            std::lock_guard pending_flushes_lk(this->_mem_indices_storage_mutex);
-            std::lock_guard sorted_index_lk(this->_sorted_index_mutex);
-
-            for(auto& memtable_ptr : flush_group->memtables)
-            {
-                auto it = this->_mem_indices_storage.find(memtable_ptr);
-                if(it != this->_mem_indices_storage.end())
-                {
-                    auto node = this->_mem_indices_storage.extract(it);
-                    memtables_to_clear.emplace_back(std::move(node.mapped()));
-                }
-            }
-
-            for(auto& new_sorted_index : partitioned_sorted_indices.value())
-            {
-                new_sorted_index.clear_index();
-                auto prefix = new_sorted_index.upper_bound();
-
-                auto sorted_index_ptr = std::make_shared<sorted_index>(std::move(new_sorted_index));
-                this->_sorted_indices[prefix].emplace_back(std::move(sorted_index_ptr));
-
-                assert(check_is_sorted_by_epoch(this->_sorted_indices[prefix]) && "Sorted indices vector is not sorted by epoch after memtable flush");
-            }
-        }
-
-        // Clear memtables outside of locks
-        for(auto& memtable_ptr : memtables_to_clear)
-            memtable_ptr.reset();
-
-        auto t1 = std::chrono::high_resolution_clock::now();
-        [[maybe_unused]] auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-        this->_logger.log("Mem index flushed in ", (double)duration.count() / 1000.0, " ms");
-
-        return hedge::ok();
     }
 
     hedge::expected<size_t> database::_compaction_job(bool ignore_size_ratio)
@@ -880,25 +636,7 @@ namespace hedge::db
         this->_compaction_worker.submit(
             [db = this->shared_from_this(), promise = std::move(compaction_promise_ptr), ignore_size_ratio]()
             {
-                size_t pending_flushes;
-                {
-                    std::shared_lock lk(db->_pending_flushes_mutex);
-                    pending_flushes = db->_pending_flushes.size();
-                }
-
-                // The worker process job sequentially; so this guarantees that all pending flushes submitted til now are done
-                if(pending_flushes > 0)
-                {
-                    std::promise<void> flush_promise;
-                    std::future<void> flush_future = flush_promise.get_future();
-                    db->_flush_worker.submit(
-                        [&]()
-                        {
-                            db->_logger.log("Waiting for ", pending_flushes, " pending flushes to complete before starting compaction.");
-                            flush_promise.set_value();
-                        });
-                    flush_future.get();
-                }
+                db->_memtable.wait_for_flush().wait();
 
                 auto start_processing_t = std::chrono::high_resolution_clock::now();
 
@@ -946,25 +684,7 @@ namespace hedge::db
 
     hedge::status database::flush()
     {
-        // auto old_mem_index = std::move(this->_mem_index);
-
-        // if(auto status = this->_flush_mem_index(&old_mem_index, this->_flush_iteration.fetch_add(1, std::memory_order_relaxed)); !status)
-        //     return hedge::error("An error occurred while flushing the mem_index: " + status.error().to_string());
-
-        // for(auto& write_buffer_ptr : this->_write_buffers)
-        // {
-        //     auto flush_task = [&write_buffer_ptr]() -> async::task<hedge::status>
-        //     {
-        //         co_return co_await write_buffer_ptr->flush(async::this_thread_executor());
-        //     };
-
-        //     auto buffer_flush_status = async::executor_pool::executor_from_static_pool()->sync_submit(flush_task());
-        //     if(!buffer_flush_status)
-        //         return hedge::error("An error occurred while flushing a write buffer: " + buffer_flush_status.error().to_string());
-        // }
-
-        // this->_logger.log("Manual flush completed successfully.");
-        return hedge::ok();
+        return hedge::error("flush not implemented");
     }
 
 } // namespace hedge::db

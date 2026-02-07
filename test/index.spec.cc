@@ -54,18 +54,16 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
             if(i == 1)
                 n_keys = std::min(n_keys, 20000000UL); // for the second run, limit to 20000000 keys
 
-            auto memtable = hedge::db::mem_index{};
-
-            memtable.reserve(1, n_keys);
+            auto memtable = hedge::db::memtable_impl_t{};
 
             for(size_t j = 0; j < n_keys; ++j)
             {
                 auto uuid = generate_uuid();
                 this->_uuids.emplace_back(uuid);
-                memtable.put(0, uuid, {static_cast<uint64_t>(j), uuid_fake_size(uuid), 0});
+                memtable.insert(uuid, {static_cast<uint64_t>(j), uuid_fake_size(uuid), 0});
             }
 
-            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, &memtable, NUM_PARTITION_EXPONENT, i, nullptr);
+            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, reinterpret_cast<hedge::db::frozen_memtable_impl_t*>(&memtable), NUM_PARTITION_EXPONENT, i, nullptr);
 
             if(!partitioned_sorted_indices)
             {

@@ -3,8 +3,8 @@
 #include <cstdlib>
 
 #include "cache.h"
+#include "mailbox.h"
 #include "mem_index.h"
-#include "skiplist.h"
 #include "sorted_index.h"
 #include "types.h"
 #include "utils.h"
@@ -22,18 +22,6 @@ namespace hedge::db
      */
     struct index_ops
     {
-        /**
-         * @brief Merges multiple mem_index instances into a single, sorted vector of index entries in memory.
-         * @details This is typically the first step when flushing memtables to disk. It aggregates
-         * all key-value pointers from the provided memtables, sorts them by key, and returns
-         * a single vector ready to be partitioned and written to sorted_index files.
-         * The source mem_index instances are moved from and cleared during the process.
-         * @param indices A vector of `mem_index` objects to merge (passed by rvalue reference).
-         * In practice, this has always been a single mem_index, but the code supports multiple.
-         * @return A `page_aligned_buffer` containing all entries from the input indices, sorted by key.
-         */
-        static page_aligned_buffer<index_entry_t> sort_memtable(mem_index* index);
-
         /**
          * @brief Loads a `sorted_index` representation from a file on disk.
          * @details Reads the footer and meta-index from the specified file path. Optionally,
@@ -85,18 +73,11 @@ namespace hedge::db
          * or an error if any step fails.
          */
         static hedge::expected<std::vector<sorted_index>> flush_mem_index(const std::filesystem::path& base_path,
-                                                                          mem_index* index,
+                                                                          memtable_impl_t* index,
                                                                           size_t num_partition_exponent,
                                                                           size_t flush_iteration,
                                                                           const std::shared_ptr<db::shared_page_cache>& cache,
                                                                           bool use_odirect = false);
-
-        static hedge::expected<std::vector<sorted_index>> flush_mem_indices(const std::filesystem::path& base_path,
-                                                                            const std::vector<skiplist<key_t, value_ptr_t>*>& indices,
-                                                                            size_t num_partition_exponent,
-                                                                            size_t flush_iteration,
-                                                                            const std::shared_ptr<db::shared_page_cache>& cache,
-                                                                            bool use_odirect = false);
 
         /**
          * @brief Configuration options for the `two_way_merge_async` and `two_way_merge` operations.

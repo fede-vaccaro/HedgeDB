@@ -19,11 +19,10 @@
 #include "async/mailbox_impl.h"
 #include "async/task.h"
 #include "cache.h"
-#include "db/mem_index.h"
 #include "fs/file_reader.h"
 #include "fs/fs.hpp"
 #include "index_ops.h"
-#include "mailbox.h"
+#include "mem_index.h"
 #include "merge_utils.h"
 #include "perf_counter.h"
 #include "sorted_index.h"
@@ -165,45 +164,8 @@ namespace hedge::db
         return meta_index;
     }
 
-    page_aligned_buffer<index_entry_t> index_ops::sort_memtable(mem_index* index)
-    {
-        page_aligned_buffer<index_entry_t> buf(index->size());
-
-        auto* buf_ptr = buf.data();
-
-        size_t idx = 0;
-
-        for(auto& i : index->_index)
-        {
-            for(auto [k, v] : i)
-                buf_ptr[idx++] = {.key = k, .value_ptr = v};
-        }
-
-        std::ranges::sort(
-            buf,
-            [](const index_entry_t& lhs, const index_entry_t& rhs)
-            {
-                if(lhs.key < rhs.key)
-                    return true;
-
-                if(rhs.key < lhs.key)
-                    return false;
-
-                // Key ASC, Value ASC (Newest First because value_ptr < means newer)
-                return lhs.value_ptr < rhs.value_ptr;
-            });
-
-        auto* last_it = std::unique(buf.begin(), buf.end(), [](const index_entry_t& lhs, const index_entry_t& rhs)
-                                    { return lhs.key == rhs.key; });
-
-        // move the size cursor back
-        buf.resize(std::distance(buf.begin(), last_it));
-
-        return buf;
-    }
-
     hedge::expected<std::vector<sorted_index>> index_ops::flush_mem_index(const std::filesystem::path& base_path,
-                                                                          mem_index* index,
+                                                                          memtable_impl_t* index,
                                                                           size_t num_partition_exponent,
                                                                           size_t flush_iteration,
                                                                           const std::shared_ptr<db::shared_page_cache>& cache,
@@ -212,18 +174,15 @@ namespace hedge::db
         if(num_partition_exponent > 16)
             return hedge::error("Number of partitions exponent must be less than or equal to 16");
 
-        // Step 1: Combine all memtables into one large sorted list in memory.
-        auto index_sorted = sort_memtable(index);
-
         std::vector<sorted_index> resulting_indices; // To store the created sorted_index objects.
 
         constexpr double SLACK = 0.5; // Slack factor to avoid the need of reallocation.
         size_t partition_estimated_size;
 
         if(num_partition_exponent == 0)
-            partition_estimated_size = index_sorted.size();
+            partition_estimated_size = index->size();
         else
-            partition_estimated_size = ((double)index_sorted.size() / (1 << num_partition_exponent) + 1.0) * (1.0 + SLACK);
+            partition_estimated_size = ((double)index->size() / (1 << num_partition_exponent) + 1.0) * (1.0 + SLACK);
 
         partition_estimated_size = std::max(partition_estimated_size, PAGE_SIZE_IN_BYTES / sizeof(index_entry_t));
 
@@ -233,16 +192,20 @@ namespace hedge::db
         // Calculate the range of key prefixes per partition.
         size_t partition_key_prefix_range = (1 << 16) / (1 << num_partition_exponent);
         // Determine the partition ID for the very first key.
-        size_t current_partition_id = hedge::find_partition_prefix_for_key(index_sorted.begin()->key, partition_key_prefix_range);
+        size_t current_partition_id = hedge::find_partition_prefix_for_key(index->begin().key(), partition_key_prefix_range);
 
         // Step 2: Iterate through the sorted list, grouping entries by partition ID.
         // TODO: Handle potential errors during file writing more gracefully (e.g., cleanup).
-        for(auto* it = index_sorted.begin(); it != index_sorted.end(); ++it)
+        for(auto it = index->begin(); it != index->end(); /* Incr happens in loop */)
         {
-            current_partition_entries[curr_partition_count++] = *it;
+            current_partition_entries[curr_partition_count++] = {.key = it.key(), .value_ptr = it.value()};
+
+            // Incr happens here
+            auto curr = it;
+            ++it;
 
             // Check if this is the last entry for the current partition.
-            bool is_last_in_list = (it + 1 == index_sorted.end());
+            bool is_last_in_list = (it == index->end());
 
             size_t next_partition_id{};
             bool partition_changes = false;
@@ -250,175 +213,7 @@ namespace hedge::db
             if(!is_last_in_list)
             {
                 // Safely look ahead to the next key's partition ID.
-                next_partition_id = hedge::find_partition_prefix_for_key((it + 1)->key, partition_key_prefix_range);
-                partition_changes = (next_partition_id != current_partition_id);
-            }
-
-            if(is_last_in_list || partition_changes)
-            {
-                // End of the current partition reached. Write its entries to a file.
-                auto [dir_prefix, file_prefix] = format_prefix(current_partition_id);
-                auto dir_path = base_path / dir_prefix;
-                std::filesystem::create_directories(dir_path);
-
-                auto path = dir_path / with_extension(file_prefix, std::format(".{}", flush_iteration));
-
-                current_partition_entries.resize(curr_partition_count);
-
-                OUTCOME_TRY(auto sorted_index, index_ops::save_as_sorted_index(
-                                                   path,
-                                                   std::exchange(current_partition_entries, page_aligned_buffer<index_entry_t>(partition_estimated_size)),
-                                                   current_partition_id,
-                                                   flush_iteration,
-                                                   cache,
-                                                   use_odirect));
-
-                curr_partition_count = 0;
-
-                resulting_indices.push_back(std::move(sorted_index));
-
-                current_partition_id = next_partition_id;
-            }
-        }
-
-        // TODO: Implement WAL clearing logic upon successful flush.
-        // Well, WAL should be implemented first...
-
-        return resulting_indices;
-    }
-
-    page_aligned_buffer<index_entry_t> sort_memtables(const std::vector<skiplist<key_t, value_ptr_t>*>& indices)
-    {
-        size_t total_size = std::accumulate(
-            indices.begin(),
-            indices.end(),
-            size_t{0},
-            [](size_t acc, const skiplist<key_t, value_ptr_t>* index)
-            {
-                return acc + index->size();
-            });
-
-        page_aligned_buffer<index_entry_t> buf(total_size);
-        auto* buf_begin = buf.begin();
-        auto* buf_curr = buf_begin;
-
-        using iter_t = skiplist<key_t, value_ptr_t>::const_iterator;
-        // Store current value cache, iterator, and end iterator
-        struct heap_node
-        {
-            std::pair<key_t, value_ptr_t> current_val;
-            iter_t it;
-            iter_t end;
-        };
-
-        auto heap_cmp = [](const heap_node& lhs, const heap_node& rhs)
-        {
-            const auto& lk = lhs.current_val.first;
-            const auto& rk = rhs.current_val.first;
-            if(lk != rk)
-                return rk < lk; // Key ASC (Min-heap needs >)
-
-            // Key ASC, Value ASC (Newest First because value_ptr < means newer)
-            return rhs.current_val.second < lhs.current_val.second;
-        };
-
-        std::vector<heap_node> heap;
-        heap.reserve(indices.size());
-
-        for(auto* index : indices)
-        {
-            auto it = index->begin();
-            auto end = index->end();
-            if(it != end)
-            {
-                heap.push_back({*it, it, end});
-            }
-        }
-
-        std::make_heap(heap.begin(), heap.end(), heap_cmp);
-
-        while(!heap.empty())
-        {
-            std::pop_heap(heap.begin(), heap.end(), heap_cmp);
-            auto& top = heap.back();
-
-            index_entry_t entry{.key = top.current_val.first, .value_ptr = top.current_val.second};
-
-            // Just write everything, deduplication happens later
-            *buf_curr++ = entry;
-
-            // Advance iterator
-            ++top.it;
-            if(top.it != top.end)
-            {
-                top.current_val = *top.it;
-                std::push_heap(heap.begin(), heap.end(), heap_cmp);
-            }
-            else
-            {
-                heap.pop_back();
-            }
-        }
-
-        // Deduplicate at the end
-        auto* last_it = std::unique(buf_begin, buf_curr, [](const index_entry_t& lhs, const index_entry_t& rhs)
-                                    { return lhs.key == rhs.key; });
-
-        // Resize buffer to actual size after deduplication
-        buf.resize(std::distance(buf_begin, last_it));
-
-        return buf;
-    }
-
-    hedge::expected<std::vector<sorted_index>> index_ops::flush_mem_indices(const std::filesystem::path& base_path,
-                                                                            const std::vector<skiplist<key_t, value_ptr_t>*>& indices,
-                                                                            size_t num_partition_exponent,
-                                                                            size_t flush_iteration,
-                                                                            const std::shared_ptr<db::shared_page_cache>& cache,
-                                                                            bool use_odirect)
-    {
-        if(num_partition_exponent > 16)
-            return hedge::error("Number of partitions exponent must be less than or equal to 16");
-
-        // Step 1: Combine all memtables into one large sorted list in memory.
-        auto index_sorted = sort_memtables(indices);
-
-        std::vector<sorted_index> resulting_indices; // To store the created sorted_index objects.
-
-        constexpr double SLACK = 0.5; // Slack factor to avoid the need of reallocation.
-        size_t partition_estimated_size;
-
-        if(num_partition_exponent == 0)
-            partition_estimated_size = index_sorted.size();
-        else
-            partition_estimated_size = ((double)index_sorted.size() / (1 << num_partition_exponent) + 1.0) * (1.0 + SLACK);
-
-        partition_estimated_size = std::max(partition_estimated_size, PAGE_SIZE_IN_BYTES / sizeof(index_entry_t));
-
-        page_aligned_buffer<index_entry_t> current_partition_entries(partition_estimated_size); // Temp buffer for entries of the current partition.
-        size_t curr_partition_count{0};
-
-        // Calculate the range of key prefixes per partition.
-        size_t partition_key_prefix_range = (1 << 16) / (1 << num_partition_exponent);
-        // Determine the partition ID for the very first key.
-        size_t current_partition_id = hedge::find_partition_prefix_for_key(index_sorted.begin()->key, partition_key_prefix_range);
-
-        // Step 2: Iterate through the sorted list, grouping entries by partition ID.
-        // TODO: Handle potential errors during file writing more gracefully (e.g., cleanup).
-        for(auto* it = index_sorted.begin(); it != index_sorted.end(); ++it)
-        {
-            current_partition_entries[curr_partition_count++] = *it;
-
-            // Check if this is the last entry for the current partition.
-            bool is_last_in_list = (it + 1 == index_sorted.end());
-
-            size_t next_partition_id{};
-            bool partition_changes = false;
-
-            if(!is_last_in_list)
-            {
-                // Safely look ahead to the next key's partition ID.
-                next_partition_id = hedge::find_partition_prefix_for_key((it + 1)->key, partition_key_prefix_range);
+                next_partition_id = hedge::find_partition_prefix_for_key(it.key(), partition_key_prefix_range);
                 partition_changes = (next_partition_id != current_partition_id);
             }
 
@@ -1037,10 +832,8 @@ namespace hedge::db
 
         auto heap_item_t_comparator = [](const auto& lhs, const auto& rhs)
         {
-            // Cpp20 heap is a max-heap by default, we want a min-heap based on keys
-            // So we need a "greater-than" comparator.
-            // Since uuid might only implement operator<, we use rhs < lhs
-            return rhs.first.key < lhs.first.key;
+            // Cpp20 heap is a max-heap by default, we want a min-heap
+            return !(lhs.first < rhs.first);
         };
 
         std::vector<heap_item_t> key_heap;

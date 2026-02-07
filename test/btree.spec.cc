@@ -278,7 +278,7 @@ TEST(BTreeTest, ConcurrentReadWrite)
             while(!done.load(std::memory_order_acquire))
             {
                 int val = dist(rng);
-                tree.contains(val); // Just exercise the read path
+                tree.get(val); // Just exercise the read path
             } });
     }
 
@@ -299,7 +299,7 @@ TEST(BTreeTest, ConcurrentReadWrite)
     // Verify all present
     for(int i = 0; i < N; ++i)
     {
-        ASSERT_TRUE(tree.contains(i)) << "Missing value " << i;
+        ASSERT_TRUE(tree.get(i)) << "Missing value " << i;
     }
 }
 
@@ -371,7 +371,7 @@ TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
                 if(count > 0)
                 {
                     size_t val = logs[w_idx].values[count - 1];
-                    ASSERT_TRUE(tree.contains(val)) << "Latest value not found: " << val;
+                    ASSERT_TRUE(tree.get(val)) << "Latest value not found: " << val;
                 }
 
                 // Test 2: Random historical visibility (Relaxed)
@@ -380,7 +380,7 @@ TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
                     std::uniform_int_distribution<size_t> idx_dist(0, count - 1);
                     size_t idx = idx_dist(rng);
                     size_t val = logs[w_idx].values[idx];
-                    ASSERT_TRUE(tree.contains(val)) << "Historical value not found: " << val;
+                    ASSERT_TRUE(tree.get(val)) << "Historical value not found: " << val;
                 }
 
                 // Test 3: Negative Lookup
@@ -390,7 +390,7 @@ TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
                 
                 // There is a microscopic chance of collision if we used full range randoms,
                 // but since we strictly write EVENS, any ODD number should NOT be there.
-                ASSERT_FALSE(tree.contains(odd_val)) << "Found value that was never inserted: " << odd_val;
+                ASSERT_FALSE(tree.get(odd_val)) << "Found value that was never inserted: " << odd_val;
             } });
     }
 
@@ -416,7 +416,7 @@ TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
         for(size_t k = 0; k < count; ++k)
         {
             size_t val = log.values[k];
-            ASSERT_TRUE(tree.contains(val)) << "Final check: Missing value " << val;
+            ASSERT_TRUE(tree.get(val)) << "Final check: Missing value " << val;
         }
     }
 }
@@ -491,7 +491,7 @@ namespace
             for(size_t i = 0; i < count; ++i)
             {
                 // We use volatile to ensure the call isn't optimized away (though unlikely for a non-trivial function)
-                bool found = tree.contains(dist(rng)).has_value();
+                bool found = tree.get(dist(rng)).has_value();
                 if(!found)
                 {
                     // Should theoretically not happen if populated 0..N-1 and we query that range
@@ -551,7 +551,7 @@ namespace
 
             for(size_t i = 0; i < count; ++i)
             {
-                bool found = ro_tree->contains(dist(rng)).has_value();
+                bool found = ro_tree->get(dist(rng)).has_value();
                 (void)found;
             }
         };
@@ -670,4 +670,83 @@ TEST(BTreeTest, ReadOnlyScalingBenchmark)
     {
         run_readonly_benchmark(tree_size, total_lookups, t);
     }
+}
+
+TEST(BTreeTest, IteratorTraversal)
+{
+    btree<int, int> tree;
+    const int N = 100;
+    // Insert in random order to ensure tree structure is non-trivial
+    std::vector<int> data;
+    for(int i = 0; i < N; ++i)
+        data.push_back(i);
+    std::mt19937 g(42);
+    std::shuffle(data.begin(), data.end(), g);
+
+    for(int x : data)
+    {
+        EXPECT_TRUE(tree.insert(x, x * 10));
+    }
+
+    int count = 0;
+    int expected_key = 0;
+    for(auto it = tree.begin(); it != tree.end(); ++it)
+    {
+        auto [k, v] = *it;
+        EXPECT_EQ(k, expected_key);
+        EXPECT_EQ(v, expected_key * 10);
+        EXPECT_EQ(it.key(), expected_key);
+        EXPECT_EQ(it.value(), expected_key * 10);
+
+        expected_key++;
+        count++;
+    }
+    EXPECT_EQ(count, N);
+}
+
+TEST(BTreeTest, Find)
+{
+    btree<int, int> tree;
+    tree.insert(10, 100);
+    tree.insert(5, 50);
+    tree.insert(20, 200);
+    tree.insert(15, 150);
+
+    // Find existing
+    auto it = tree.find(10);
+    ASSERT_NE(it, tree.end());
+    EXPECT_EQ((*it).first, 10);
+    EXPECT_EQ(it.value(), 100);
+
+    it = tree.find(5);
+    ASSERT_NE(it, tree.end());
+    EXPECT_EQ((*it).first, 5);
+
+    it = tree.find(20);
+    ASSERT_NE(it, tree.end());
+    EXPECT_EQ((*it).first, 20);
+
+    it = tree.find(15);
+    ASSERT_NE(it, tree.end());
+    EXPECT_EQ((*it).first, 15);
+
+    // Find non-existing
+    it = tree.find(999);
+    EXPECT_EQ(it, tree.end());
+
+    it = tree.find(0);
+    EXPECT_EQ(it, tree.end());
+
+    it = tree.find(12);
+    EXPECT_EQ(it, tree.end());
+}
+
+TEST(BTreeTest, EmptyIterator)
+{
+    btree<int, int> tree;
+    auto it = tree.begin();
+    EXPECT_EQ(it, tree.end());
+
+    it = tree.find(10);
+    EXPECT_EQ(it, tree.end());
 }

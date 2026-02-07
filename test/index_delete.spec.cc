@@ -50,9 +50,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
             if(i == 1)
                 n_keys = std::min(n_keys, 20000000UL); // for the second run, limit to 20000000 keys
 
-            auto memtable = hedge::db::mem_index{};
-
-            memtable.reserve(1, n_keys);
+            auto memtable = hedge::db::memtable_impl_t{};
 
             for(size_t j = 0; j < n_keys; ++j)
             {
@@ -60,13 +58,13 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
 
                 this->_uuids.emplace_back(uuid);
                 auto value_ptr = hedge::value_ptr_t(static_cast<uint64_t>(j), uuid_fake_size(uuid), 0);
-                memtable.put(0, uuid, value_ptr);
+                memtable.insert(uuid, value_ptr);
 
                 if(dist(this->generator) < this->DELETE_PROBABILITY)
                     this->_deleted_items.insert({uuid, value_ptr});
             }
 
-            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, &memtable, NUM_PARTITION_EXPONENT, i, nullptr);
+            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, reinterpret_cast<hedge::db::frozen_memtable_impl_t*>(&memtable), NUM_PARTITION_EXPONENT, i, nullptr);
 
             if(!partitioned_sorted_indices)
             {
@@ -87,14 +85,13 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
         {
             std::cout << "Deleted keys: " << this->_deleted_items.size() << '\n';
 
-            auto deleted_memtable = hedge::db::mem_index{};
+            auto deleted_memtable = hedge::db::memtable_impl_t{};
             size_t n_keys = this->SECOND_TABLE_IS_DELETION_ONLY ? this->_deleted_items.size() : this->N_KEYS_PER_RUN;
-            deleted_memtable.reserve(1, n_keys);
 
             for(const auto& [key, value_ptr] : this->_deleted_items)
             {
                 auto deleted_value_ptr = hedge::value_ptr_t::apply_delete(value_ptr);
-                deleted_memtable.put(0, key, deleted_value_ptr);
+                deleted_memtable.insert(key, deleted_value_ptr);
             }
 
             assert(n_keys - this->_deleted_items.size() > 0);
@@ -105,14 +102,14 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
 
                 this->_uuids.emplace_back(uuid);
                 auto value_ptr = hedge::value_ptr_t(static_cast<uint64_t>(j), uuid_fake_size(uuid), 0);
-                deleted_memtable.put(0, uuid, value_ptr);
+                deleted_memtable.insert(uuid, value_ptr);
 
                 if(dist(this->generator) < this->DELETE_PROBABILITY)
                     this->_deleted_items.insert({uuid, value_ptr});
             }
 
             // Flush the deleted items memtable
-            auto deleted_partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, &deleted_memtable, NUM_PARTITION_EXPONENT, N_RUNS, nullptr);
+            auto deleted_partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, reinterpret_cast<hedge::db::frozen_memtable_impl_t*>(&deleted_memtable), NUM_PARTITION_EXPONENT, N_RUNS, nullptr);
 
             if(!deleted_partitioned_sorted_indices)
             {
