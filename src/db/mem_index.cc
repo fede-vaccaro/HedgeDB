@@ -1,6 +1,7 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <memory>
 #include <ranges>
 #include <thread>
 
@@ -23,37 +24,45 @@ namespace hedge::db
           _push_new_indices(std::move(push_new_indices)),
           _trigger_compaction_callback(std::move(trigger_compaction_callback)),
           _cache(std::move(page_cache)),
-          _logger("MEMTABLE")
+          _logger("memtable")
     {
-        this->_table = new memtable_impl_t(this->_cfg.memory_budget_cap);
-        this->_pipelined_table = new memtable_impl_t(this->_cfg.memory_budget_cap);
+        this->_table = std::make_shared<memtable_impl_t>(this->_cfg.memory_budget_cap);
+        this->_pipelined_table = std::make_shared<memtable_impl_t>(this->_cfg.memory_budget_cap);
     }
 
     void memtable::put(const key_t& key, const value_ptr_t& value)
     {
+        // Loading from an atomic shared every time is slow AF
+        // Basically a thread-local cache
+
         while(true)
         {
-            auto* table = this->_table.load(std::memory_order::relaxed);
+            std::shared_ptr<memtable_impl_t> local_memtable_ref = this->_table.load(std::memory_order::relaxed); // <--- huge bottleneck here, std::atomic<std::shared_ptr<>> is slow; maybe hazard pointers?
 
-            if(table == nullptr)
-                continue;
+            bool ok = local_memtable_ref->insert(key, value); // returns false if memtable run out of memory (budget)
 
-            bool ok = table->insert(key, value); // returns false if Out of Memory Budget
-
-            if(!ok || table->size() >= this->_cfg.max_inserts_cap)
+            if(!ok || local_memtable_ref->size() >= this->_cfg.max_inserts_cap)
             {
-                bool flush_ok = this->_flush();
-                if(!flush_ok)
+                bool this_thread_flushed = this->_flush();
+                if(!this_thread_flushed)
+                {
                     std::this_thread::yield();
+                }
+
+                // this->_table.wait(local_memtable_ref, std::memory_order::relaxed); // Block here if table hasn't been updated yet
+                // local_memtable_ref = this->_table.load(std::memory_order::relaxed);
+                continue;
             }
-            else
-                return;
+
+            return;
         }
     }
 
     std::optional<value_ptr_t> memtable::get(const key_t& key)
     {
-        auto v = this->_table.load(std::memory_order::relaxed)->get(key);
+        std::shared_ptr<memtable_impl_t> local_memtable_ref = this->_table.load(std::memory_order_relaxed);
+
+        auto v = local_memtable_ref->get(key);
 
         if(v)
             return v;
@@ -84,14 +93,15 @@ namespace hedge::db
         auto future = promise_ptr->get_future();
 
         size_t num_pending_flushes;
+
         {
             std::shared_lock lk(this->_pending_flushes_mutex);
             num_pending_flushes = this->_pending_flushes.size();
         }
 
-        if(num_pending_flushes != 0)
+        if(num_pending_flushes > 0)
         {
-            // The worker has a FIFO queue; so when the future will be set,
+            // The worker process jobs in a FIFO queue; so when the future will be set,
             // every flush until this submission will be done
             this->_flusher.submit([promise_ptr]() mutable
                                   { promise_ptr->set_value(); });
@@ -107,45 +117,42 @@ namespace hedge::db
     bool memtable::_flush()
     {
         // this->_pipelined_table.wait(nullptr, std::memory_order::relaxed);
-        memtable_impl_t* next_in_pipeline = this->_pipelined_table.load(std::memory_order::relaxed);
+        auto next_in_pipeline = this->_pipelined_table.load(std::memory_order::relaxed);
 
         // CAS loop
         if(next_in_pipeline != nullptr && this->_pipelined_table.compare_exchange_strong(next_in_pipeline, nullptr))
         {
             size_t curr_flush_epoch = this->_flush_epoch->fetch_add(1, std::memory_order::relaxed);
-            memtable_impl_t* memtable_to_flush{};
+            std::shared_ptr<memtable_impl_t> memtable_to_flush{};
 
             { // Won the race, actually trigger flush
                 std::unique_lock lk(this->_pending_flushes_mutex);
 
-                // Using raw pointers could be unsafe as there might be some writers holding the pointer
-                // I could use a custom solution or atomic shared ptrs
-                auto curr_shared_ptr = std::shared_ptr<frozen_memtable_impl_t>(
-                    // Also, using frozen_memtable_implt_t is potentially dangerous too:
-                    // What if there is still an active writer while someone else triggers a flush?
-                    reinterpret_cast<frozen_memtable_impl_t*>(memtable_to_flush = this->_table.exchange(next_in_pipeline)) // That's the "swap chain": in flush <- (curr) _table <- _pipelined_table; now this->_table is usable again
-                );
+                memtable_to_flush = this->_table.exchange(next_in_pipeline);
+                this->_table.notify_all();
 
-                this->_pending_flushes.insert_or_assign(curr_flush_epoch, std::move(curr_shared_ptr));
+                this->_pending_flushes.insert_or_assign(curr_flush_epoch, memtable_to_flush);
             }
 
             // Launch flush job
             this->_flusher.submit(
-                [this, curr_flush_epoch, frozen_memtable_to_flush = reinterpret_cast<frozen_memtable_impl_t*>(memtable_to_flush)]()
+                [this, curr_flush_epoch, memtable_to_flush]()
                 {
-                    this->_logger.log("Flushing mem index");
+                    this->_logger.log("Flushing mem index, epoch: ", curr_flush_epoch);
                     auto t0 = std::chrono::high_resolution_clock::now();
-                    auto* new_next = new memtable_impl_t(this->_cfg.memory_budget_cap);
+                    auto new_next = std::make_shared<memtable_impl_t>(this->_cfg.memory_budget_cap);
 
                     // Update pipelined
                     // But skip if it's not needed
-                    memtable_impl_t* expected = nullptr;
+                    std::shared_ptr<memtable_impl_t> expected = nullptr;
                     if(!this->_pipelined_table.compare_exchange_strong(expected, new_next))
-                        delete new_next;
+                        new_next.reset();
 
-                    // index_ops::flush_memindex
+                    while(memtable_to_flush.use_count() != 2) // Owned just by this + pending_flushes. god that's a footgun
+                        std::this_thread::yield();
+
                     auto partitioned_sorted_indices = index_ops::flush_mem_index(this->_indices_path,
-                                                                                 frozen_memtable_to_flush,
+                                                                                 memtable_to_flush.get(),
                                                                                  this->_num_partition_exponent,
                                                                                  curr_flush_epoch,
                                                                                  this->_cache,
@@ -162,7 +169,7 @@ namespace hedge::db
                         std::unique_lock lk(this->_pending_flushes_mutex);
                         this->_push_new_indices(std::move(partitioned_sorted_indices.value()));
                         auto it = this->_pending_flushes.find(curr_flush_epoch);
-                        assert(it->second.get() == frozen_memtable_to_flush);
+                        assert(it->second == memtable_to_flush);
                         this->_pending_flushes.erase(it);
                     }
 
