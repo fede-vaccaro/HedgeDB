@@ -11,6 +11,7 @@
 #include "btree.h"
 #include "cache.h"
 #include "logger.h"
+#include "rw_sync.h"
 #include "sorted_index.h"
 #include "types.h"
 #include "worker.h"
@@ -24,6 +25,7 @@ namespace hedge::db
         size_t memory_budget_cap = 64 * 1024 * 1024;
         bool auto_compaction = true;
         bool use_odirect = false;
+        size_t num_writer_threads = 256; // (quite) safe upper bound 
     };
 
     using memtable_impl_t = btree<key_t, value_ptr_t, std::less<>, false>; // READ_ONLY=false
@@ -47,12 +49,15 @@ namespace hedge::db
         std::shared_ptr<db::shared_page_cache> _cache{};
 
         // Current memtable and pipelined
-        alignas(64) std::atomic<std::shared_ptr<memtable_impl_t>> _table;
-        alignas(64) std::atomic<std::shared_ptr<memtable_impl_t>> _pipelined_table;
+        using rw_sync_table_t = async::rw_sync<memtable_impl_t>;
+        using rw_sync_table_ptr_t = std::shared_ptr<rw_sync_table_t>;
+
+        alignas(64) std::atomic<rw_sync_table_ptr_t> _table;
+        alignas(64) std::atomic<rw_sync_table_ptr_t> _pipelined_table;
 
         // Pending flushes
         alignas(64) std::shared_mutex _pending_flushes_mutex;
-        std::map<size_t, std::shared_ptr<memtable_impl_t>> _pending_flushes;
+        std::map<size_t, rw_sync_table_ptr_t> _pending_flushes;
 
         async::worker _flusher;
         logger _logger;

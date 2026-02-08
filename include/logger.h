@@ -30,7 +30,8 @@ void log_always(const Args&... args)
 class logger
 {
 public:
-    explicit logger(std::string  name) : _name(std::move(name)) {}
+    logger() = default;
+    explicit logger(std::string name) : _name(std::move(name)) {}
 
     template <typename... Args>
     void log(const Args&... args) const

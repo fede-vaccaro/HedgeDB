@@ -26,31 +26,38 @@ namespace hedge::db
           _cache(std::move(page_cache)),
           _logger("memtable")
     {
-        this->_table = std::make_shared<memtable_impl_t>(this->_cfg.memory_budget_cap);
-        this->_pipelined_table = std::make_shared<memtable_impl_t>(this->_cfg.memory_budget_cap);
+        this->_table = std::make_shared<rw_sync_table_t>(this->_cfg.num_writer_threads, this->_cfg.memory_budget_cap);
+        this->_pipelined_table = std::make_shared<rw_sync_table_t>(this->_cfg.num_writer_threads, this->_cfg.memory_budget_cap);
     }
 
     void memtable::put(const key_t& key, const value_ptr_t& value)
     {
         // Loading from an atomic shared every time is slow AF
         // Basically a thread-local cache
+        thread_local std::shared_ptr<rw_sync_table_t> local_memtable_ref = this->_table.load(std::memory_order::relaxed); // <--- huge bottleneck here, std::atomic<std::shared_ptr<>> is slow; maybe hazard pointers?
+
+        static std::atomic_size_t THREADS{0};
+        thread_local std::atomic_size_t THIS_THREAD_IDX = THREADS.fetch_add(1, std::memory_order::relaxed);
 
         while(true)
         {
-            std::shared_ptr<memtable_impl_t> local_memtable_ref = this->_table.load(std::memory_order::relaxed); // <--- huge bottleneck here, std::atomic<std::shared_ptr<>> is slow; maybe hazard pointers?
 
-            bool ok = local_memtable_ref->insert(key, value); // returns false if memtable run out of memory (budget)
+            auto memtable = local_memtable_ref->acquire_writer(THIS_THREAD_IDX);
 
-            if(!ok || local_memtable_ref->size() >= this->_cfg.max_inserts_cap)
+            if(!memtable) // The memtable has been freezen, load the new an retry
+            {
+                local_memtable_ref = this->_table.load(std::memory_order::relaxed);
+                continue;
+            }
+
+            bool ok = memtable->insert(key, value); // returns false if memtable run out of memory (budget)
+
+            if(!ok || memtable->size() >= this->_cfg.max_inserts_cap)
             {
                 bool this_thread_flushed = this->_flush();
                 if(!this_thread_flushed)
-                {
                     std::this_thread::yield();
-                }
 
-                // this->_table.wait(local_memtable_ref, std::memory_order::relaxed); // Block here if table hasn't been updated yet
-                // local_memtable_ref = this->_table.load(std::memory_order::relaxed);
                 continue;
             }
 
@@ -60,9 +67,9 @@ namespace hedge::db
 
     std::optional<value_ptr_t> memtable::get(const key_t& key)
     {
-        std::shared_ptr<memtable_impl_t> local_memtable_ref = this->_table.load(std::memory_order_relaxed);
+        auto local_memtable_ref = this->_table.load(std::memory_order_relaxed);
 
-        auto v = local_memtable_ref->get(key);
+        auto v = local_memtable_ref->ptr()->get(key);
 
         if(v)
             return v;
@@ -79,7 +86,7 @@ namespace hedge::db
         for(auto& pending_flush : std::ranges::reverse_view(pending_flushes))
         {
             auto& pending_memtable = pending_flush.second;
-            v = pending_memtable->get(key);
+            v = pending_memtable->ptr()->get(key); // TODO: the pointer can be casted to the read only version of the memtable if we are sure that every writer is done
             if(v)
                 return v;
         }
@@ -123,13 +130,13 @@ namespace hedge::db
         if(next_in_pipeline != nullptr && this->_pipelined_table.compare_exchange_strong(next_in_pipeline, nullptr))
         {
             size_t curr_flush_epoch = this->_flush_epoch->fetch_add(1, std::memory_order::relaxed);
-            std::shared_ptr<memtable_impl_t> memtable_to_flush{};
+            rw_sync_table_ptr_t memtable_to_flush{};
 
             { // Won the race, actually trigger flush
                 std::unique_lock lk(this->_pending_flushes_mutex);
 
+                this->_table.load(std::memory_order::relaxed)->freeze_writes();
                 memtable_to_flush = this->_table.exchange(next_in_pipeline);
-                this->_table.notify_all();
 
                 this->_pending_flushes.insert_or_assign(curr_flush_epoch, memtable_to_flush);
             }
@@ -138,21 +145,21 @@ namespace hedge::db
             this->_flusher.submit(
                 [this, curr_flush_epoch, memtable_to_flush]()
                 {
-                    this->_logger.log("Flushing mem index, epoch: ", curr_flush_epoch);
+                    this->_logger.log("Flushing mem index, epoch: ", curr_flush_epoch, " size: ", memtable_to_flush->ptr()->size());
                     auto t0 = std::chrono::high_resolution_clock::now();
-                    auto new_next = std::make_shared<memtable_impl_t>(this->_cfg.memory_budget_cap);
+                    auto new_next = std::make_shared<rw_sync_table_t>(this->_cfg.num_writer_threads, this->_cfg.memory_budget_cap);
 
                     // Update pipelined
                     // But skip if it's not needed
-                    std::shared_ptr<memtable_impl_t> expected = nullptr;
+                    std::shared_ptr<rw_sync_table_t> expected = nullptr;
                     if(!this->_pipelined_table.compare_exchange_strong(expected, new_next))
                         new_next.reset();
 
-                    while(memtable_to_flush.use_count() != 2) // Owned just by this + pending_flushes. god that's a footgun
+                    while(memtable_to_flush->any_active_writer()) // Wait until every writer is done with the object
                         std::this_thread::yield();
 
                     auto partitioned_sorted_indices = index_ops::flush_mem_index(this->_indices_path,
-                                                                                 memtable_to_flush.get(),
+                                                                                 memtable_to_flush.get()->ptr(),
                                                                                  this->_num_partition_exponent,
                                                                                  curr_flush_epoch,
                                                                                  this->_cache,
