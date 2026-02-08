@@ -3,11 +3,10 @@
 #include <ostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <variant>
 
 #include "outcome.hpp"
-
-// Ensure the correct namespace alias for Outcome
 
 namespace hedge
 {
@@ -24,13 +23,13 @@ namespace hedge
 
     class error
     {
-        static inline std::string kDefaultMsg = "Unknown error";
+        static inline std::string DEFAULT_MSG = "Unknown err";
 
-        std::string _error_msg{kDefaultMsg};
+        std::string _error_msg{DEFAULT_MSG};
         errc _error_code{errc::GENERIC_ERROR};
 
     public:
-        explicit error(const std::string& msg, errc error_code = errc::GENERIC_ERROR) : _error_msg(msg), _error_code(error_code) {}
+        explicit error(std::string msg, errc error_code = errc::GENERIC_ERROR) : _error_msg(std::move(msg)), _error_code(error_code) {}
 
         [[nodiscard]] const auto& to_string() const { return _error_msg; }
         [[nodiscard]] const auto& code() const { return _error_code; }
@@ -63,19 +62,17 @@ namespace hedge
         status() = default;
         status(hedge::error err_) : err(err_) {}
 
-        inline operator bool() const
+        operator bool() const
         {
             return std::holds_alternative<std::monostate>(err);
         }
 
-        inline hedge::error error()
+        hedge::error error()
         {
             if(!*this)
                 return std::get<hedge::error>(this->err);
 
-            throw std::runtime_error("not an error, check before calling this method!");
-
-            return hedge::error{""};
+            throw std::runtime_error("not an error, check operator bool() before calling this method");
         }
     };
 
