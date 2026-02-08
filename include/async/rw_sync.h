@@ -8,7 +8,7 @@
 namespace hedge::async
 {
 
-    // This structure is needed for coordinating writers and readers using multiple atomic reference counters.
+    // rw_sync is an utility for coordinating fast multiple writer and reader threads, using multiple atomic reference counters.
     // Using a single counter is a bottleneck due to cache invalidation protocols (MESI) between multiple threads being slow.
     // Currently it's only needed for lightweight memtable read/write synchronization between the writer and the flusher threads.
     // Executing std::atomic<std::shared_ptr<>>::load every time resulted slow due to the reference counter continuous update.
