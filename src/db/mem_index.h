@@ -47,14 +47,14 @@ namespace hedge::db
         std::shared_ptr<db::shared_page_cache> _cache{};
 
         // Current memtable and pipelined
-        alignas(64) std::atomic<memtable_impl_t*> _table;
-        alignas(64) std::atomic<memtable_impl_t*> _pipelined_table;
+        alignas(64) std::atomic<std::shared_ptr<memtable_impl_t>> _table;
+        alignas(64) std::atomic<std::shared_ptr<memtable_impl_t>> _pipelined_table;
 
+        // Pending flushes
         alignas(64) std::shared_mutex _pending_flushes_mutex;
         std::map<size_t, std::shared_ptr<memtable_impl_t>> _pending_flushes;
 
         async::worker _flusher;
-
         logger _logger;
 
     public:

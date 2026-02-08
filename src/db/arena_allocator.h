@@ -32,6 +32,9 @@ namespace hedge::db
             extent_bytes_hint = hedge::ceil(extent_bytes_hint, sizeof(T)) * sizeof(T);
 
             this->_extent_size = std::max(extent_bytes_hint, MIN_EXTENT_SIZE_BYTES);
+
+            budget = std::max(this->_extent_size, budget);
+
             this->_items_per_extent = std::max(this->_extent_size / sizeof(T), 1UL); // at least 1 extent
 
             size_t n_extents = hedge::ceil(budget, this->_extent_size);
