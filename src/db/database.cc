@@ -15,7 +15,7 @@
 #include "async/wait_group.h"
 #include "cache.h"
 #include "database.h"
-#include "db/mem_index.h"
+#include "db/memtable.h"
 #include "index_ops.h"
 #include "io_executor.h"
 #include "perf_counter.h"

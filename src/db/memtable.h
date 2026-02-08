@@ -7,7 +7,6 @@
 #include <optional>
 #include <vector>
 
-#include "async/spinlock.h"
 #include "btree.h"
 #include "cache.h"
 #include "logger.h"
@@ -25,7 +24,7 @@ namespace hedge::db
         size_t memory_budget_cap = 64 * 1024 * 1024;
         bool auto_compaction = true;
         bool use_odirect = false;
-        size_t num_writer_threads = 256; // (quite) safe upper bound 
+        size_t num_writer_threads = 256; // (quite) safe upper bound
     };
 
     using memtable_impl_t = btree<key_t, value_ptr_t, std::less<>, false>; // READ_ONLY=false

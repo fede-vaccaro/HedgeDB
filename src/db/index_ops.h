@@ -3,8 +3,7 @@
 #include <cstdlib>
 
 #include "cache.h"
-#include "mailbox.h"
-#include "mem_index.h"
+#include "memtable.h"
 #include "sorted_index.h"
 #include "types.h"
 #include "utils.h"

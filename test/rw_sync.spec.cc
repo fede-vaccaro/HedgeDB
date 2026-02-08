@@ -18,7 +18,7 @@ namespace hedge::async
 
         *writer = 42;
 
-        writer.~writer(); // call dtor
+        writer.~acquired_writer(); // call dtor
 
         ASSERT_FALSE(writer);
 
