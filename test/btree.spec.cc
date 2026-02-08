@@ -1,4 +1,5 @@
 #include "db/btree.h"
+#include "types.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -10,65 +11,86 @@
 
 using namespace hedge::db;
 
+namespace
+{
+    // Helper to create determinstic keys from integers for testing
+    hedge::key_t make_key(uint64_t i)
+    {
+        std::array<uint8_t, 16> bytes = {0};
+        // Fill last 8 bytes with integer in big-endian order to preserve sort order
+        for(int j = 0; j < 8; ++j)
+        {
+            bytes[15 - j] = (i >> (j * 8)) & 0xFF;
+        }
+        return hedge::key_t(bytes);
+    }
+
+    // Helper to create values
+    hedge::value_ptr_t make_val(uint64_t i)
+    {
+        return hedge::value_ptr_t(i * 10, 100, 1);
+    }
+} // namespace
+
 TEST(BTreeNodeTest, Initialization)
 {
-    btree<int, int>::node n;
+    btree<hedge::key_t, hedge::value_ptr_t>::node n;
     EXPECT_TRUE(n._header._is_leaf);
     EXPECT_EQ(n._header._count, 0);
-    EXPECT_EQ(n._header._head_idx, (btree<int, int>::NULL_IDX));
+    EXPECT_EQ(n._header._head_idx, (btree<hedge::key_t, hedge::value_ptr_t>::NULL_IDX));
     EXPECT_FALSE(n.is_full());
 }
 
 TEST(BTreeNodeTest, InsertOrdered)
 {
-    btree<int, int>::node n;
-    EXPECT_TRUE(n.insert(10, 10));
-    EXPECT_TRUE(n.insert(5, 5));
-    EXPECT_TRUE(n.insert(20, 20));
+    btree<hedge::key_t, hedge::value_ptr_t>::node n;
+    EXPECT_TRUE(n.insert(make_key(10), make_val(10)));
+    EXPECT_TRUE(n.insert(make_key(5), make_val(5)));
+    EXPECT_TRUE(n.insert(make_key(20), make_val(20)));
 
     auto values = n.get_values();
     ASSERT_EQ(values.size(), 3);
-    EXPECT_EQ(values[0].first, 5);
-    EXPECT_EQ(values[1].first, 10);
-    EXPECT_EQ(values[2].first, 20);
+    EXPECT_EQ(values[0].first, make_key(5));
+    EXPECT_EQ(values[1].first, make_key(10));
+    EXPECT_EQ(values[2].first, make_key(20));
 }
 
 TEST(BTreeNodeTest, Capacity)
 {
-    btree<long, long>::node n;
+    btree<hedge::key_t, hedge::value_ptr_t>::node n;
     // Fill the node
     size_t count = 0;
     while(!n.is_full())
     {
-        EXPECT_TRUE(n.insert(count, count));
+        EXPECT_TRUE(n.insert(make_key(count), make_val(count)));
         count++;
     }
-    EXPECT_EQ(n._header._count, (btree<long, long>::node::CAPACITY));
+    EXPECT_EQ(n._header._count, (btree<hedge::key_t, hedge::value_ptr_t>::node::CAPACITY));
     EXPECT_TRUE(n.is_full());
 
     // Check values
     auto values = n.get_values();
-    EXPECT_EQ(values.size(), (btree<long, long>::node::CAPACITY));
+    EXPECT_EQ(values.size(), (btree<hedge::key_t, hedge::value_ptr_t>::node::CAPACITY));
     for(size_t i = 0; i < count; ++i)
     {
-        EXPECT_EQ(values[i].first, i);
-        EXPECT_EQ(values[i].second, i);
+        EXPECT_EQ(values[i].first, make_key(i));
+        EXPECT_EQ(values[i].second, make_val(i));
     }
 }
 
 TEST(BTreeTest, InsertRootSplit)
 {
-    btree<int, int> tree;
-    size_t capacity = btree<int, int>::node::CAPACITY;
+    btree<hedge::key_t, hedge::value_ptr_t> tree;
+    size_t capacity = btree<hedge::key_t, hedge::value_ptr_t>::node::CAPACITY;
 
     // Fill root
     for(size_t i = 0; i < capacity; ++i)
     {
-        EXPECT_TRUE(tree.insert(i, i));
+        EXPECT_TRUE(tree.insert(make_key(i), make_val(i)));
     }
 
     // Next insert should cause split
-    EXPECT_TRUE(tree.insert(capacity, capacity));
+    EXPECT_TRUE(tree.insert(make_key(capacity), make_val(capacity)));
 
     auto root = tree.get_root();
     EXPECT_FALSE(root->_header._is_leaf);
@@ -81,21 +103,21 @@ TEST(BTreeTest, InsertRootSplit)
 
 TEST(BTreeTest, LargeInsertRandom)
 {
-    btree<int, int> tree;
-    std::vector<int> data;
+    btree<hedge::key_t, hedge::value_ptr_t> tree;
+    std::vector<hedge::key_t> data;
     const int N = 10000;
+
+    std::mt19937 rng(42);
+    uuids::uuid_random_generator gen(rng);
 
     for(int i = 0; i < N; ++i)
     {
-        data.push_back(i);
+        data.push_back(gen());
     }
 
-    std::mt19937 g(42);
-    std::shuffle(data.begin(), data.end(), g);
-
-    for(int x : data)
+    for(const auto& x : data)
     {
-        EXPECT_TRUE(tree.insert(x, x));
+        EXPECT_TRUE(tree.insert(x, hedge::value_ptr_t(100, 10, 1)));
     }
 
     // Basic verification: root should be internal
@@ -132,17 +154,17 @@ void collect_values(typename btree<K, V>::node* n, std::vector<K>& out)
 
 TEST(BTreeTest, IntegrityCheck)
 {
-    btree<int, int> tree;
+    btree<hedge::key_t, hedge::value_ptr_t> tree;
     const int N = 2000;
-    std::vector<int> expected;
+    std::vector<hedge::key_t> expected;
     for(int i = 0; i < N; ++i)
     {
-        EXPECT_TRUE(tree.insert(i, i));
-        expected.push_back(i);
+        EXPECT_TRUE(tree.insert(make_key(i), make_val(i)));
+        expected.push_back(make_key(i));
     }
 
-    std::vector<int> actual;
-    collect_values<int, int>(tree.get_root(), actual);
+    std::vector<hedge::key_t> actual;
+    collect_values<hedge::key_t, hedge::value_ptr_t>(tree.get_root(), actual);
 
     ASSERT_EQ(actual.size(), expected.size());
     EXPECT_EQ(actual, expected);
@@ -150,39 +172,43 @@ TEST(BTreeTest, IntegrityCheck)
 
 TEST(BTreeTest, IntegrityCheckRandom)
 {
-    btree<int, int> tree;
+    btree<hedge::key_t, hedge::value_ptr_t> tree;
     const int N = 2000;
-    std::vector<int> input;
+    std::vector<int> input_ints;
     for(int i = 0; i < N; ++i)
-        input.push_back(i);
+        input_ints.push_back(i);
 
     std::mt19937 g(123);
-    std::shuffle(input.begin(), input.end(), g);
+    std::shuffle(input_ints.begin(), input_ints.end(), g);
 
-    for(int x : input)
+    for(int x : input_ints)
     {
-        EXPECT_TRUE(tree.insert(x, x));
+        EXPECT_TRUE(tree.insert(make_key(x), make_val(x)));
     }
 
-    std::sort(input.begin(), input.end());
+    // Expected keys are sorted
+    std::sort(input_ints.begin(), input_ints.end());
+    std::vector<hedge::key_t> expected;
+    for(int x : input_ints)
+        expected.push_back(make_key(x));
 
-    std::vector<int> actual;
-    collect_values<int, int>(tree.get_root(), actual);
+    std::vector<hedge::key_t> actual;
+    collect_values<hedge::key_t, hedge::value_ptr_t>(tree.get_root(), actual);
 
-    ASSERT_EQ(actual.size(), input.size());
-    EXPECT_EQ(actual, input);
+    ASSERT_EQ(actual.size(), expected.size());
+    EXPECT_EQ(actual, expected);
 }
 
 TEST(BTreeTest, BenchmarkInsert200K)
 {
-    btree<size_t, size_t> tree;
+    btree<hedge::key_t, hedge::value_ptr_t> tree;
     const size_t N = 200000;
 
     auto start = std::chrono::high_resolution_clock::now();
 
     for(size_t i = 0; i < N; ++i)
     {
-        if(!tree.insert(i, i))
+        if(!tree.insert(make_key(i), make_val(i)))
         {
             std::cerr << "Allocation failed at " << i << std::endl;
             std::abort();
@@ -199,7 +225,7 @@ TEST(BTreeTest, BenchmarkInsert200K)
 
 TEST(BTreeTest, ConcurrentInsertCorrectness)
 {
-    btree<int, int> tree;
+    btree<hedge::key_t, hedge::value_ptr_t> tree;
     const int N = 100000;
     const int NUM_THREADS = 8;
     std::vector<std::thread> threads;
@@ -208,7 +234,7 @@ TEST(BTreeTest, ConcurrentInsertCorrectness)
     {
         for(int i = start; i < end; ++i)
         {
-            if(!tree.insert(i, i))
+            if(!tree.insert(make_key(i), make_val(i)))
                 std::abort();
         }
     };
@@ -225,27 +251,27 @@ TEST(BTreeTest, ConcurrentInsertCorrectness)
         t.join();
 
     // Verify
-    std::vector<int> actual;
-    collect_values<int, int>(tree.get_root(), actual);
+    std::vector<hedge::key_t> actual;
+    collect_values<hedge::key_t, hedge::value_ptr_t>(tree.get_root(), actual);
 
     ASSERT_EQ(actual.size(), N);
 
     // Check sortedness
     for(size_t i = 1; i < actual.size(); ++i)
     {
-        ASSERT_GE(actual[i], actual[i - 1]) << "Not sorted at index " << i;
+        ASSERT_FALSE(actual[i] < actual[i - 1]) << "Not sorted at index " << i;
     }
 
     // Check values (since we inserted 0..N-1)
     for(int i = 0; i < N; ++i)
     {
-        ASSERT_EQ(actual[i], i) << "Value mismatch at index " << i;
+        ASSERT_EQ(actual[i], make_key(i)) << "Value mismatch at index " << i;
     }
 }
 
 TEST(BTreeTest, ConcurrentReadWrite)
 {
-    btree<int, int> tree;
+    btree<hedge::key_t, hedge::value_ptr_t> tree;
     const int N = 40000;
     const int WRITERS = 4;
     const int READERS = 4;
@@ -263,7 +289,7 @@ TEST(BTreeTest, ConcurrentReadWrite)
             int end = start + ITEMS_PER_THREAD;
             for(int j = start; j < end; ++j)
             {
-                if(!tree.insert(j, j)) std::abort();
+                if(!tree.insert(make_key(j), make_val(j))) std::abort();
                 if(j % 100 == 0) std::this_thread::yield();
             } });
     }
@@ -278,7 +304,7 @@ TEST(BTreeTest, ConcurrentReadWrite)
             while(!done.load(std::memory_order_acquire))
             {
                 int val = dist(rng);
-                tree.get(val); // Just exercise the read path
+                tree.get(make_key(val)); // Just exercise the read path
             } });
     }
 
@@ -299,20 +325,20 @@ TEST(BTreeTest, ConcurrentReadWrite)
     // Verify all present
     for(int i = 0; i < N; ++i)
     {
-        ASSERT_TRUE(tree.get(i)) << "Missing value " << i;
+        ASSERT_TRUE(tree.get(make_key(i))) << "Missing value " << i;
     }
 }
 
 TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
 {
-    btree<size_t, size_t> tree;
+    btree<hedge::key_t, hedge::value_ptr_t> tree;
     const size_t NUM_WRITERS = 4;
     const size_t NUM_READERS = 4;
     const size_t OPS_PER_WRITER = 100000;
 
     struct alignas(64) ThreadLog
     {
-        std::vector<size_t> values;
+        std::vector<hedge::key_t> values;
         std::atomic<size_t> published_count{0};
 
         ThreadLog() { values.resize(OPS_PER_WRITER); }
@@ -332,14 +358,17 @@ TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
 
             for(size_t j = 0; j < OPS_PER_WRITER; ++j)
             {
-                size_t val = dist(rng);
+                size_t val_int = dist(rng);
                 // Ensure value is EVEN for positive tests
-                if (val % 2 != 0) val++; 
+                if (val_int % 2 != 0) val_int++; 
 
-                if(!tree.insert(val, val)) std::abort();
+                hedge::key_t k = make_key(val_int);
+                hedge::value_ptr_t v = make_val(val_int);
+
+                if(!tree.insert(k, v)) std::abort();
                 
                 // Publish value
-                logs[i].values[j] = val;
+                logs[i].values[j] = k;
                 
                 // Ensure insert is fully visible before publishing
                 std::atomic_thread_fence(std::memory_order_release);
@@ -370,8 +399,8 @@ TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
 
                 if(count > 0)
                 {
-                    size_t val = logs[w_idx].values[count - 1];
-                    ASSERT_TRUE(tree.get(val)) << "Latest value not found: " << val;
+                    hedge::key_t val = logs[w_idx].values[count - 1];
+                    ASSERT_TRUE(tree.get(val)) << "Latest value not found";
                 }
 
                 // Test 2: Random historical visibility (Relaxed)
@@ -379,18 +408,18 @@ TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
                 {
                     std::uniform_int_distribution<size_t> idx_dist(0, count - 1);
                     size_t idx = idx_dist(rng);
-                    size_t val = logs[w_idx].values[idx];
-                    ASSERT_TRUE(tree.get(val)) << "Historical value not found: " << val;
+                    hedge::key_t val = logs[w_idx].values[idx];
+                    ASSERT_TRUE(tree.get(val)) << "Historical value not found";
                 }
 
                 // Test 3: Negative Lookup
                 // Check a random ODD number (should not exist)
-                size_t odd_val = val_dist(rng);
-                if (odd_val % 2 == 0) odd_val++;
+                size_t odd_val_int = val_dist(rng);
+                if (odd_val_int % 2 == 0) odd_val_int++;
                 
-                // There is a microscopic chance of collision if we used full range randoms,
-                // but since we strictly write EVENS, any ODD number should NOT be there.
-                ASSERT_FALSE(tree.get(odd_val)) << "Found value that was never inserted: " << odd_val;
+                hedge::key_t odd_key = make_key(odd_val_int);
+                
+                ASSERT_FALSE(tree.get(odd_key)) << "Found value that was never inserted";
             } });
     }
 
@@ -415,8 +444,8 @@ TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
         size_t count = log.published_count.load(std::memory_order_relaxed);
         for(size_t k = 0; k < count; ++k)
         {
-            size_t val = log.values[k];
-            ASSERT_TRUE(tree.get(val)) << "Final check: Missing value " << val;
+            hedge::key_t val = log.values[k];
+            ASSERT_TRUE(tree.get(val)) << "Final check: Missing value";
         }
     }
 }
@@ -425,7 +454,7 @@ namespace
 {
     void run_benchmark(size_t total_items, int num_threads)
     {
-        btree<size_t, size_t> tree;
+        btree<hedge::key_t, hedge::value_ptr_t> tree;
         std::vector<std::thread> threads;
         std::atomic<bool> start_flag{false};
 
@@ -436,7 +465,7 @@ namespace
             } // Spin wait
             for(size_t i = start; i < end; ++i)
             {
-                if(!tree.insert(i, i))
+                if(!tree.insert(make_key(i), make_val(i)))
                     std::abort();
             }
         };
@@ -466,11 +495,11 @@ namespace
 
     void run_read_benchmark(size_t tree_size, size_t total_lookups, int num_threads)
     {
-        btree<size_t, size_t> tree;
+        btree<hedge::key_t, hedge::value_ptr_t> tree;
         // 1. Populate tree
         for(size_t i = 0; i < tree_size; ++i)
         {
-            if(!tree.insert(i, i))
+            if(!tree.insert(make_key(i), make_val(i)))
                 std::abort();
         }
 
@@ -491,7 +520,7 @@ namespace
             for(size_t i = 0; i < count; ++i)
             {
                 // We use volatile to ensure the call isn't optimized away (though unlikely for a non-trivial function)
-                bool found = tree.get(dist(rng)).has_value();
+                bool found = tree.get(make_key(dist(rng))).has_value();
                 if(!found)
                 {
                     // Should theoretically not happen if populated 0..N-1 and we query that range
@@ -524,16 +553,16 @@ namespace
 
     void run_readonly_benchmark(size_t tree_size, size_t total_lookups, int num_threads)
     {
-        btree<size_t, size_t> tree;
+        btree<hedge::key_t, hedge::value_ptr_t> tree;
         // 1. Populate tree
         for(size_t i = 0; i < tree_size; ++i)
         {
-            if(!tree.insert(i, i))
+            if(!tree.insert(make_key(i), make_val(i)))
                 std::abort();
         }
 
         // CAST TO READ ONLY
-        auto* ro_tree = reinterpret_cast<btree<size_t, size_t, std::less<size_t>, true>*>(&tree);
+        auto* ro_tree = reinterpret_cast<btree<hedge::key_t, hedge::value_ptr_t, std::less<hedge::key_t>, true>*>(&tree);
 
         std::vector<std::thread> threads;
         std::atomic<bool> start_flag{false};
@@ -551,7 +580,7 @@ namespace
 
             for(size_t i = 0; i < count; ++i)
             {
-                bool found = ro_tree->get(dist(rng)).has_value();
+                bool found = ro_tree->get(make_key(dist(rng))).has_value();
                 (void)found;
             }
         };
@@ -580,7 +609,7 @@ namespace
     {
         // Increase budget for large test
         // 5M items = ~160MB of nodes. 1GB default is fine.
-        auto* tree = new btree<size_t, size_t>();
+        auto* tree = new btree<hedge::key_t, hedge::value_ptr_t>();
         std::vector<std::thread> threads;
         std::atomic<bool> start_flag{false};
 
@@ -591,7 +620,7 @@ namespace
             } // Spin wait
             for(size_t i = start; i < end; ++i)
             {
-                if(!tree->insert(i, i))
+                if(!tree->insert(make_key(i), make_val(i)))
                     std::abort();
             }
         };
@@ -674,31 +703,31 @@ TEST(BTreeTest, ReadOnlyScalingBenchmark)
 
 TEST(BTreeTest, IteratorTraversal)
 {
-    btree<int, int> tree;
+    btree<hedge::key_t, hedge::value_ptr_t> tree;
     const int N = 100;
     // Insert in random order to ensure tree structure is non-trivial
-    std::vector<int> data;
+    std::vector<int> data_ints;
     for(int i = 0; i < N; ++i)
-        data.push_back(i);
+        data_ints.push_back(i);
     std::mt19937 g(42);
-    std::shuffle(data.begin(), data.end(), g);
+    std::shuffle(data_ints.begin(), data_ints.end(), g);
 
-    for(int x : data)
+    for(int x : data_ints)
     {
-        EXPECT_TRUE(tree.insert(x, x * 10));
+        EXPECT_TRUE(tree.insert(make_key(x), make_val(x)));
     }
 
     int count = 0;
-    int expected_key = 0;
+    int expected_key_int = 0;
     for(auto it = tree.begin(); it != tree.end(); ++it)
     {
         auto [k, v] = *it;
-        EXPECT_EQ(k, expected_key);
-        EXPECT_EQ(v, expected_key * 10);
-        EXPECT_EQ(it.key(), expected_key);
-        EXPECT_EQ(it.value(), expected_key * 10);
+        EXPECT_EQ(k, make_key(expected_key_int));
+        EXPECT_EQ(v, make_val(expected_key_int));
+        EXPECT_EQ(it.key(), make_key(expected_key_int));
+        EXPECT_EQ(it.value(), make_val(expected_key_int));
 
-        expected_key++;
+        expected_key_int++;
         count++;
     }
     EXPECT_EQ(count, N);
@@ -706,47 +735,79 @@ TEST(BTreeTest, IteratorTraversal)
 
 TEST(BTreeTest, Find)
 {
-    btree<int, int> tree;
-    tree.insert(10, 100);
-    tree.insert(5, 50);
-    tree.insert(20, 200);
-    tree.insert(15, 150);
+    btree<hedge::key_t, hedge::value_ptr_t> tree;
+    tree.insert(make_key(10), make_val(10));
+    tree.insert(make_key(5), make_val(5));
+    tree.insert(make_key(20), make_val(20));
+    tree.insert(make_key(15), make_val(15));
 
     // Find existing
-    auto it = tree.find(10);
+    auto it = tree.find(make_key(10));
     ASSERT_NE(it, tree.end());
-    EXPECT_EQ((*it).first, 10);
-    EXPECT_EQ(it.value(), 100);
+    EXPECT_EQ((*it).first, make_key(10));
+    EXPECT_EQ(it.value(), make_val(10));
 
-    it = tree.find(5);
+    it = tree.find(make_key(5));
     ASSERT_NE(it, tree.end());
-    EXPECT_EQ((*it).first, 5);
+    EXPECT_EQ((*it).first, make_key(5));
 
-    it = tree.find(20);
+    it = tree.find(make_key(20));
     ASSERT_NE(it, tree.end());
-    EXPECT_EQ((*it).first, 20);
+    EXPECT_EQ((*it).first, make_key(20));
 
-    it = tree.find(15);
+    it = tree.find(make_key(15));
     ASSERT_NE(it, tree.end());
-    EXPECT_EQ((*it).first, 15);
+    EXPECT_EQ((*it).first, make_key(15));
 
     // Find non-existing
-    it = tree.find(999);
+    it = tree.find(make_key(999));
     EXPECT_EQ(it, tree.end());
 
-    it = tree.find(0);
+    it = tree.find(make_key(0));
     EXPECT_EQ(it, tree.end());
 
-    it = tree.find(12);
+    it = tree.find(make_key(12));
     EXPECT_EQ(it, tree.end());
 }
 
 TEST(BTreeTest, EmptyIterator)
 {
-    btree<int, int> tree;
+    btree<hedge::key_t, hedge::value_ptr_t> tree;
     auto it = tree.begin();
     EXPECT_EQ(it, tree.end());
 
-    it = tree.find(10);
+    it = tree.find(make_key(10));
     EXPECT_EQ(it, tree.end());
+}
+
+TEST(BTreeTest, UUIDKeyTest)
+{
+    btree<hedge::key_t, hedge::value_ptr_t> tree;
+    std::mt19937 rng(42);
+    uuids::uuid_random_generator gen(rng);
+
+    const int N = 1000;
+    std::vector<std::pair<hedge::key_t, hedge::value_ptr_t>> data;
+
+    for(int i = 0; i < N; ++i)
+    {
+        hedge::key_t key = gen();
+        hedge::value_ptr_t value(i * 100, 10, 1);
+
+        EXPECT_TRUE(tree.insert(key, value));
+        data.push_back({key, value});
+    }
+
+    // Verify
+    for(const auto& p : data)
+    {
+        auto it = tree.find(p.first);
+        ASSERT_NE(it, tree.end());
+        EXPECT_EQ(it.key(), p.first);
+
+        auto val = it.value();
+        EXPECT_EQ(val.offset(), p.second.offset());
+        EXPECT_EQ(val.size(), p.second.size());
+        EXPECT_EQ(val.table_id(), p.second.table_id());
+    }
 }

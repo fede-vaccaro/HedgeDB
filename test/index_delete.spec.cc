@@ -10,7 +10,7 @@
 #include "async/io_executor.h"
 #include "async/wait_group.h"
 #include "db/index_ops.h"
-#include "db/mem_index.h"
+#include "db/memtable.h"
 #include "db/sorted_index.h"
 #include "utils.h"
 
@@ -64,7 +64,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
                     this->_deleted_items.insert({uuid, value_ptr});
             }
 
-            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, reinterpret_cast<hedge::db::frozen_memtable_impl_t*>(&memtable), NUM_PARTITION_EXPONENT, i, nullptr);
+            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, {reinterpret_cast<hedge::db::memtable_impl_t*>(&memtable)}, NUM_PARTITION_EXPONENT, i, nullptr);
 
             if(!partitioned_sorted_indices)
             {
@@ -109,7 +109,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
             }
 
             // Flush the deleted items memtable
-            auto deleted_partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, reinterpret_cast<hedge::db::frozen_memtable_impl_t*>(&deleted_memtable), NUM_PARTITION_EXPONENT, N_RUNS, nullptr);
+            auto deleted_partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, {reinterpret_cast<hedge::db::memtable_impl_t*>(&deleted_memtable)}, NUM_PARTITION_EXPONENT, N_RUNS, nullptr);
 
             if(!deleted_partitioned_sorted_indices)
             {

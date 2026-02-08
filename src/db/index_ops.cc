@@ -22,7 +22,7 @@
 #include "fs/file_reader.h"
 #include "fs/fs.hpp"
 #include "index_ops.h"
-#include "mem_index.h"
+#include "memtable.h"
 #include "merge_utils.h"
 #include "perf_counter.h"
 #include "sorted_index.h"

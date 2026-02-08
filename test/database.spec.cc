@@ -25,7 +25,7 @@ namespace hedge::db
     {
         static void SetUpTestSuite()
         {
-            async::executor_pool::init_static_pool(12, 64);
+            async::executor_pool::init_static_pool(16, 64);
         }
 
         void SetUp() override
@@ -265,7 +265,7 @@ namespace hedge::db
                 if(!maybe_value)
                 {
                     number_of_errors++;
-                    // std::cerr << "An error occurred during retrieval for key " << key << ": " << maybe_value.error().to_string() << std::endl;
+                    std::cerr << "An error occurred during retrieval for key with index " << i << " " << key << ": " << maybe_value.error().to_string() << std::endl;
                     read_wg->decr();
                     co_return;
                 }
@@ -314,7 +314,7 @@ namespace hedge::db
         test_suite,
         database_test,
         testing::Combine(
-            testing::Values(20'000'000), // n keys
+            testing::Values(80'000'000), // n keys
             testing::Values(100),        // payload size
             testing::Values(2'000'000)   // memtable capacity
             ),

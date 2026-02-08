@@ -16,7 +16,7 @@
 #include "async/task.h"
 #include "async/worker.h"
 #include "cache.h"
-#include "mem_index.h"
+#include "memtable.h"
 #include "sorted_index.h"
 #include "types.h"
 #include "value_table.h"

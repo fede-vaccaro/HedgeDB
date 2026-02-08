@@ -10,7 +10,7 @@
 #include "async/wait_group.h"
 #include "cache.h"
 #include "db/index_ops.h"
-#include "db/mem_index.h"
+#include "db/memtable.h"
 #include "db/sorted_index.h"
 #include "utils.h"
 #include "uuid.h"
@@ -63,7 +63,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
                 memtable.insert(uuid, {static_cast<uint64_t>(j), uuid_fake_size(uuid), 0});
             }
 
-            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, reinterpret_cast<hedge::db::frozen_memtable_impl_t*>(&memtable), NUM_PARTITION_EXPONENT, i, nullptr);
+            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, {reinterpret_cast<hedge::db::memtable_impl_t*>(&memtable)}, NUM_PARTITION_EXPONENT, i, nullptr);
 
             if(!partitioned_sorted_indices)
             {

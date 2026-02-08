@@ -6,7 +6,8 @@
 #include <thread>
 
 #include "index_ops.h"
-#include "mem_index.h"
+#include "memtable.h"
+
 namespace hedge::db
 {
 

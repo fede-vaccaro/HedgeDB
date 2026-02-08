@@ -75,8 +75,8 @@ set(DB_SOURCES
     src/db/sorted_index.h
     src/db/index_ops.cc
     src/db/index_ops.h
-    src/db/mem_index.h
-    src/db/mem_index.cc
+    src/db/memtable.h
+    src/db/memtable.cc
     src/fs/fs.hpp
     src/fs/fs.cc
     src/fs/file_reader.cc
@@ -106,15 +106,15 @@ target_link_libraries(executor_test uring gtest gtest_main)
 
 # index (merge) tests
 add_executable(index_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index.spec.cc)
-target_link_libraries(index_test gtest gtest_main uring)
+target_link_libraries(index_test gtest gtest_main uring atomic)
 
 # index (delete and merge) tests
 add_executable(index_delete_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_delete.spec.cc)
-target_link_libraries(index_delete_test gtest gtest_main uring)
+target_link_libraries(index_delete_test gtest gtest_main uring atomic)
 
 # paginated_view tests
 add_executable(file_reader_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/file_reader.spec.cc)
-target_link_libraries(file_reader_test uring gtest gtest_main)
+target_link_libraries(file_reader_test uring gtest gtest_main atomic)
 
 # value_table tests
 # TODO: re-enable
@@ -123,7 +123,7 @@ target_link_libraries(file_reader_test uring gtest gtest_main)
 
 # worker tests
 add_executable(worker_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/worker.spec.cc)
-target_link_libraries(worker_test uring gtest gtest_main)
+target_link_libraries(worker_test uring gtest gtest_main atomic)
 
 # mpsc tests
 add_executable(mpsc_test test/mpsc.spec.cc)
@@ -131,11 +131,11 @@ target_link_libraries(mpsc_test gtest gtest_main)
 
 # cache tests
 add_executable(cache_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/cache.spec.cc)
-target_link_libraries(cache_test uring gtest gtest_main)
+target_link_libraries(cache_test uring gtest gtest_main atomic)
 
 # database tests
 add_executable(database_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/database.spec.cc)
-target_link_libraries(database_test uring gtest gtest_main tcmalloc atomic)
+target_link_libraries(database_test uring gtest gtest_main atomic tcmalloc)
 
 # skiplist tests
 add_executable(skiplist_test test/skiplist.spec.cc)
@@ -158,4 +158,8 @@ target_link_libraries(skiplist_test gtest gtest_main)
 
 # btree tests
 add_executable(btree_test test/btree.spec.cc)
-target_link_libraries(btree_test gtest gtest_main tcmalloc)
+target_link_libraries(btree_test gtest gtest_main tcmalloc atomic)
+
+# rw_sync test
+add_executable(rw_sync_test test/rw_sync.spec.cc)
+target_link_libraries(rw_sync_test gtest gtest_main)
