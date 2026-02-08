@@ -16,6 +16,11 @@
 #include "async/spinlock.h"
 #include "db/arena_allocator.h"
 
+/*
+    !!DISCLAIMER!!
+    This class has been written and tested with the heavy usage of an AI Agent
+    under my direction and supervision. 
+*/
 namespace hedge::db
 {
 
