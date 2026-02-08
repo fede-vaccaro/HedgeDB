@@ -67,6 +67,7 @@ namespace hedge::db
                 .memory_budget_cap = 128 * 1024 * 1024, // default
                 .auto_compaction = config.auto_compaction,
                 .use_odirect = config.use_odirect_for_indices,
+                .num_writer_threads = async::executor_pool::static_pool().size(),
             },
             config.num_partition_exponent,
             db->_indices_path,
