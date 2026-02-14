@@ -48,7 +48,7 @@ namespace hedge::async
         std::shared_ptr<obj_t> shared_obj = std::make_shared<obj_t>(1, 42);
 
         {
-            auto writer = shared_obj->acquire_writer(1);
+            auto writer = shared_obj->acquire_writer(0);
             writer->bar();
         }
 

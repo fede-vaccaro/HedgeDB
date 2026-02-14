@@ -1,13 +1,15 @@
-#include "db/btree.h"
-#include "types.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <gtest/gtest.h>
 #include <iomanip>
 #include <random>
 #include <thread>
 #include <vector>
+
+#include <gtest/gtest.h>
+
+#include "db/btree.h"
+#include "types.h"
 
 using namespace hedge::db;
 
