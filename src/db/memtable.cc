@@ -43,7 +43,10 @@ namespace hedge::db
         while(true)
         {
 
-            auto memtable = local_memtable_ref->acquire_writer(THIS_THREAD_IDX);
+            // Using modulo to map the thread index to the number of available counters.
+            // THIS_THREAD_IDX is a monotonic counter, so this handles the case where
+            // the number of lifetime threads exceeds the number of writer slots.
+            auto memtable = local_memtable_ref->acquire_writer(THIS_THREAD_IDX % this->_cfg.num_writer_threads);
 
             if(!memtable) // The memtable has been freezen, load the new an retry
             {
