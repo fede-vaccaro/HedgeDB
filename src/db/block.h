@@ -88,9 +88,16 @@ namespace hedge::db
 
         void reset(uint8_t* new_base);
 
-        void finish()
+        // Write Footer and restart offsets
+        // Otherwise those are lazily written if the block is full
+        void commit()
         {
             this->_commit();
+        }
+
+        [[nodiscard]] const std::vector<uint8_t>& last_pushed_key() const
+        {
+            return this->_last_key;
         }
 
     private:
