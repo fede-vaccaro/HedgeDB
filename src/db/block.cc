@@ -309,7 +309,7 @@ namespace hedge::db
         : _cfg(cfg),
           _base(base)
     {
-        // read footer
+        // Read footer
         std::memcpy(&this->_footer, base + cfg.block_size_in_bytes - sizeof(block_footer), sizeof(block_footer));
     }
 
