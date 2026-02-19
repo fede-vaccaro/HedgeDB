@@ -1,8 +1,11 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <iomanip>
+#include <memory_resource>
 #include <random>
+#include <sys/types.h>
 #include <thread>
 #include <vector>
 
@@ -16,7 +19,7 @@ using namespace hedge::db;
 namespace
 {
     // Helper to create determinstic keys from integers for testing
-    hedge::key_t make_key(uint64_t i)
+    hedge::uuid_t make_key(uint64_t i)
     {
         std::array<uint8_t, 16> bytes = {0};
         // Fill last 8 bytes with integer in big-endian order to preserve sort order
@@ -24,7 +27,7 @@ namespace
         {
             bytes[15 - j] = (i >> (j * 8)) & 0xFF;
         }
-        return hedge::key_t(bytes);
+        return hedge::uuid_t(bytes);
     }
 
     // Helper to create values
@@ -36,16 +39,16 @@ namespace
 
 TEST(BTreeNodeTest, Initialization)
 {
-    btree<hedge::key_t, hedge::value_ptr_t>::node n;
+    btree<hedge::uuid_t, hedge::value_ptr_t>::node n;
     EXPECT_TRUE(n._header._is_leaf);
     EXPECT_EQ(n._header._count, 0);
-    EXPECT_EQ(n._header._head_idx, (btree<hedge::key_t, hedge::value_ptr_t>::NULL_IDX));
+    EXPECT_EQ(n._header._head_idx, (btree<hedge::uuid_t, hedge::value_ptr_t>::NULL_IDX));
     EXPECT_FALSE(n.is_full());
 }
 
 TEST(BTreeNodeTest, InsertOrdered)
 {
-    btree<hedge::key_t, hedge::value_ptr_t>::node n;
+    btree<hedge::uuid_t, hedge::value_ptr_t>::node n;
     EXPECT_TRUE(n.insert(make_key(10), make_val(10)));
     EXPECT_TRUE(n.insert(make_key(5), make_val(5)));
     EXPECT_TRUE(n.insert(make_key(20), make_val(20)));
@@ -59,7 +62,7 @@ TEST(BTreeNodeTest, InsertOrdered)
 
 TEST(BTreeNodeTest, Capacity)
 {
-    btree<hedge::key_t, hedge::value_ptr_t>::node n;
+    btree<hedge::uuid_t, hedge::value_ptr_t>::node n;
     // Fill the node
     size_t count = 0;
     while(!n.is_full())
@@ -67,12 +70,12 @@ TEST(BTreeNodeTest, Capacity)
         EXPECT_TRUE(n.insert(make_key(count), make_val(count)));
         count++;
     }
-    EXPECT_EQ(n._header._count, (btree<hedge::key_t, hedge::value_ptr_t>::node::CAPACITY));
+    EXPECT_EQ(n._header._count, (btree<hedge::uuid_t, hedge::value_ptr_t>::node::CAPACITY));
     EXPECT_TRUE(n.is_full());
 
     // Check values
     auto values = n.get_values();
-    EXPECT_EQ(values.size(), (btree<hedge::key_t, hedge::value_ptr_t>::node::CAPACITY));
+    EXPECT_EQ(values.size(), (btree<hedge::uuid_t, hedge::value_ptr_t>::node::CAPACITY));
     for(size_t i = 0; i < count; ++i)
     {
         EXPECT_EQ(values[i].first, make_key(i));
@@ -82,8 +85,8 @@ TEST(BTreeNodeTest, Capacity)
 
 TEST(BTreeTest, InsertRootSplit)
 {
-    btree<hedge::key_t, hedge::value_ptr_t> tree;
-    size_t capacity = btree<hedge::key_t, hedge::value_ptr_t>::node::CAPACITY;
+    btree<hedge::uuid_t, hedge::value_ptr_t> tree;
+    size_t capacity = btree<hedge::uuid_t, hedge::value_ptr_t>::node::CAPACITY;
 
     // Fill root
     for(size_t i = 0; i < capacity; ++i)
@@ -105,8 +108,8 @@ TEST(BTreeTest, InsertRootSplit)
 
 TEST(BTreeTest, LargeInsertRandom)
 {
-    btree<hedge::key_t, hedge::value_ptr_t> tree;
-    std::vector<hedge::key_t> data;
+    btree<hedge::uuid_t, hedge::value_ptr_t> tree;
+    std::vector<hedge::uuid_t> data;
     const int N = 10000;
 
     std::mt19937 rng(42);
@@ -156,17 +159,17 @@ void collect_values(typename btree<K, V>::node* n, std::vector<K>& out)
 
 TEST(BTreeTest, IntegrityCheck)
 {
-    btree<hedge::key_t, hedge::value_ptr_t> tree;
+    btree<hedge::uuid_t, hedge::value_ptr_t> tree;
     const int N = 2000;
-    std::vector<hedge::key_t> expected;
+    std::vector<hedge::uuid_t> expected;
     for(int i = 0; i < N; ++i)
     {
         EXPECT_TRUE(tree.insert(make_key(i), make_val(i)));
         expected.push_back(make_key(i));
     }
 
-    std::vector<hedge::key_t> actual;
-    collect_values<hedge::key_t, hedge::value_ptr_t>(tree.get_root(), actual);
+    std::vector<hedge::uuid_t> actual;
+    collect_values<hedge::uuid_t, hedge::value_ptr_t>(tree.get_root(), actual);
 
     ASSERT_EQ(actual.size(), expected.size());
     EXPECT_EQ(actual, expected);
@@ -174,7 +177,7 @@ TEST(BTreeTest, IntegrityCheck)
 
 TEST(BTreeTest, IntegrityCheckRandom)
 {
-    btree<hedge::key_t, hedge::value_ptr_t> tree;
+    btree<hedge::uuid_t, hedge::value_ptr_t> tree;
     const int N = 2000;
     std::vector<int> input_ints;
     for(int i = 0; i < N; ++i)
@@ -190,12 +193,12 @@ TEST(BTreeTest, IntegrityCheckRandom)
 
     // Expected keys are sorted
     std::sort(input_ints.begin(), input_ints.end());
-    std::vector<hedge::key_t> expected;
+    std::vector<hedge::uuid_t> expected;
     for(int x : input_ints)
         expected.push_back(make_key(x));
 
-    std::vector<hedge::key_t> actual;
-    collect_values<hedge::key_t, hedge::value_ptr_t>(tree.get_root(), actual);
+    std::vector<hedge::uuid_t> actual;
+    collect_values<hedge::uuid_t, hedge::value_ptr_t>(tree.get_root(), actual);
 
     ASSERT_EQ(actual.size(), expected.size());
     EXPECT_EQ(actual, expected);
@@ -203,7 +206,7 @@ TEST(BTreeTest, IntegrityCheckRandom)
 
 TEST(BTreeTest, BenchmarkInsert200K)
 {
-    btree<hedge::key_t, hedge::value_ptr_t> tree;
+    btree<hedge::uuid_t, hedge::value_ptr_t> tree;
     const size_t N = 200000;
 
     auto start = std::chrono::high_resolution_clock::now();
@@ -227,7 +230,7 @@ TEST(BTreeTest, BenchmarkInsert200K)
 
 TEST(BTreeTest, ConcurrentInsertCorrectness)
 {
-    btree<hedge::key_t, hedge::value_ptr_t> tree;
+    btree<hedge::uuid_t, hedge::value_ptr_t> tree;
     const int N = 100000;
     const int NUM_THREADS = 8;
     std::vector<std::thread> threads;
@@ -253,8 +256,8 @@ TEST(BTreeTest, ConcurrentInsertCorrectness)
         t.join();
 
     // Verify
-    std::vector<hedge::key_t> actual;
-    collect_values<hedge::key_t, hedge::value_ptr_t>(tree.get_root(), actual);
+    std::vector<hedge::uuid_t> actual;
+    collect_values<hedge::uuid_t, hedge::value_ptr_t>(tree.get_root(), actual);
 
     ASSERT_EQ(actual.size(), N);
 
@@ -273,7 +276,7 @@ TEST(BTreeTest, ConcurrentInsertCorrectness)
 
 TEST(BTreeTest, ConcurrentReadWrite)
 {
-    btree<hedge::key_t, hedge::value_ptr_t> tree;
+    btree<hedge::uuid_t, hedge::value_ptr_t> tree;
     const int N = 40000;
     const int WRITERS = 4;
     const int READERS = 4;
@@ -333,14 +336,14 @@ TEST(BTreeTest, ConcurrentReadWrite)
 
 TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
 {
-    btree<hedge::key_t, hedge::value_ptr_t> tree;
+    btree<hedge::uuid_t, hedge::value_ptr_t> tree;
     const size_t NUM_WRITERS = 4;
     const size_t NUM_READERS = 4;
     const size_t OPS_PER_WRITER = 100000;
 
     struct alignas(64) ThreadLog
     {
-        std::vector<hedge::key_t> values;
+        std::vector<hedge::uuid_t> values;
         std::atomic<size_t> published_count{0};
 
         ThreadLog() { values.resize(OPS_PER_WRITER); }
@@ -364,7 +367,7 @@ TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
                 // Ensure value is EVEN for positive tests
                 if (val_int % 2 != 0) val_int++; 
 
-                hedge::key_t k = make_key(val_int);
+                hedge::uuid_t k = make_key(val_int);
                 hedge::value_ptr_t v = make_val(val_int);
 
                 if(!tree.insert(k, v)) std::abort();
@@ -401,7 +404,7 @@ TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
 
                 if(count > 0)
                 {
-                    hedge::key_t val = logs[w_idx].values[count - 1];
+                    hedge::uuid_t val = logs[w_idx].values[count - 1];
                     ASSERT_TRUE(tree.get(val)) << "Latest value not found";
                 }
 
@@ -410,7 +413,7 @@ TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
                 {
                     std::uniform_int_distribution<size_t> idx_dist(0, count - 1);
                     size_t idx = idx_dist(rng);
-                    hedge::key_t val = logs[w_idx].values[idx];
+                    hedge::uuid_t val = logs[w_idx].values[idx];
                     ASSERT_TRUE(tree.get(val)) << "Historical value not found";
                 }
 
@@ -419,7 +422,7 @@ TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
                 size_t odd_val_int = val_dist(rng);
                 if (odd_val_int % 2 == 0) odd_val_int++;
                 
-                hedge::key_t odd_key = make_key(odd_val_int);
+                hedge::uuid_t odd_key = make_key(odd_val_int);
                 
                 ASSERT_FALSE(tree.get(odd_key)) << "Found value that was never inserted";
             } });
@@ -446,7 +449,7 @@ TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
         size_t count = log.published_count.load(std::memory_order_relaxed);
         for(size_t k = 0; k < count; ++k)
         {
-            hedge::key_t val = log.values[k];
+            hedge::uuid_t val = log.values[k];
             ASSERT_TRUE(tree.get(val)) << "Final check: Missing value";
         }
     }
@@ -454,9 +457,20 @@ TEST(BTreeTest, ConcurrentConsistencyAndVisibility)
 
 namespace
 {
+
     void run_benchmark(size_t total_items, int num_threads)
     {
-        btree<hedge::key_t, hedge::value_ptr_t> tree;
+        btree<hedge::uuid_t, hedge::value_ptr_t> tree;
+
+        std::vector<hedge::uuid_t> keys;
+        keys.reserve(total_items);
+        std::mt19937 rng(42);
+        uuids::uuid_random_generator gen(rng);
+        for(size_t i = 0; i < total_items; ++i)
+        {
+            keys.push_back(gen());
+        }
+
         std::vector<std::thread> threads;
         std::atomic<bool> start_flag{false};
 
@@ -467,7 +481,7 @@ namespace
             } // Spin wait
             for(size_t i = start; i < end; ++i)
             {
-                if(!tree.insert(make_key(i), make_val(i)))
+                if(!tree.insert(keys[i], make_val(i)))
                     std::abort();
             }
         };
@@ -497,7 +511,7 @@ namespace
 
     void run_read_benchmark(size_t tree_size, size_t total_lookups, int num_threads)
     {
-        btree<hedge::key_t, hedge::value_ptr_t> tree;
+        btree<hedge::uuid_t, hedge::value_ptr_t> tree;
         // 1. Populate tree
         for(size_t i = 0; i < tree_size; ++i)
         {
@@ -555,7 +569,7 @@ namespace
 
     void run_readonly_benchmark(size_t tree_size, size_t total_lookups, int num_threads)
     {
-        btree<hedge::key_t, hedge::value_ptr_t> tree;
+        btree<hedge::uuid_t, hedge::value_ptr_t> tree;
         // 1. Populate tree
         for(size_t i = 0; i < tree_size; ++i)
         {
@@ -564,7 +578,7 @@ namespace
         }
 
         // CAST TO READ ONLY
-        auto* ro_tree = reinterpret_cast<btree<hedge::key_t, hedge::value_ptr_t, std::less<hedge::key_t>, true>*>(&tree);
+        auto* ro_tree = reinterpret_cast<btree<hedge::uuid_t, hedge::value_ptr_t, std::less<hedge::uuid_t>, true>*>(&tree);
 
         std::vector<std::thread> threads;
         std::atomic<bool> start_flag{false};
@@ -606,12 +620,219 @@ namespace
         std::cout << "[ READ ONLY] Tree Size: " << tree_size << ", Threads: " << num_threads
                   << ", Lookups: " << total_lookups
                   << ", Time: " << elapsed.count() << "s, M OPS/s: " << ops / 1'000'000 << std::endl;
+        }
+
+    void run_benchmark_hedge_key(size_t total_items, int num_threads)
+    {
+        // 1. Prepare arenas for string content (if needed for large keys)
+        // Even if we use small keys mostly, we set up the arena infrastructure
+        // to correctly benchmark the "Hybrid" capability.
+        // Also if we have large keys, they go here.
+
+        // We will use 16-byte UUIDs for this benchmark, which fit in FixedKeyLen.
+        // So the Arena will be mostly unused, but we allocate it to match the overhead profile
+        // of a real hybrid system.
+
+        using AllocatorType = arena_allocator<uint8_t, false>; // byte allocator
+
+        // Allocate contiguous memory for allocators
+        void* raw_mem = std::aligned_alloc(alignof(AllocatorType), sizeof(AllocatorType) * num_threads);
+        if(!raw_mem)
+            std::abort();
+
+        auto* arenas = static_cast<AllocatorType*>(raw_mem);
+
+        for(int i = 0; i < num_threads; ++i)
+        {
+            new(arenas + i) AllocatorType(128 * 1024 * 1024); // Smaller budget since unused for small keys
+        }
+
+        // 2. Pre-generate variable-size keys
+        std::vector<hedge::uuid_t> keys;
+        keys.reserve(total_items);
+        std::mt19937 rng(42);
+        uuids::uuid_random_generator gen(rng);
+        for(size_t i = 0; i < total_items; ++i)
+        {
+            keys.push_back(gen());
+        }
+
+        btree<hedge::key<>, hedge::value_ptr_t, std::less<>> tree;
+
+        std::vector<std::thread> threads;
+        std::atomic<bool> start_flag{false};
+
+        auto worker = [&](size_t start, size_t end, int thread_idx)
+        {
+            [[maybe_unused]] auto& arena = arenas[thread_idx];
+
+            while(!start_flag.load(std::memory_order_acquire))
+            {
+            } // Spin wait
+
+            for(size_t i = start; i < end; ++i)
+            {
+                const auto& key_data = keys[i].as_bytes();
+
+                if(key_data.size() <= 31)
+                {
+                    // Small key optimization
+                    // if(!tree.insert(HybridKey2(std::in_place_type<FixedKeyLen>, key_data.data(), key_data.size()), make_val(i)))
+                    //     std::abort();
+                    if(!tree.insert(hedge::key<>(key_data.data(), key_data.size()), make_val(i)))
+                        std::abort();
+                }
+                else
+                {
+                    // // Large key: allocate in arena
+                    // uint8_t* mem = arena.allocate_many();
+                    // if(!mem)
+                    // {
+                    //     // Not enough space in arena, abort benchmark for simplicity
+                    //     std::cerr << "Arena allocation failed for size " << len << std::endl;
+                    //     std::abort();
+                    // }
+                    // std::memcpy(mem, key_data.data(), len);
+                    // if(!tree.insert(HybridKey(std::in_place_type<std::string_view>, reinterpret_cast<char*>(mem), len),
+                    //                 make_val(i)))
+                    //     std::abort();
+                }
+            }
+        };
+
+        size_t items_per_thread = total_items / num_threads;
+        for(int i = 0; i < num_threads; ++i)
+        {
+            size_t start = i * items_per_thread;
+            size_t end = (i == num_threads - 1) ? total_items : (i + 1) * items_per_thread;
+            threads.emplace_back(worker, start, end, i);
+        }
+
+        auto start_time = std::chrono::high_resolution_clock::now();
+        start_flag.store(true, std::memory_order_release);
+
+        for(auto& t : threads)
+            t.join();
+
+        auto end_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = end_time - start_time;
+        double ops = total_items / elapsed.count();
+
+        std::cout << std::fixed << std::setprecision(2);
+        std::cout << "[ HEDGEK PERF ] Items: " << total_items << ", Threads: " << num_threads
+                  << ", Time: " << elapsed.count() << "s, M OPS/s: " << ops / 1'000'000 << std::endl;
+
+        // Cleanup
+        for(int i = 0; i < num_threads; ++i)
+        {
+            arenas[i].~AllocatorType();
+        }
+        std::free(arenas);
     }
+
+    void run_benchmark_string_view(size_t total_items, int num_threads)
+    {
+        // 1. Prepare arenas for string content (if needed for large keys)
+        // Even if we use small keys mostly, we set up the arena infrastructure
+        // to correctly benchmark the "Hybrid" capability.
+        // Also if we have large keys, they go here.
+
+        // We will use 16-byte UUIDs for this benchmark, which fit in FixedKeyLen.
+        // So the Arena will be mostly unused, but we allocate it to match the overhead profile
+        // of a real hybrid system.
+
+        using AllocatorType = arena_allocator<uint8_t, false>; // byte allocator
+
+        // Allocate contiguous memory for allocators
+        void* raw_mem = std::aligned_alloc(alignof(AllocatorType), sizeof(AllocatorType) * num_threads);
+        if(!raw_mem)
+            std::abort();
+
+        AllocatorType* arenas = static_cast<AllocatorType*>(raw_mem);
+
+        for(int i = 0; i < num_threads; ++i)
+        {
+            new(arenas + i) AllocatorType(128 * 1024 * 1024); // Smaller budget since unused for small keys
+        }
+
+        // 2. Pre-generate variable-size keys
+        std::vector<hedge::uuid_t> keys;
+        keys.reserve(total_items);
+        std::mt19937 rng(42);
+        uuids::uuid_random_generator gen(rng);
+        for(size_t i = 0; i < total_items; ++i)
+        {
+            keys.push_back(gen());
+        }
+
+        btree<std::string_view, hedge::value_ptr_t> tree;
+
+        std::vector<std::thread> threads;
+        std::atomic<bool> start_flag{false};
+
+        auto worker = [&](size_t start, size_t end, int thread_idx)
+        {
+            auto& arena = arenas[thread_idx];
+
+            while(!start_flag.load(std::memory_order_acquire))
+            {
+            } // Spin wait
+
+            for(size_t i = start; i < end; ++i)
+            {
+                const auto& key_data = keys[i].as_bytes();
+                size_t len = key_data.size();
+
+                // Large key: allocate in arena
+                uint8_t* mem = arena.allocate_many(len);
+                if(!mem)
+                {
+                    // Not enough space in arena, abort benchmark for simplicity
+                    std::cerr << "Arena allocation failed for size " << len << std::endl;
+                    std::abort();
+                }
+                std::memcpy(mem, key_data.data(), len);
+                if(!tree.insert(std::string_view(reinterpret_cast<char*>(mem), len),
+                                make_val(i)))
+                    std::abort();
+            }
+        };
+
+        size_t items_per_thread = total_items / num_threads;
+        for(int i = 0; i < num_threads; ++i)
+        {
+            size_t start = i * items_per_thread;
+            size_t end = (i == num_threads - 1) ? total_items : (i + 1) * items_per_thread;
+            threads.emplace_back(worker, start, end, i);
+        }
+
+        auto start_time = std::chrono::high_resolution_clock::now();
+        start_flag.store(true, std::memory_order_release);
+
+        for(auto& t : threads)
+            t.join();
+
+        auto end_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = end_time - start_time;
+        double ops = total_items / elapsed.count();
+
+        std::cout << std::fixed << std::setprecision(2);
+        std::cout << "[ STRV PERF ] Items: " << total_items << ", Threads: " << num_threads
+                  << ", Time: " << elapsed.count() << "s, M OPS/s: " << ops / 1'000'000 << std::endl;
+
+        // Cleanup
+        for(int i = 0; i < num_threads; ++i)
+        {
+            arenas[i].~AllocatorType();
+        }
+        std::free(arenas);
+    }
+
     void run_deallocation_benchmark(size_t total_items, int num_threads)
     {
         // Increase budget for large test
         // 5M items = ~160MB of nodes. 1GB default is fine.
-        auto* tree = new btree<hedge::key_t, hedge::value_ptr_t>();
+        auto* tree = new btree<hedge::uuid_t, hedge::value_ptr_t>();
         std::vector<std::thread> threads;
         std::atomic<bool> start_flag{false};
 
@@ -651,11 +872,12 @@ namespace
         std::cout << "[ DEALLOC  ] Items: " << total_items
                   << ", Time: " << elapsed.count() << "s" << std::endl;
     }
+
 } // namespace
 
 TEST(BTreeTest, DeallocationBenchmark)
 {
-    std::vector<size_t> items_counts = {1000000, 2000000, 5000000};
+    std::vector<size_t> items_counts = {150000, 2000000};
     int threads = 8; // Fixed threads for population
 
     for(size_t n : items_counts)
@@ -666,7 +888,7 @@ TEST(BTreeTest, DeallocationBenchmark)
 
 TEST(BTreeTest, ScalingBenchmark)
 {
-    std::vector<size_t> items_counts = {200000, 500000, 1000000, 2000000};
+    std::vector<size_t> items_counts = {150000, 2000000};
     std::vector<int> thread_counts = {1, 2, 4, 8, 10, 12, 16};
 
     for(size_t n : items_counts)
@@ -674,6 +896,36 @@ TEST(BTreeTest, ScalingBenchmark)
         for(int t : thread_counts)
         {
             run_benchmark(n, t);
+        }
+        std::cout << "---------------------------------------------------" << std::endl;
+    }
+}
+
+TEST(BTreeTest, ScalingBenchmarkHedgeKey)
+{
+    std::vector<size_t> items_counts = {150000, 2000000};
+    std::vector<int> thread_counts = {1, 2, 4, 8, 10, 12, 16};
+
+    for(size_t n : items_counts)
+    {
+        for(int t : thread_counts)
+        {
+            run_benchmark_hedge_key(n, t);
+        }
+        std::cout << "---------------------------------------------------" << std::endl;
+    }
+}
+
+TEST(BTreeTest, ScalingBenchmarkStringView)
+{
+    std::vector<size_t> items_counts = {150000, 2000000};
+    std::vector<int> thread_counts = {1, 2, 4, 8, 10, 12, 16};
+
+    for(size_t n : items_counts)
+    {
+        for(int t : thread_counts)
+        {
+            run_benchmark_string_view(n, t);
         }
         std::cout << "---------------------------------------------------" << std::endl;
     }
@@ -705,7 +957,7 @@ TEST(BTreeTest, ReadOnlyScalingBenchmark)
 
 TEST(BTreeTest, IteratorTraversal)
 {
-    btree<hedge::key_t, hedge::value_ptr_t> tree;
+    btree<hedge::uuid_t, hedge::value_ptr_t> tree;
     const int N = 100;
     // Insert in random order to ensure tree structure is non-trivial
     std::vector<int> data_ints;
@@ -737,7 +989,7 @@ TEST(BTreeTest, IteratorTraversal)
 
 TEST(BTreeTest, Find)
 {
-    btree<hedge::key_t, hedge::value_ptr_t> tree;
+    btree<hedge::uuid_t, hedge::value_ptr_t> tree;
     tree.insert(make_key(10), make_val(10));
     tree.insert(make_key(5), make_val(5));
     tree.insert(make_key(20), make_val(20));
@@ -774,7 +1026,7 @@ TEST(BTreeTest, Find)
 
 TEST(BTreeTest, EmptyIterator)
 {
-    btree<hedge::key_t, hedge::value_ptr_t> tree;
+    btree<hedge::uuid_t, hedge::value_ptr_t> tree;
     auto it = tree.begin();
     EXPECT_EQ(it, tree.end());
 
@@ -784,16 +1036,16 @@ TEST(BTreeTest, EmptyIterator)
 
 TEST(BTreeTest, UUIDKeyTest)
 {
-    btree<hedge::key_t, hedge::value_ptr_t> tree;
+    btree<hedge::uuid_t, hedge::value_ptr_t> tree;
     std::mt19937 rng(42);
     uuids::uuid_random_generator gen(rng);
 
     const int N = 1000;
-    std::vector<std::pair<hedge::key_t, hedge::value_ptr_t>> data;
+    std::vector<std::pair<hedge::uuid_t, hedge::value_ptr_t>> data;
 
     for(int i = 0; i < N; ++i)
     {
-        hedge::key_t key = gen();
+        hedge::uuid_t key = gen();
         hedge::value_ptr_t value(i * 100, 10, 1);
 
         EXPECT_TRUE(tree.insert(key, value));

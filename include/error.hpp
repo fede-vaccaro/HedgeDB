@@ -1,5 +1,6 @@
 #pragma once
 
+#include <expected>
 #include <ostream>
 #include <stdexcept>
 #include <string>
@@ -31,8 +32,8 @@ namespace hedge
     public:
         explicit error(std::string msg, errc error_code = errc::GENERIC_ERROR) : _error_msg(std::move(msg)), _error_code(error_code) {}
 
-        [[nodiscard]] const auto& to_string() const { return _error_msg; }
-        [[nodiscard]] const auto& code() const { return _error_code; }
+        [[nodiscard]] const auto& to_string() const { return this->_error_msg; }
+        [[nodiscard]] const auto& code() const { return this->_error_code; }
     };
 
     inline std::ostream& operator<<(std::ostream& os, const error& err)
@@ -60,7 +61,7 @@ namespace hedge
         error_t err = std::monostate{};
 
         status() = default;
-        status(hedge::error err_) : err(err_) {}
+        status(const hedge::error& err_) : err(err_) {}
 
         operator bool() const
         {

@@ -17,7 +17,7 @@
 #include "async/worker.h"
 #include "cache.h"
 #include "memtable.h"
-#include "sorted_index.h"
+#include "sst.h"
 #include "types.h"
 #include "value_table.h"
 
@@ -79,21 +79,20 @@ namespace hedge::db
         db_config _config; ///< Database configuration settings.
 
         // --- Persisted State Representation ---
-        using sorted_index_ptr_t = std::shared_ptr<hedge::db::sorted_index>;
+        using sst_ptr_t = std::shared_ptr<hedge::db::sst>;
 
-        // Map from partition ID to vector of sorted_index shared pointers.
-        // Each partition has multiple sorted_index files:
-        // - within sorted indices belonging to the same vector, the key ranges are overlapping
+        // Map from partition ID to vector of sst shared pointers.
+        // Each partition has multiple sst files:
+        // - within sst belonging to the same vector, the key ranges are overlapping
         // - across different partitions, the key ranges are disjoint
-        using sorted_indices_map_t = std::map<uint16_t, std::vector<sorted_index_ptr_t>>;
+        using sorted_indices_map_t = std::map<uint16_t, std::vector<sst_ptr_t>>;
 
-        std::atomic_size_t _flush_iteration{0}; ///< Counter for naming flushed index files uniquely within partitions.
-        std::shared_mutex _sorted_index_mutex;  ///< Protects access to the `_sorted_indices` map.
-        sorted_indices_map_t _sorted_indices;   ///< In-memory map representing the LSM tree levels/files.
+        alignas(64) mutable std::shared_mutex _sorted_index_mutex; ///< Protects access to the `_sorted_indices` map.
+        std::atomic_size_t _flush_iteration{0};                    ///< Counter for naming flushed index files uniquely within partitions.
+        sorted_indices_map_t _sorted_indices;                      ///< In-memory map representing the LSM tree levels/files.
 
-        std::atomic_size_t _last_table_id{0};    ///< Atomic ID counter for the next value_table file to be created.
-        std::shared_mutex _value_tables_mutex{}; ///< Protects access to the `_value_tables` map.
-
+        alignas(64) mutable std::shared_mutex _value_tables_mutex{}; ///< Protects access to the `_value_tables` map.
+        std::atomic_size_t _last_table_id{0};                        ///< Atomic ID counter for the next value_table file to be created.
         /// Map storing shared pointers to older, non-current value_table files, keyed by their ID.
         tsl::robin_map<uint32_t, std::shared_ptr<value_table>> _value_tables;
 
@@ -106,7 +105,7 @@ namespace hedge::db
         /// Each thread should have
         static constexpr size_t WRITE_BUFFER_DEFAULT_SIZE = 16 * 4096;
         inline static std::atomic_size_t _thread_count{0};
-        std::vector<std::unique_ptr<write_buffer>> _write_buffers;
+        std::vector<std::unique_ptr<thread_write_buffer>> _write_buffers;
 
         // Memtable & flushes
         memtable _memtable;
@@ -118,7 +117,7 @@ namespace hedge::db
         std::vector<std::shared_ptr<async::executor_context>> _compation_executor_pool{}; ///< Pool of executors managing background compactions
 
         // Index page cache
-        std::shared_ptr<shared_page_cache> _page_cache;
+        std::shared_ptr<sharded_page_cache> _page_cache;
         std::shared_ptr<point_cache> _index_point_cache;
 
         // --- Utilities ---
@@ -135,7 +134,7 @@ namespace hedge::db
          * @param executor The I/O executor context for disk operations.
          * @return An async task resolving to an expected containing the value (byte_buffer_t) or an error.
          */
-        async::task<expected<byte_buffer_t>> get_async(key_t key);
+        async::task<expected<byte_buffer_t>> get_async(const key_t& key);
 
         /**
          * @brief Asynchronously inserts or updates a key-value pair (by copying value).
@@ -146,7 +145,7 @@ namespace hedge::db
          * @param executor The I/O executor context.
          * @return An async task resolving to a status indicating success or failure.
          */
-        async::task<hedge::status> put_async(key_t key, const byte_buffer_t& value);
+        async::task<hedge::status> put_async(const key_t& key, const byte_buffer_t& value);
 
         /**
          * @brief Asynchronously marks a key as deleted.
@@ -157,7 +156,7 @@ namespace hedge::db
          * @param executor The I/O executor context.
          * @return An async task resolving to a status indicating success or failure (e.g., key not found).
          */
-        async::task<hedge::status> remove_async(key_t key);
+        async::task<hedge::status> remove_async(const key_t& key);
         /**
          * @brief Submits a compaction job to the background compaction worker.
          * Iteratively merges pairs of sorted_index files within partitions based on configured ratios until stable.
@@ -267,17 +266,17 @@ namespace hedge::db
          * @param executor The I/O executor for potential sorted_index lookups.
          * @return An async task resolving to an expected containing the pair {value_ptr, value_table_ptr} or an error (e.g., KEY_NOT_FOUND, DELETED).
          */
-        async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> _find_value_ptr_and_value_table(key_t key);
+        async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> _find_value_ptr_and_value_table(const key_t& key);
 
-        static std::function<void(std::vector<sorted_index>)> make_push_indices_callback(const std::shared_ptr<database>& db);
+        static std::function<void(std::vector<sst>)> make_push_indices_callback(const std::shared_ptr<database>& db);
         static std::function<void()> make_compaction_callback(const std::shared_ptr<database>& db);
 
         // Debug stuff
-        static auto check_is_sorted_by_epoch(const std::vector<sorted_index_ptr_t>& vec) -> bool
+        static auto check_is_sorted_by_epoch(const std::vector<sst_ptr_t>& vec) -> bool
         {
             auto sorted = std::ranges::is_sorted(
                 vec,
-                [](const sorted_index_ptr_t& lhs, const sorted_index_ptr_t& rhs)
+                [](const sst_ptr_t& lhs, const sst_ptr_t& rhs)
                 {
                     return lhs->epoch() < rhs->epoch();
                 });

@@ -36,30 +36,53 @@ namespace hedge
     }
 
     template <typename T>
-    auto& byte_varray_view(T& value)
+        requires std::is_integral_v<T> && std::is_unsigned_v<T>
+    constexpr T ceil(T value, T denominator)
     {
-        using U = std::remove_reference_t<T>;
+        return (value + denominator - 1) / denominator;
+    }
 
-        return reinterpret_cast<const std::array<uint8_t, sizeof(U)>&>(value);
+    // Usually used for page aligning sizes, so we require denominator to be a power of 2 for optimization
+    template <typename T>
+        requires std::is_integral_v<T> && std::is_unsigned_v<T>
+    constexpr T round_up(T value, T denominator)
+    {
+        assert(std::has_single_bit(denominator) && "Denominator must be a power of 2");
+
+        return (value + denominator - 1) & ~(denominator - 1);
     }
 
     template <typename T>
-    constexpr T ceil(T value, T divisor)
+        requires std::is_integral_v<T> && std::is_unsigned_v<T>
+    constexpr T ceil_page_align(T value)
     {
-        return (value + divisor - 1) / divisor;
+        return round_up(value, static_cast<T>(PAGE_SIZE_IN_BYTES));
+    }
+
+    template <typename T>
+    constexpr T floor_page_align(T value)
+    {
+        return (value / static_cast<T>(PAGE_SIZE_IN_BYTES)) * static_cast<T>(PAGE_SIZE_IN_BYTES);
     }
 
     inline uint16_t extract_prefix(const uuids::uuid& key)
     {
-        const auto& array_view = byte_varray_view(key);
+        const auto* array_view = reinterpret_cast<const uint8_t*>(key.as_bytes().begin().base());
 
         size_t prefix = 0;
 
-        // little endian!
+        // Warning: this is intended for little endian!
         prefix |= static_cast<uint16_t>(array_view[1]);
         prefix |= static_cast<uint16_t>(array_view[0]) << 8;
 
         return prefix;
+    }
+
+    template <typename T>
+        requires std::is_integral_v<T> && std::is_unsigned_v<T>
+    inline bool is_page_aligned(T value)
+    {
+        return (value % PAGE_SIZE_IN_BYTES) == 0;
     }
 
     /*
@@ -68,9 +91,28 @@ namespace hedge
         and might include elements up to 00fa ffff ffff ffff
         element starting with 01fb will be in the subsequent partition
      */
-    inline size_t find_partition_prefix_for_key(key_t key, size_t partition_size)
+    inline size_t find_partition_prefix_for_key(uuid_t key, size_t partition_size)
     {
         const auto& K = extract_prefix(key);
+        const auto& P = partition_size;
+
+        return ((K + P) / P * P) - 1;
+    };
+
+    inline uint16_t extract_prefix(const uint8_t* k)
+    {
+        size_t prefix = 0;
+
+        // Warning: this is intended for little endian!
+        prefix |= static_cast<uint16_t>(k[1]);
+        prefix |= static_cast<uint16_t>(k[0]) << 8;
+
+        return prefix;
+    }
+
+    inline size_t find_partition_prefix_for_key(const key_t& key, size_t partition_size)
+    {
+        const auto& K = extract_prefix(key.data());
         const auto& P = partition_size;
 
         return ((K + P) / P * P) - 1;
@@ -80,101 +122,11 @@ namespace hedge
 
     std::vector<std::pair<size_t, std::filesystem::path>> get_prefixes(const std::filesystem::path& base_path, size_t num_space_partitions);
 
-    using aligned_buffer_t = std::unique_ptr<uint8_t[], void (*)(void*)>;
+    using buffer_t = std::unique_ptr<uint8_t[], void (*)(void*)>;
 
-    // Needed for page aligned buffers
-    template <typename T>
-    struct page_aligned_buffer
+    inline buffer_t make_aligned_buffer(size_t n)
     {
-    private:
-        aligned_buffer_t _buf = aligned_buffer_t(nullptr, std::free);
-        size_t _size;
-
-    public:
-        page_aligned_buffer() = default;
-
-        explicit page_aligned_buffer(size_t s) : _size(s)
-        {
-            size_t mem = hedge::ceil(s * sizeof(T), PAGE_SIZE_IN_BYTES) * PAGE_SIZE_IN_BYTES;
-
-            this->_buf = aligned_buffer_t(static_cast<uint8_t*>(std::aligned_alloc(PAGE_SIZE_IN_BYTES, mem)), std::free);
-            assert(_buf);
-
-            std::fill(_buf.get(), _buf.get() + mem, 0);
-        }
-
-        std::span<uint8_t> as_byte_span()
-        {
-            return {_buf.get(), this->_size * sizeof(T)};
-        }
-
-        void* raw_data()
-        {
-            return _buf.get();
-        }
-
-        T* data()
-        {
-            return reinterpret_cast<T*>(_buf.get());
-        }
-
-        const T* data() const
-        {
-            return reinterpret_cast<T*>(_buf.get());
-        }
-
-        T* begin()
-        {
-            return this->data();
-        }
-
-        T* end()
-        {
-            return this->data() + _size;
-        }
-
-        const T* begin() const
-        {
-            return this->data();
-        }
-
-        const T* end() const
-        {
-            return this->data() + _size;
-        }
-
-        T& operator[](size_t idx)
-        {
-            return this->data()[idx];
-        }
-
-        const T& operator[](size_t idx) const
-        {
-            return this->data()[idx];
-        }
-
-        [[nodiscard]] bool empty() const
-        {
-            return this->_size == 0;
-        }
-
-        [[nodiscard]] size_t size() const
-        {
-            return this->_size;
-        }
-
-        void resize(size_t size)
-        {
-            assert(size <= this->_size);
-            std::fill(this->data() + size, this->data() + this->_size, T{});
-            this->_size = size;
-        }
-
-        void zero()
-        {
-            std::fill(this->data(), this->data() + this->_size, T{});
-        }
-
-    };
+        return {static_cast<uint8_t*>(std::aligned_alloc(PAGE_SIZE_IN_BYTES, n)), std::free};
+    }
 
 } // namespace hedge

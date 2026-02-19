@@ -2,16 +2,25 @@
 
 #include <cassert>
 #include <cstdint>
+#include <sys/types.h>
 #include <uuid.h>
+
+#include "key.h"
 
 namespace hedge
 {
+
     /**
      * @brief Defines the type used for keys in the database.
      * Currently uses universally unique identifiers (UUIDs).
      * Will move to raw bytes in future versions for portability.
      */
-    using key_t = uuids::uuid;
+    using uuid_t = uuids::uuid;
+
+    using key_t = hedge::key<>;
+
+    constexpr size_t MAX_KEY_LEN = 256; // TODO: copied, refactor code
+    constexpr size_t MIN_KEY_LEN = 1;
 
     /**
      * @brief Represents a pointer to a value stored in a value_table file.
@@ -25,7 +34,7 @@ namespace hedge
     {
     private:
         // Note: The most significant bit (MSB) of _offset is used as a 'deleted' flag.
-        uint64_t _offset{};   ///< Byte offset within the value table file. MSB indicates a deletion operation. 
+        uint64_t _offset{};   ///< Byte offset within the value table file. MSB indicates a deletion operation.
         uint32_t _size{};     ///< Size of the value data in bytes (including any header).
         uint32_t _table_id{}; ///< Identifier of the value_table file containing the value.
 
@@ -36,6 +45,16 @@ namespace hedge
         value_ptr_t(const value_ptr_t&) = default;
         /** @brief Move constructor. */
         value_ptr_t(value_ptr_t&&) = default;
+
+        static std::optional<value_ptr_t> try_from_span(std::span<const uint8_t> span)
+        {
+            if(span.size() != sizeof(value_ptr_t))
+                return std::nullopt;
+
+            value_ptr_t vp;
+            std::memcpy(&vp, span.data(), sizeof(value_ptr_t));
+            return vp;
+        }
 
         /**
          * @brief Constructs a value_ptr_t with specified offset, size, and table ID.
@@ -52,6 +71,11 @@ namespace hedge
 
         /** @brief Default destructor. */
         ~value_ptr_t() = default;
+
+        operator std::span<const uint8_t>() const
+        {
+            return {reinterpret_cast<const uint8_t*>(this), sizeof(value_ptr_t)};
+        }
 
         /**
          * @brief Checks if the value pointer is marked as deleted.
@@ -154,7 +178,7 @@ namespace hedge
      */
     struct index_entry_t
     {
-        key_t key{};             ///< The key (UUID).
+        uuid_t key{};            ///< The key (UUID).
         value_ptr_t value_ptr{}; ///< The pointer to the value's location and status.
 
         /**
@@ -170,6 +194,29 @@ namespace hedge
 
         // Default comparison for equality (needed for some algorithms if used)
         bool operator==(const index_entry_t& other) const = default;
+    };
+
+    struct index_entry2_t
+    {
+
+        key_t key{};             ///< The key (UUID).
+        value_ptr_t value_ptr{}; ///< The pointer to the value's location and status.
+
+        ~index_entry2_t() = default;
+
+        /**
+         * @brief Comparison operator based solely on the key.
+         * @details Used for sorting index entries within memtables and sorted_index files.
+         * @param other The other index_entry_t to compare against.
+         * @return `true` if `this->key` is less than `other.key`, `false` otherwise.
+         */
+        bool operator<(const index_entry2_t& other) const
+        {
+            return key < other.key;
+        }
+
+        // Default comparison for equality (needed for some algorithms if used)
+        bool operator==(const index_entry2_t& other) const = default;
     };
 
     /** @brief Standard page size used for I/O operations (typically 4 KiB). */

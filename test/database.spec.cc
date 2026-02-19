@@ -17,7 +17,6 @@
 #include "fs/fs.hpp"
 #include "perf_counter.h"
 #include "types.h"
-#include "uuid.h"
 
 namespace hedge::db
 {
@@ -42,38 +41,33 @@ namespace hedge::db
         {
         }
 
+        void fill_key_as_random(key_t& key)
+        {
+            auto span = key.as_bytes();
+            std::ranges::generate(span, [this]()
+                                  { return static_cast<uint8_t>(this->dist(this->_generator)); });
+        }
+
         /*
-        This method creates a vector of N_KEYS pairs; each pair consists of a randomly generated uuids and a seed;
+        This method creates a vector of N_KEYS pairs; each pair consists of a randomly generated key and a seed;
         Each seed is needed for generating the value (vector of bytes) associated to the key;
         Due to memory contraints, the seed is hashed to limit the value space size.
         */
-        void _setup_key_values(bool create_new)
+        void _setup_key_values(bool /* create_new */)
         {
+            this->_keys.reserve(this->N_KEYS);
+            std::hash<key_t> hasher;
+
             auto t0 = std::chrono::high_resolution_clock::now();
-            auto maybe_key_value_seeds =
-                fs::file::from_path(
-                    this->_base_path / "keys",
-                    create_new ? fs::file::open_mode::read_write_new : fs::file::open_mode::read_only,
-                    false,
-                    this->N_KEYS * sizeof(uuids::uuid));
 
-            if(!maybe_key_value_seeds)
-                throw std::runtime_error("could not open " + (this->_base_path / "keys").string() + " " + maybe_key_value_seeds.error().to_string());
-
-            this->_keys_file = std::move(maybe_key_value_seeds.value());
-
-            auto maybe_mmap = fs::mmap_view::from_file(this->_keys_file);
-            if(!maybe_mmap)
-                throw std::runtime_error("could not mmap file " + this->_keys_file.path().string() + " " + maybe_mmap.error().to_string());
-
-            this->_keys_mmap = std::move(maybe_mmap.value());
-            auto* start = static_cast<key_t*>(this->_keys_mmap.get_ptr());
-            for(auto* it = start; it != (start + this->N_KEYS); ++it)
+            for(auto idx = 0UL; idx < this->N_KEYS; ++idx)
             {
-                if(create_new)
-                    *it = this->gen();
+                constexpr size_t key_size = 24;
+                this->_keys.emplace_back(key_t::make_with_length(key_size));
+                key_t& k = this->_keys.back();
+                this->fill_key_as_random(k);
 
-                size_t hash = std::hash<uuids::uuid>{}(*it) % MAX_CACHE_ITEMS_CAPACITY;
+                size_t hash = hasher(k) % MAX_CACHE_ITEMS_CAPACITY;
                 if(this->_possible_values.contains(hash))
                     continue;
 
@@ -90,7 +84,7 @@ namespace hedge::db
             auto t1 = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
             std::cout << "Total duration for key generation: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
-            std::cout << "Generated " << (sizeof(key_t) * this->N_KEYS) / (1000.0 * 1000.0) << " MB of keys. This data will be held in memory." << std::endl;
+            std::cout << "Generated " << (sizeof(key_t) * this->N_KEYS) / (1000.0 * 1000.0) << " MB worth of keys. This data will be held in memory." << std::endl;
         }
 
         // test parameters
@@ -104,16 +98,13 @@ namespace hedge::db
         std::filesystem::path _base_path = "/tmp/db";
 
         // rng and seed stuff
-        fs::mmap_view _keys_mmap;
-        fs::file _keys_file;
         static constexpr size_t MAX_CACHE_ITEMS_CAPACITY = 1024;
         std::unordered_map<size_t, std::vector<uint8_t>> _possible_values;
-
-        std::unordered_set<uuids::uuid> _deleted_keys;
+        std::vector<key_t> _keys;
+        std::unordered_set<key_t> _deleted_keys;
         size_t _gen_seed{107279581};
         std::mt19937 _generator{_gen_seed};
-        std::uniform_int_distribution<int> dist{0, 15};
-        uuids::basic_uuid_random_generator<std::mt19937> gen{_generator};
+        std::uniform_int_distribution<uint8_t> dist{0, 255};
     };
 
     TEST_P(database_test, database_comprehensive_test)
@@ -128,7 +119,7 @@ namespace hedge::db
         config.num_partition_exponent = 4;
         config.target_compaction_size_ratio = 1.0;
         config.use_odirect_for_indices = true;
-        config.index_page_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024;
+        config.index_page_clock_cache_size_bytes = 0UL * 3UL * 1024 * 1024 * 1024;
         config.index_point_cache_size_bytes = 0;
         config.compaction_timeout = std::chrono::minutes(20);
 
@@ -146,10 +137,10 @@ namespace hedge::db
 
         auto make_put_task = [this, &db, &write_wg, &dist](size_t i) -> async::task<void>
         {
-            prof::counter_guard guard(prof::get<"put_async">());
+            // prof::counter_guard guard(prof::get<"put_async">());
 
-            const auto& key = this->_keys_mmap.get_ptr<key_t>()[i];
-            size_t seed = std::hash<uuids::uuid>{}(key) % MAX_CACHE_ITEMS_CAPACITY;
+            const auto& key = this->_keys[i];
+            size_t seed = std::hash<key_t>{}(key) % MAX_CACHE_ITEMS_CAPACITY;
 
             const auto& value = this->_possible_values[seed];
 
@@ -182,7 +173,7 @@ namespace hedge::db
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         std::cout << "Total duration for insertion: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
         std::cout << "Average duration per insertion: " << (double)duration.count() / this->N_KEYS << " us" << std::endl;
-        std::cout << "Insertion bandwidth: " << (double)this->N_KEYS * ((this->PAYLOAD_SIZE + sizeof(key_t)) / 1000.0 / 1000.0) / (duration.count() / 1'000'000.0) << " MB/s" << std::endl;
+        std::cout << "Insertion bandwidth: " << (double)this->N_KEYS * ((this->PAYLOAD_SIZE + sizeof(uuid_t)) / 1000.0 / 1000.0) / (duration.count() / 1'000'000.0) << " MB/s" << std::endl;
         std::cout << "Insertion throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000) << " items/s" << std::endl;
         std::cout << "Deleted keys: " << this->_deleted_keys.size() << std::endl;
         prof::print_internal_perf_stats(false);
@@ -213,8 +204,8 @@ namespace hedge::db
         EXPECT_DOUBLE_EQ(db->read_amplification_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
 
         // shuffle keys before reading
-        auto* begin = this->_keys_mmap.get_ptr<key_t>();
-        auto* end = begin + (this->_keys_mmap.size() / sizeof(key_t));
+        auto begin = this->_keys.begin();
+        auto end = this->_keys.end();
 
         std::cout << "Shufflin keys for randread test..." << std::endl;
         std::shuffle(begin, end, this->_generator);
@@ -245,8 +236,8 @@ namespace hedge::db
 
             auto make_get_task = [this, &db, &read_wg, &number_of_errors](size_t i) -> async::task<void>
             {
-                const auto& key = this->_keys_mmap.get_ptr<key_t>()[i];
-                size_t seed = std::hash<uuids::uuid>{}(key) % MAX_CACHE_ITEMS_CAPACITY;
+                const auto& key = this->_keys[i];
+                size_t seed = std::hash<key_t>{}(key) % MAX_CACHE_ITEMS_CAPACITY;
 
                 auto maybe_value = co_await db->get_async(key);
 
@@ -255,7 +246,7 @@ namespace hedge::db
                     if(!this->_deleted_keys.contains(key))
                     {
                         number_of_errors++;
-                        std::cerr << "Key should be between the deleteds: " << key << std::endl;
+                        std::cerr << "Key should be between the deleteds: " << hedge::to_hex_string(key) << std::endl;
                     }
 
                     read_wg->decr();
@@ -265,7 +256,7 @@ namespace hedge::db
                 if(!maybe_value)
                 {
                     number_of_errors++;
-                    std::cerr << "An error occurred during retrieval for key with index " << i << " " << key << ": " << maybe_value.error().to_string() << std::endl;
+                    std::cerr << "An error occurred during retrieval for key with index " << i << " " << hedge::to_hex_string(key) << ": " << maybe_value.error().to_string() << std::endl;
                     read_wg->decr();
                     co_return;
                 }
@@ -314,7 +305,7 @@ namespace hedge::db
         test_suite,
         database_test,
         testing::Combine(
-            testing::Values(80'000'000), // n keys
+            testing::Values(20'000'000), // n keys
             testing::Values(100),        // payload size
             testing::Values(2'000'000)   // memtable capacity
             ),

@@ -23,7 +23,7 @@ the Footer (8 bytes) and before the restart count (4 bytes).
 
 Block format:
 [ Entry  0: Full Key Size + Full Key + Value Size + Value ] <--- Restart Point 0 (Offset: 0)
-[ Entry  1: Shared Prefix Size + Delta Key Size + Value Size + Value ]
+[ Entry  1: Shared Prefix Size + Delta Key Size + Delta Key + Value Size + Value ]
 [ ... ]
 [ Entry 16: Full Key Size + Full Key + Value Size + Value ] <--- Restart Point 1 (Offset: XXX)
 [ ... ]
@@ -56,16 +56,13 @@ namespace hedge::db
 
     struct block_footer
     {
-        uint16_t item_count{};
+        uint16_t kv_count{};
         std::array<uint8_t, 6> _footer_bytes; // Padding
     };
 
-    class block_builder
+    class block_encoder
     {
         friend struct BlockTest;
-
-        static constexpr size_t MIN_KEY_SIZE_BYTES = 1;
-        static constexpr size_t MAX_KEY_SIZE_BYTES = 256;
         static constexpr size_t FOOTER_SIZE = 8;
 
         block_config _cfg{};
@@ -73,16 +70,20 @@ namespace hedge::db
         // Builder state
         uint8_t* _base{};
         uint8_t* _head{};
-        std::vector<uint8_t> _last_key{};
-        std::vector<uint16_t> _offsets;
+        std::vector<uint8_t> _last_key{}; // TODO: try std::pmr::vector
+        std::vector<uint16_t> _offsets{}; // TODO: try std::pmr::vector
         size_t _bytes_written{};
-        uint32_t _item_written_count{};
+        uint32_t _kvs_count{};
         uint32_t _restart_keys_written{};
+        bool _committed{false};
 
         block_footer _footer{}; // currently unused
 
     public:
-        block_builder(const block_config& cfg, uint8_t* base);
+        static constexpr size_t MIN_KEY_lEN = 1;
+        static constexpr size_t MAX_KEY_LEN = 256;
+
+        block_encoder(uint8_t* base, const block_config& cfg = {});
 
         hedge::status push(std::span<const uint8_t> key, std::span<const uint8_t> value); // Returns error code BUFFER_FULL if could not push the key-value
 
@@ -100,12 +101,22 @@ namespace hedge::db
             return this->_last_key;
         }
 
+        [[nodiscard]] bool committed() const
+        {
+            return this->_committed;
+        }
+
+        [[nodiscard]] size_t kv_count() const
+        {
+            return this->_kvs_count;
+        }
+
     private:
         void _commit();
         hedge::status _push_as_restart_key(std::span<const uint8_t> key, std::span<const uint8_t> value);
         hedge::status _push_as_delta_key(std::span<const uint8_t> key, std::span<const uint8_t> value);
 
-        static uint32_t _shared_prefix_length(std::span<const uint8_t> prev, std::span<const uint8_t> curr)
+        static uint32_t _compute_shared_prefix_length(std::span<const uint8_t> prev, std::span<const uint8_t> curr)
         {
             auto prev_it = prev.begin();
             auto curr_it = curr.begin();
@@ -123,32 +134,29 @@ namespace hedge::db
 
     class block_iterator_sentinel
     {
-        friend class block_iterator;
-        friend class block_reader;
-        uint32_t _items_in_block_count{};
-        block_iterator_sentinel(uint32_t items_in_block_count) : _items_in_block_count(items_in_block_count){};
     };
 
     class block_iterator_restart_group_sentinel
     {
-        friend class block_iterator;
-        friend class block_reader;
-        uint32_t _items_in_block_count{};
-        block_iterator_restart_group_sentinel(uint32_t _items_in_block_count) : _items_in_block_count(_items_in_block_count){};
     };
 
     class block_iterator
     {
-        uint8_t* _head{nullptr};
-        size_t _block_size{};
+        const uint8_t* _head{nullptr};
+
+        uint32_t _kv_idx{};
+        uint32_t _starting_kv_idx{};
+        uint32_t _kvs_in_block_count{};
         uint32_t _restart_group_size{};
 
         std::vector<uint8_t> _key{};
         std::span<const uint8_t> _value_ref{};
-        uint32_t _curr_item_idx{};
 
     public:
-        block_iterator(uint8_t* base, size_t block_size, uint32_t restart_group_size);
+        block_iterator(const uint8_t* base,
+                       uint32_t starting_kv_idx,
+                       uint32_t _kvs_in_block,
+                       uint32_t restart_group_size);
         block_iterator() = default;
 
         block_iterator(block_iterator&& other) noexcept = default;
@@ -159,11 +167,11 @@ namespace hedge::db
 
         block_iterator& operator++();
 
-        std::span<const uint8_t> key();
-        std::span<const uint8_t> value();
+        [[nodiscard]] std::span<const uint8_t> key() const;
+        [[nodiscard]] std::span<const uint8_t> value() const;
 
-        bool operator==(const block_iterator_sentinel&) const;
-        bool operator==(const block_iterator_restart_group_sentinel&) const;
+        bool operator==(block_iterator_sentinel) const;
+        bool operator==(block_iterator_restart_group_sentinel) const;
 
     private:
         void _read_next();
@@ -171,18 +179,154 @@ namespace hedge::db
         void _read_delta_key();
     };
 
-    class block_reader
+    class block_decoder
     {
         block_config _cfg{};
-        uint8_t* _base{};
+        const uint8_t* _base{};
         block_footer _footer{};
 
     public:
-        block_reader(const block_config& cfg, uint8_t* base);
-        std::vector<uint8_t> find(std::span<const uint8_t> key);
+        block_decoder(const block_config& cfg = {}) : _cfg(cfg){};
+        block_decoder(const uint8_t* base, const block_config& cfg = {});
+        std::span<const uint8_t> find(std::span<const uint8_t> key);
+        void reset(const uint8_t* new_base);
+        void _read_footer();
 
         [[nodiscard]] block_iterator begin() const;
         [[nodiscard]] block_iterator_sentinel end() const;
     };
 
+    // buffer_encoder encodes the pushed key values in blocks into the configured buffer
+    // Respect to the block_encoder, it automatically switch to the next block when the current has no space left
+    class block_buffer_writer
+    {
+        uint8_t* const _begin{};
+        uint8_t* _cur{};
+        uint8_t* const _end{};
+        block_encoder _block_encoder;
+
+    public:
+        block_buffer_writer(uint8_t* begin, uint8_t* end)
+            : _begin(begin),
+              _cur(begin),
+              _end(end),
+              _block_encoder(begin)
+        {
+        }
+
+        const block_encoder& encoder()
+        {
+            return this->_block_encoder;
+        }
+
+        template <typename CALLABLE>
+        hedge::status push(std::span<const uint8_t> key, std::span<const uint8_t> value, CALLABLE&& on_end_of_block)
+        {
+            auto s = this->_block_encoder.push(key, value);
+
+            if(!s)
+            {
+                assert(s.error().code() == errc::BUFFER_FULL);
+                assert(this->_block_encoder.committed());
+
+                on_end_of_block(this->_block_encoder.last_pushed_key());
+
+                if(this->_cur + PAGE_SIZE_IN_BYTES == this->_end)
+                    return s;
+
+                this->_cur += PAGE_SIZE_IN_BYTES;
+                this->_block_encoder.reset(this->_cur);
+                s = this->_block_encoder.push(key, value);
+            }
+
+            return s;
+        }
+
+        void reset()
+        {
+            this->_cur = this->_begin;
+            this->_block_encoder.reset(this->_cur);
+        }
+
+        [[nodiscard]] bool empty() const
+        {
+            return this->_cur == this->_begin && this->_block_encoder.kv_count() == 0;
+        }
+
+        void force_commit()
+        {
+            this->_block_encoder.commit();
+        }
+
+        size_t bytes_written()
+        {
+            // Always include the current block
+            return std::distance(this->_begin, this->_cur) + PAGE_SIZE_IN_BYTES;
+        }
+    };
+
+    // buffer_decoder decodes the key values encoded in blocks from the configured buffer
+    // Respect to the block_decoder it automatically switch to the next block when the current has been fully decoded
+    class buffer_decoder
+    {
+        const uint8_t* _next{};
+        const uint8_t* _end{};
+        block_decoder _block_decoder;
+        block_iterator _block_it;
+
+    public:
+        buffer_decoder() = default;
+
+        buffer_decoder(const uint8_t* begin, const uint8_t* end)
+            : _next(begin + PAGE_SIZE_IN_BYTES),
+              _end(end),
+              _block_decoder(begin),
+              _block_it(_block_decoder.begin())
+        {
+        }
+
+        void reset(const uint8_t* begin, const uint8_t* end)
+        {
+            this->_next = begin + PAGE_SIZE_IN_BYTES;
+            this->_end = end;
+            this->_block_decoder.reset(begin);
+            this->_block_it = this->_block_decoder.begin();
+        }
+
+        const block_decoder& decoder()
+        {
+            return this->_block_decoder;
+        }
+
+        buffer_decoder& operator++()
+        {
+            if(++this->_block_it != this->_block_decoder.end()) // There are KV left -> continue
+                return *this;
+
+            // Block fully read, move to the next block if any
+            if(this->_next != this->_end)
+            {
+                const auto* cur = this->_next;
+                this->_next += PAGE_SIZE_IN_BYTES;
+                this->_block_decoder.reset(cur);
+                this->_block_it = this->_block_decoder.begin();
+            }
+            return *this;
+        }
+
+        [[nodiscard]] const auto& it() const
+        {
+            return this->_block_it;
+        }
+
+        struct block_buffer_end_sentinel
+        {
+        };
+
+        bool operator==(block_buffer_end_sentinel /* sentinel */)
+        {
+            return this->_next == this->_end &&                   // If there is no block left to read
+                   this->_block_it == this->_block_decoder.end(); // And if we fully read the block we're -> end
+        }
+    };
 } // namespace hedge::db

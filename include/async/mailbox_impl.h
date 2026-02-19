@@ -558,6 +558,7 @@ namespace hedge::async
             file_info_mailbox,
             fdatasync_mailbox,
             yield_mailbox,
-            continuation_mailbox>;
+            continuation_mailbox,
+            ftruncate_mailbox>;
 
 } // namespace hedge::async

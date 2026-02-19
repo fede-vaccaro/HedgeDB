@@ -139,7 +139,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
     using sorted_indices_map_t = std::map<uint16_t, hedge::db::sorted_index>;
 
     constexpr auto CACHE_MAX_SIZE = 16 * 1024 * 1024;
-    std::shared_ptr<hedge::db::shared_page_cache> cache = std::make_shared<hedge::db::shared_page_cache>(CACHE_MAX_SIZE, 1);
+    std::shared_ptr<hedge::db::sharded_page_cache> cache = std::make_shared<hedge::db::sharded_page_cache>(CACHE_MAX_SIZE, 1);
 
     sorted_indices_map_t unified_sorted_indices;
 
@@ -152,7 +152,7 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
             std::vector<std::future<hedge::status>>& futures,
             std::map<uint16_t, hedge::db::sorted_index>& index_map,
             std::shared_ptr<hedge::async::wait_group> wg,
-            const std::shared_ptr<hedge::db::shared_page_cache>& cache,
+            const std::shared_ptr<hedge::db::sharded_page_cache>& cache,
             auto* _this) -> hedge::async::task<void>
     {
         auto promise = std::promise<hedge::status>{};
@@ -192,6 +192,8 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
     std::chrono::microseconds total_duration{0};
     auto t0 = std::chrono::high_resolution_clock::now();
 
+    merge_wg->set(this->_sorted_indices.size());
+
     for(auto& [prefix, sorted_indices] : this->_sorted_indices)
     {
         ASSERT_LE(sorted_indices.size(), this->N_RUNS) << "Expected no more than " << this->N_RUNS << " sorted index after merging";
@@ -211,8 +213,6 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
             {
                 return a.size() >= b.size();
             });
-
-        merge_wg->incr();
 
         this->_executor->submit_io_task(merge_task_factory(
             sorted_indices,

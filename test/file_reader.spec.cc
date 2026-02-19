@@ -68,7 +68,7 @@ namespace hedge::fs
             ofs.close();
         }
 
-        task<void> PopulateCache(std::shared_ptr<shared_page_cache> cache, int fd, size_t start_page_idx, const std::vector<uint8_t>& blueprint)
+        task<void> PopulateCache(std::shared_ptr<sharded_page_cache> cache, int fd, size_t start_page_idx, const std::vector<uint8_t>& blueprint)
         {
             for(size_t i = 0; i < blueprint.size(); ++i)
             {
@@ -98,7 +98,7 @@ namespace hedge::fs
 
         task<std::string> VerifyReaderSequence(
             hedge::fs::file& file_obj,
-            std::shared_ptr<shared_page_cache> cache,
+            std::shared_ptr<sharded_page_cache> cache,
             size_t start_offset,
             size_t end_offset,
             size_t read_ahead,
@@ -175,7 +175,7 @@ namespace hedge::fs
         auto file_res = hedge::fs::file::from_path(TEST_FILE, fs::file::open_mode::read_only, true);
         ASSERT_TRUE(file_res.has_value());
         auto& file_obj = file_res.value();
-        auto cache = std::make_shared<shared_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
+        auto cache = std::make_shared<sharded_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
 
         auto error = executor_pool::executor_from_static_pool()->sync_submit([&]() -> task<std::string> {
             co_await PopulateCache(cache, file_obj.id(), 0, blueprint);
@@ -195,7 +195,7 @@ namespace hedge::fs
         auto file_res = hedge::fs::file::from_path(TEST_FILE, fs::file::open_mode::read_only, true);
         ASSERT_TRUE(file_res.has_value());
         auto& file_obj = file_res.value();
-        auto cache = std::make_shared<shared_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
+        auto cache = std::make_shared<sharded_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
 
         auto error = executor_pool::executor_from_static_pool()->sync_submit([&]() -> task<std::string> {
             co_await PopulateCache(cache, file_obj.id(), 0, blueprint);
@@ -215,7 +215,7 @@ namespace hedge::fs
         auto file_res = hedge::fs::file::from_path(TEST_FILE, fs::file::open_mode::read_only, true);
         ASSERT_TRUE(file_res.has_value());
         auto& file_obj = file_res.value();
-        auto cache = std::make_shared<shared_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
+        auto cache = std::make_shared<sharded_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
 
         auto error = executor_pool::executor_from_static_pool()->sync_submit([&]() -> task<std::string> {
             co_await PopulateCache(cache, file_obj.id(), 0, blueprint);
@@ -235,7 +235,7 @@ namespace hedge::fs
         auto file_res = hedge::fs::file::from_path(TEST_FILE, fs::file::open_mode::read_only, true);
         ASSERT_TRUE(file_res.has_value());
         auto& file_obj = file_res.value();
-        auto cache = std::make_shared<shared_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
+        auto cache = std::make_shared<sharded_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
 
         auto error = executor_pool::executor_from_static_pool()->sync_submit([&]() -> task<std::string> {
             co_await PopulateCache(cache, file_obj.id(), 0, blueprint);
@@ -255,7 +255,7 @@ namespace hedge::fs
         auto file_res = hedge::fs::file::from_path(TEST_FILE, fs::file::open_mode::read_only, true);
         ASSERT_TRUE(file_res.has_value());
         auto& file_obj = file_res.value();
-        auto cache = std::make_shared<shared_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
+        auto cache = std::make_shared<sharded_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
 
         auto error = executor_pool::executor_from_static_pool()->sync_submit([&]() -> task<std::string> {
             co_await PopulateCache(cache, file_obj.id(), 0, blueprint);
@@ -275,7 +275,7 @@ namespace hedge::fs
         auto file_res = hedge::fs::file::from_path(TEST_FILE, fs::file::open_mode::read_only, true);
         ASSERT_TRUE(file_res.has_value());
         auto& file_obj = file_res.value();
-        auto cache = std::make_shared<shared_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
+        auto cache = std::make_shared<sharded_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
 
         auto error = executor_pool::executor_from_static_pool()->sync_submit([&]() -> task<std::string> {
             co_await PopulateCache(cache, file_obj.id(), 0, blueprint);
@@ -294,7 +294,7 @@ namespace hedge::fs
         auto file_res = hedge::fs::file::from_path(TEST_FILE, fs::file::open_mode::read_only, true);
         ASSERT_TRUE(file_res.has_value());
         auto& file_obj = file_res.value();
-        auto cache = std::make_shared<shared_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
+        auto cache = std::make_shared<sharded_page_cache>(10 * PAGE_SIZE_IN_BYTES, 1);
 
         auto error = executor_pool::executor_from_static_pool()->sync_submit([&]() -> task<std::string> {
             co_await PopulateCache(cache, file_obj.id(), 0, blueprint);

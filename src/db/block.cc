@@ -12,35 +12,25 @@
 namespace hedge::db
 {
 
-    block_builder::block_builder(const block_config& cfg, uint8_t* base)
+    block_encoder::block_encoder(uint8_t* base, const block_config& cfg)
         : _cfg(cfg),
           _base(base),
           _head(base),
-          _bytes_written(sizeof(block_footer))
+          _bytes_written(sizeof(block_footer) + sizeof(uint16_t)) // Reserve space for footer and offsets count
     {
         constexpr size_t INITIAL_OFFSETS_CAPACITY = 16;
         this->_offsets.reserve(INITIAL_OFFSETS_CAPACITY);
     }
 
-    hedge::status block_builder::push(std::span<const uint8_t> key, std::span<const uint8_t> value)
+    hedge::status block_encoder::push(std::span<const uint8_t> key, std::span<const uint8_t> value)
     {
-        if(key.size() > block_builder::MAX_KEY_SIZE_BYTES || key.size() == 0)
+        if(key.size() > block_encoder::MAX_KEY_LEN || key.size() == 0)
             return hedge::error("invalid key size");
 
-        if((this->_item_written_count & (this->_cfg.restart_group_size - 1)) != 0) [[likely]]
+        if((this->_kvs_count & (this->_cfg.restart_group_size - 1)) != 0) [[likely]]
             return this->_push_as_delta_key(key, value);
 
         return this->_push_as_restart_key(key, value);
-    }
-
-    uint8_t _encode_key_size(size_t key_size)
-    {
-        return static_cast<uint8_t>(key_size - 1);
-    }
-
-    size_t _decode_key_size(uint8_t encoded_key_size)
-    {
-        return static_cast<size_t>(encoded_key_size) + 1;
     }
 
     template <typename T>
@@ -71,7 +61,7 @@ namespace hedge::db
         *dest += count;
     }
 
-    hedge::status block_builder::_push_as_restart_key(std::span<const uint8_t> key, std::span<const uint8_t> value)
+    hedge::status block_encoder::_push_as_restart_key(std::span<const uint8_t> key, std::span<const uint8_t> value)
     {
         // Compute space needed
         const size_t space_needed =
@@ -80,9 +70,9 @@ namespace hedge::db
             varint_length(value.size()) + // Value length field
             value.size();                 // Actual value
 
-        constexpr size_t SIZEOF_OFFSET = sizeof(uint16_t);
+        constexpr size_t SIZE_OF_OFFSET = sizeof(uint16_t);
 
-        if(this->_bytes_written + space_needed + SIZEOF_OFFSET > this->_cfg.block_size_in_bytes)
+        if(this->_bytes_written + space_needed + SIZE_OF_OFFSET > this->_cfg.block_size_in_bytes)
         {
             this->_commit();
             return hedge::error("", errc::BUFFER_FULL);
@@ -91,17 +81,17 @@ namespace hedge::db
         // Update state
         this->_last_key.assign(key.begin(), key.end());
         this->_restart_keys_written++;
-        this->_item_written_count++;
+        this->_kvs_count++;
 
         // The offset will be written at the end of the block, but we need to account for it now to check if we have space.
-        this->_bytes_written += space_needed + SIZEOF_OFFSET;
+        this->_bytes_written += space_needed + SIZE_OF_OFFSET;
 
         [[maybe_unused]] auto* start_ptr = this->_head;
 
         this->_offsets.emplace_back(static_cast<uint16_t>(std::distance(this->_base, this->_head)));
 
         // Write Key length size
-        _write_unsafe(_encode_key_size(key.size()), &this->_head);
+        _write_unsafe(encode_key_size(key.size()), &this->_head);
 
         // Write Key
         _write_unsafe(key, &this->_head);
@@ -117,9 +107,9 @@ namespace hedge::db
         return hedge::ok();
     }
 
-    hedge::status block_builder::_push_as_delta_key(std::span<const uint8_t> key, std::span<const uint8_t> value)
+    hedge::status block_encoder::_push_as_delta_key(std::span<const uint8_t> key, std::span<const uint8_t> value)
     {
-        uint32_t shared_prefix_length = block_builder::_shared_prefix_length(this->_last_key, key);
+        uint32_t shared_prefix_length = block_encoder::_compute_shared_prefix_length(this->_last_key, key);
 
         // Compute space needed
         const size_t space_needed =
@@ -136,7 +126,7 @@ namespace hedge::db
         }
 
         this->_last_key.assign(key.begin(), key.end());
-        this->_item_written_count++;
+        this->_kvs_count++;
         this->_bytes_written += space_needed;
 
         [[maybe_unused]] auto* start_ptr = this->_head;
@@ -163,7 +153,7 @@ namespace hedge::db
     }
 
     // Write the lookup-section and footer
-    void block_builder::_commit()
+    void block_encoder::_commit()
     {
         // Layout at the end is
         // [ Restart Offset 1 (2B) ]
@@ -176,7 +166,7 @@ namespace hedge::db
         // this->_bytes_written count won't be increased as this space
         // has already been taken in account during insertion
 
-        this->_footer.item_count = this->_item_written_count;
+        this->_footer.kv_count = this->_kvs_count;
 
         // Write restart point offsets
         auto* end = this->_base + this->_cfg.block_size_in_bytes;
@@ -194,25 +184,34 @@ namespace hedge::db
         // Copy footer
         _write_unsafe(reinterpret_cast<uint8_t*>(&this->_footer), sizeof(block_footer), &this->_head);
 
+        this->_committed = true;
         assert(this->_head == this->_base + this->_cfg.block_size_in_bytes);
     }
 
-    void block_builder::reset(uint8_t* new_base)
+    void block_encoder::reset(uint8_t* new_base)
     {
-        this->_base = this->_head = new_base;
-        this->_bytes_written = block_builder::FOOTER_SIZE;
+        this->_base = new_base;
+        this->_head = new_base;
+        this->_bytes_written = block_encoder::FOOTER_SIZE + sizeof(uint16_t); // Reserve space for footer and offsets count
         this->_last_key.clear();
         this->_offsets.clear();
-        this->_item_written_count = 0;
+        this->_kvs_count = 0;
         this->_restart_keys_written = 0;
         this->_footer = {};
+        this->_committed = false;
     }
 
-    block_iterator::block_iterator(uint8_t* base, size_t block_size, uint32_t restart_group_size)
+    block_iterator::block_iterator(const uint8_t* base,
+                                   uint32_t starting_kv_idx,
+                                   uint32_t _kvs_in_block,
+                                   uint32_t restart_group_size)
         : _head(base),
-          _block_size(block_size),
+          _kv_idx(starting_kv_idx),
+          _starting_kv_idx(starting_kv_idx),
+          _kvs_in_block_count(_kvs_in_block),
           _restart_group_size(restart_group_size)
     {
+        this->_key.reserve(block_encoder::MAX_KEY_LEN * 2);
         this->_read_next();
     }
 
@@ -225,20 +224,23 @@ namespace hedge::db
 
     void block_iterator::_read_next()
     {
-        if((this->_curr_item_idx & (this->_restart_group_size - 1)) == 0) [[unlikely]]
+        size_t curr_idx = this->_kv_idx++;
+
+        if(curr_idx >= this->_kvs_in_block_count)
+            return;
+
+        if((curr_idx & (this->_restart_group_size - 1)) == 0) [[unlikely]]
             this->_read_restart_key();
         else
             this->_read_delta_key();
-
-        this->_curr_item_idx++;
     }
 
-    std::span<const uint8_t> block_iterator::key()
+    std::span<const uint8_t> block_iterator::key() const
     {
         return this->_key;
     }
 
-    std::span<const uint8_t> block_iterator::value()
+    std::span<const uint8_t> block_iterator::value() const
     {
         return this->_value_ref;
     }
@@ -246,7 +248,7 @@ namespace hedge::db
     void block_iterator::_read_restart_key()
     {
         // Check key whole size
-        size_t key_size = _decode_key_size(*this->_head);
+        size_t key_size = decode_key_size(*this->_head);
         this->_head += 1;
 
         // Read key
@@ -264,6 +266,8 @@ namespace hedge::db
         // Assign valure ref
         this->_value_ref = std::span<const uint8_t>(this->_head, value_size);
         this->_head += value_size;
+
+        // std::cout << "Read restart key: " << to_hex_string(this->_key) << std::endl;
     }
 
     void block_iterator::_read_delta_key()
@@ -292,25 +296,43 @@ namespace hedge::db
         // Assign valure ref
         this->_value_ref = std::span<const uint8_t>(this->_head, value_size);
         this->_head += value_size;
+
+        // std::cout << "Read delta key: " << to_hex_string(this->_key) << std::endl;
     }
 
-    bool block_iterator::operator==(const block_iterator_sentinel& sentinel) const
+    bool block_iterator::operator==(block_iterator_sentinel /* sentinel */) const
     {
-        return this->_curr_item_idx > sentinel._items_in_block_count;
+        return this->_kv_idx > this->_kvs_in_block_count;
     }
 
-    bool block_iterator::operator==(const block_iterator_restart_group_sentinel& sentinel) const
+    bool block_iterator::operator==(block_iterator_restart_group_sentinel /* sentinel */) const
     {
-        return this->_curr_item_idx > this->_restart_group_size ||
-               this->_curr_item_idx > sentinel._items_in_block_count;
+        return this->_kv_idx > (this->_starting_kv_idx + this->_restart_group_size) ||
+               this->_kv_idx > this->_kvs_in_block_count;
     }
 
-    block_reader::block_reader(const block_config& cfg, uint8_t* base)
+    block_decoder::block_decoder(const uint8_t* base, const block_config& cfg)
         : _cfg(cfg),
           _base(base)
     {
-        // Read footer
-        std::memcpy(&this->_footer, base + cfg.block_size_in_bytes - sizeof(block_footer), sizeof(block_footer));
+        this->_read_footer();
+    }
+
+    void block_decoder::reset(const uint8_t* new_base)
+    {
+        this->_base = new_base;
+        this->_read_footer();
+    }
+
+    void block_decoder::_read_footer()
+    {
+        if(this->_base == nullptr)
+        {
+            this->_footer = {};
+            return;
+        }
+
+        std::memcpy(&this->_footer, this->_base + this->_cfg.block_size_in_bytes - sizeof(block_footer), sizeof(block_footer));
     }
 
     bool key_comparator(std::span<const uint8_t> a, std::span<const uint8_t> b)
@@ -318,22 +340,22 @@ namespace hedge::db
         return std::ranges::lexicographical_compare(a, b);
     }
 
-    std::vector<uint8_t> block_reader::find(std::span<const uint8_t> key)
+    std::span<const uint8_t> block_decoder::find(std::span<const uint8_t> key)
     {
-        // std::cout << "Finding key: " << std::string(key.begin(), key.end()) << std::endl;
+        // std::cout << "Finding key: " << to_hex_string(key) << std::endl;
 
         // Load offsets
-        auto* end = this->_base + this->_cfg.block_size_in_bytes;
-        auto* restart_count_ptr = end - sizeof(block_footer) - sizeof(uint16_t);
-        size_t restart_count = *reinterpret_cast<uint16_t*>(restart_count_ptr);
-        auto* offsets_base = restart_count_ptr - (restart_count * sizeof(uint16_t));
+        const auto* end = this->_base + this->_cfg.block_size_in_bytes;
+        const auto* restart_count_ptr = end - sizeof(block_footer) - sizeof(uint16_t);
+        size_t restart_count = *reinterpret_cast<const uint16_t*>(restart_count_ptr);
+        const auto* offsets_base = restart_count_ptr - (restart_count * sizeof(uint16_t));
 
         std::vector<uint16_t> offsets;
-        offsets.assign(reinterpret_cast<uint16_t*>(offsets_base), reinterpret_cast<uint16_t*>(restart_count_ptr));
+        offsets.assign(reinterpret_cast<const uint16_t*>(offsets_base), reinterpret_cast<const uint16_t*>(restart_count_ptr));
 
         // Find the right Restart Point with binary search
 
-        std::vector<uint8_t> key_buffer;
+        std::vector<uint8_t> key_buffer; // TODO: std::vector should be backed from a stack allocated buffer
 
         auto offset_it = std::upper_bound( // NOLINT
             offsets.begin(),
@@ -342,10 +364,10 @@ namespace hedge::db
             [&](std::span<const uint8_t> key, uint16_t offset)
             {
                 // Read key at offset
-                size_t key_size = _decode_key_size(*(this->_base + offset));
+                size_t key_size = decode_key_size(*(this->_base + offset));
                 key_buffer.assign(this->_base + offset + 1, this->_base + offset + 1 + key_size);
 
-                // std::cout << "Comparing with restart key: " << std::string(key_buffer.begin(), key_buffer.end()) << std::endl;
+                // std::cout << "Comparing with restart key: " << to_hex_string(key_buffer) << std::endl;
 
                 return key_comparator(key, key_buffer);
             });
@@ -355,12 +377,17 @@ namespace hedge::db
             return {};
 
         offset_it--; // Move back to the correct restart point
+
         uint16_t offset = *offset_it;
+        size_t skipped_kvs = std::distance(offsets.begin(), offset_it) * this->_cfg.restart_group_size;
 
-        block_iterator it(this->_base + offset, this->_cfg.block_size_in_bytes - offset, this->_cfg.restart_group_size);
+        block_iterator it(
+            this->_base + offset,
+            skipped_kvs,
+            this->_footer.kv_count,
+            this->_cfg.restart_group_size);
 
-        size_t skipped_items = std::distance(offsets.begin(), offset_it) * this->_cfg.restart_group_size;
-        block_iterator_restart_group_sentinel restart_group_sentinel(this->_footer.item_count - skipped_items);
+        block_iterator_restart_group_sentinel restart_group_sentinel{};
 
         for(; it != restart_group_sentinel; ++it)
         {
@@ -373,17 +400,17 @@ namespace hedge::db
         return {};
     }
 
-    block_iterator block_reader::begin() const
+    block_iterator block_decoder::begin() const
     {
         return {this->_base,
-                this->_cfg.block_size_in_bytes,
+                0,
+                this->_footer.kv_count,
                 static_cast<uint32_t>(this->_cfg.restart_group_size)};
     }
 
-    block_iterator_sentinel block_reader::end() const
+    block_iterator_sentinel block_decoder::end() const
     {
-        block_iterator_sentinel sentinel{static_cast<uint32_t>(this->_footer.item_count)};
-        return sentinel;
+        return {};
     }
 
 } // namespace hedge::db

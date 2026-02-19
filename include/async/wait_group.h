@@ -5,6 +5,7 @@
 
 namespace hedge::async
 {
+    // TODO: this is slow, ugly (should use RAII) and buggy
     class wait_group
     {
         std::atomic_uint64_t _counter{0};
@@ -23,21 +24,17 @@ namespace hedge::async
 
         void set(size_t count)
         {
-            this->_counter = count;
-        }
-
-        void incr()
-        {
-            this->_counter++;
+            this->_counter.store(count);
+            this->_done.store(false);
         }
 
         void decr()
         {
-            this->_counter--;
+            this->_counter.fetch_sub(1);
 
-            this->_done = this->_counter == 0;
+            this->_done.store(this->_counter.load() == 0);
 
-            if(this->_done)
+            if(this->_done.load())
                 this->_cv.notify_all();
         }
 

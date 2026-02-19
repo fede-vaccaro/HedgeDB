@@ -169,6 +169,7 @@ namespace hedge::prof
         std::string_view("swap_memtable"),
         std::string_view("test_task"),
         std::string_view("submit_job"),
+        std::string_view("rolling_buffer::pop_front"),
     };
 
     static constexpr fixed_set<std::string_view, keys.size()> _metrics_set = fixed_set(keys);

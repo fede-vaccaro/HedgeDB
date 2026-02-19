@@ -339,7 +339,7 @@ namespace hedge::async
 
     void executor_context::_gc_tasks()
     {
-        prof::get<"gc_coros">().start();
+        // prof::counter_guard guard(prof::get<"gc_coros">()); TODO: there is some fiasco on destruction
 
         thread_local std::vector<decltype(this->_in_progress_tasks)::iterator> to_remove;
         to_remove.clear();
@@ -352,8 +352,6 @@ namespace hedge::async
 
         for(const auto& it : to_remove)
             this->_in_progress_tasks.erase(it);
-
-        prof::get<"gc_coros">().stop();
     }
 
     void executor_context::register_fd(int32_t fd)
@@ -394,6 +392,15 @@ namespace hedge::async
             return;
 
         executor_pool::_static_pool = std::unique_ptr<executor_pool>(new executor_pool(pool_size, queue_depth));
+    }
+
+    void executor_pool::shutdown_static_pool()
+    {
+        if(!executor_pool::_static_pool)
+            return;
+
+        executor_pool::_static_pool->_executors.clear();
+        executor_pool::_static_pool.reset();
     }
 
     const std::shared_ptr<executor_context>& executor_pool::executor_from_static_pool()

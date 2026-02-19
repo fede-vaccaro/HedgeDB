@@ -271,7 +271,7 @@ namespace hedge::fs
         file(const file&) = delete;
         file& operator=(const file&) = delete;
 
-        ~file()
+        virtual ~file()
         {
             if(this->_fd < 0)
                 return;

@@ -2,15 +2,12 @@
 
 #include <atomic>
 #include <cassert>
-#include <condition_variable>
 #include <cstddef>
 #include <deque>
 #include <future>
 #include <liburing.h>
 #include <liburing/io_uring.h>
 #include <memory>
-#include <mutex>
-#include <semaphore>
 #include <thread>
 #include <tsl/robin_map.h>
 #include <tsl/sparse_map.h>
@@ -225,6 +222,7 @@ namespace hedge::async
         static executor_pool& static_pool();
         static void init_static_pool(size_t pool_size, size_t queue_depth);
         static const std::shared_ptr<executor_context>& executor_from_static_pool();
+        static void shutdown_static_pool();
     };
 
 } // namespace hedge::async

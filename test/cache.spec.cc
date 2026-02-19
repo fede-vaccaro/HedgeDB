@@ -122,7 +122,7 @@ namespace hedge::db
                 }
 
                 page_cache::read_page_guard guard = co_await maybe_awaitable.value();
-                if(!verify_page(guard.data, guard.idx, seed))
+                if(!verify_page(guard.data, guard.offset, seed))
                 {
                     error = true;
                 }
@@ -245,7 +245,7 @@ namespace hedge::db
             {
                 for(int i = 0; i < num_pages; ++i)
                 {
-                    if(!verify_page(guards[i].data, guards[i].idx, i * 100))
+                    if(!verify_page(guards[i].data, guards[i].offset, i * 100))
                         error = true;
                 }
             }
@@ -318,7 +318,7 @@ namespace hedge::db
                     {
                         read_hits++;
                         page_cache::read_page_guard guard = co_await maybe_awaitable.value();
-                        if(!verify_page(guard.data, guard.idx, expected_seed))
+                        if(!verify_page(guard.data, guard.offset, expected_seed))
                             fatal_errors++;
                     }
                 }

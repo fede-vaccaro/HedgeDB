@@ -19,11 +19,11 @@
 #include "async/mailbox_impl.h"
 #include "async/task.h"
 #include "cache.h"
+#include "db/merge/merge_utils.h"
 #include "fs/file_reader.h"
 #include "fs/fs.hpp"
 #include "index_ops.h"
 #include "memtable.h"
-#include "merge_utils.h"
 #include "perf_counter.h"
 #include "sorted_index.h"
 #include "types.h"
@@ -130,9 +130,6 @@ namespace hedge::db
         ifs.read(reinterpret_cast<char*>(allocated_data.data()), allocated_data.size() * sizeof(T));
     }
 
-    ///< Threshold indicating whether the super index should be enabled or not
-    constexpr size_t SUPER_INDEX_ENABLED_THRESHOLD = 16;
-
     /**
      * @brief Constructs the meta-index data structure from a sorted list of index entries.
      * @details Calculates the required size and iterates through the sorted keys, adding the
@@ -168,7 +165,7 @@ namespace hedge::db
                                                                           memtable_impl_t* index,
                                                                           size_t num_partition_exponent,
                                                                           size_t flush_iteration,
-                                                                          const std::shared_ptr<db::shared_page_cache>& cache,
+                                                                          const std::shared_ptr<db::sharded_page_cache>& cache,
                                                                           bool use_odirect)
     {
         if(num_partition_exponent > 16)
@@ -275,7 +272,7 @@ namespace hedge::db
 
     hedge::expected<sorted_index>
     index_ops::save_as_sorted_index(const std::filesystem::path& path, page_aligned_buffer<index_entry_t>&& sorted_keys, size_t upper_bound, size_t epoch,
-                                    const std::shared_ptr<db::shared_page_cache>& cache,
+                                    const std::shared_ptr<db::sharded_page_cache>& cache,
                                     bool use_odirect)
     {
         // Step 1: Generate the meta-index from the sorted keys.
@@ -428,7 +425,7 @@ namespace hedge::db
         const merge_config& config,
         const std::vector<const sorted_index*>& indices,
         const std::shared_ptr<async::executor_context>& executor,
-        const std::shared_ptr<db::shared_page_cache>& cache)
+        const std::shared_ptr<db::sharded_page_cache>& cache)
     {
         /*
         -- Step 0: Validate preconditions and init all the necessary structures --
@@ -526,7 +523,7 @@ namespace hedge::db
             }
 
         public:
-            rolling_buffer2(const sorted_index& file, size_t read_ahead_size, const std::shared_ptr<db::shared_page_cache>& cache) : _read_ahead_size(read_ahead_size),
+            rolling_buffer2(const sorted_index& file, size_t read_ahead_size, const std::shared_ptr<db::sharded_page_cache>& cache) : _read_ahead_size(read_ahead_size),
                                                                                                                                      _reader(file, fs::file_reader_config{
                                                                                                                                                        .start_offset = file._footer.index_start_offset,
                                                                                                                                                        .end_offset = file._footer.index_end_offset,
@@ -552,7 +549,7 @@ namespace hedge::db
             }
 
             // refresh is idempotent if the readers are EOF
-            async::task<status> refresh(const std::shared_ptr<db::shared_page_cache>& cache)
+            async::task<status> refresh(const std::shared_ptr<db::sharded_page_cache>& cache)
             {
                 auto unpack_mailbox = hedge::overloaded{
                     [](freader::awaitable_page_guard_t& awaitable) -> async::task<expected<buffered_page_t>>
@@ -1173,19 +1170,6 @@ namespace hedge::db
         result._super_index = std::move(super_index);
 
         co_return result;
-    }
-
-    hedge::expected<sorted_index> index_ops::two_way_merge(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor)
-    {
-        if(!executor)
-            return hedge::error("Executor context is null");
-
-        auto result = executor->sync_submit(k_way_merge_async(config, std::vector<const sorted_index*>{&left, &right}, executor, nullptr));
-
-        if(!result.has_value())
-            return hedge::error("Failed to merge sorted indices: " + result.error().to_string());
-
-        return std::move(result.value());
     }
 
 } // namespace hedge::db

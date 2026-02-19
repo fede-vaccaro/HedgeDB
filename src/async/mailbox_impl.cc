@@ -150,9 +150,9 @@ namespace hedge::async
             this->response.error_code = cqe->res;
     }
 
-    void ftruncate_mailbox::prepare_sqe(io_uring_sqe*)
+    void ftruncate_mailbox::prepare_sqe(io_uring_sqe* sqe)
     {
-        throw std::runtime_error("ftruncate is not supported in this iouring version");
+        io_uring_prep_ftruncate(sqe, this->request.fd, this->request.length);
     }
 
     void ftruncate_mailbox::handle_cqe(io_uring_cqe* cqe)

@@ -11,7 +11,7 @@
 #include "cache.h"
 #include "logger.h"
 #include "rw_sync.h"
-#include "sorted_index.h"
+#include "sst.h"
 #include "types.h"
 #include "worker.h"
 
@@ -23,11 +23,13 @@ namespace hedge::db
         size_t max_inserts_cap = 2'000'000;
         size_t memory_budget_cap = 64 * 1024 * 1024;
         bool auto_compaction = true;
-        bool use_odirect = false;
+        bool use_odirect = true;
         size_t num_writer_threads = 256; // (quite) safe upper bound
     };
 
-    using memtable_impl_t = btree<key_t, value_ptr_t, std::less<>, false>; // READ_ONLY=false
+    using memtable_impl2_t = btree<key_t, value_ptr_t, std::less<>>; // READ_ONLY=false
+
+    using memtable_impl_t = btree<uuid_t, value_ptr_t, std::less<>, false>; // READ_ONLY=false
 
     using frozen_memtable_impl_t = btree<key_t, value_ptr_t, std::less<>, false>; // READ_ONLY=true -> When using this version, if we know that this type will be read only, every lock will be skipped for performance
 
@@ -41,21 +43,21 @@ namespace hedge::db
 
         // DB state & callbacks
         std::atomic_size_t* _flush_epoch{};
-        std::function<void(std::vector<sorted_index>)> _push_new_indices;
+        std::function<void(std::vector<sst>)> _push_new_indices;
         std::function<void()> _trigger_compaction_callback;
 
         // Page cache
-        std::shared_ptr<db::shared_page_cache> _cache{};
+        std::shared_ptr<db::sharded_page_cache> _cache{};
 
         // Current memtable and pipelined
-        using rw_sync_table_t = async::rw_sync<memtable_impl_t>;
+        using rw_sync_table_t = async::rw_sync<memtable_impl2_t>;
         using rw_sync_table_ptr_t = std::shared_ptr<rw_sync_table_t>;
 
         alignas(64) std::atomic<rw_sync_table_ptr_t> _table;
         alignas(64) std::atomic<rw_sync_table_ptr_t> _pipelined_table;
 
         // Pending flushes
-        alignas(64) std::shared_mutex _pending_flushes_mutex;
+        alignas(64) mutable std::shared_mutex _pending_flushes_mutex;
         std::map<size_t, rw_sync_table_ptr_t> _pending_flushes;
 
         async::worker _flusher;
@@ -68,13 +70,13 @@ namespace hedge::db
                  size_t num_partition_exponent,
                  std::filesystem::path indices_path,
                  std::atomic_size_t* flush_epoch_ptr,
-                 std::function<void(std::vector<sorted_index>)> push_new_indices,
+                 std::function<void(std::vector<sst>)> push_new_indices,
                  std::function<void()> compaction_callback,
-                 std::shared_ptr<db::shared_page_cache> page_cache);
+                 std::shared_ptr<db::sharded_page_cache> page_cache);
 
         void put(const key_t& key, const value_ptr_t& value);
 
-        std::optional<value_ptr_t> get(const key_t& key);
+        std::optional<value_ptr_t> get(const key_t& key) const; 
 
         std::future<void> wait_for_flush();
 

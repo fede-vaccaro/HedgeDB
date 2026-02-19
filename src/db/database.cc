@@ -19,7 +19,7 @@
 #include "index_ops.h"
 #include "io_executor.h"
 #include "perf_counter.h"
-#include "sorted_index.h"
+#include "sst.h"
 #include "types.h"
 #include "utils.h"
 #include "value_table.h"
@@ -56,7 +56,7 @@ namespace hedge::db
 
         // Init clock cache
         if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB page cache
-            db->_page_cache = std::make_shared<shared_page_cache>(config.index_page_clock_cache_size_bytes, async::executor_pool::static_pool().size() * 4);
+            db->_page_cache = std::make_shared<sharded_page_cache>(config.index_page_clock_cache_size_bytes, async::executor_pool::static_pool().size() * 4);
 
         // Setup memindex
         db->_memtable.~memtable();
@@ -103,7 +103,7 @@ namespace hedge::db
 
         for(auto& write_buffer_ptr : db->_write_buffers)
         {
-            write_buffer_ptr = std::make_unique<write_buffer>(WRITE_BUFFER_DEFAULT_SIZE);
+            write_buffer_ptr = std::make_unique<thread_write_buffer>(WRITE_BUFFER_DEFAULT_SIZE);
             auto vtable = db->_current_value_table.load();
             auto allocated_offset = vtable->allocate_pages_for_write(WRITE_BUFFER_DEFAULT_SIZE);
             write_buffer_ptr->set(vtable, allocated_offset.value());
@@ -112,18 +112,17 @@ namespace hedge::db
         return db;
     }
 
-    std::function<void(std::vector<sorted_index>)> database::make_push_indices_callback(const std::shared_ptr<database>& db)
+    std::function<void(std::vector<sst>)> database::make_push_indices_callback(const std::shared_ptr<database>& db)
     {
-        return [db](std::vector<sorted_index> new_indices)
+        return [db](std::vector<sst> new_indices)
         {
             std::lock_guard sorted_index_lk(db->_sorted_index_mutex);
 
             for(auto& new_sorted_index : new_indices)
             {
-                new_sorted_index.clear_index();
                 auto prefix = new_sorted_index.upper_bound();
 
-                auto sorted_index_ptr = std::make_shared<sorted_index>(std::move(new_sorted_index));
+                auto sorted_index_ptr = std::make_shared<sst>(std::move(new_sorted_index));
                 db->_sorted_indices[prefix].emplace_back(std::move(sorted_index_ptr));
 
                 assert(check_is_sorted_by_epoch(db->_sorted_indices[prefix]) && "Sorted indices vector is not sorted by epoch after memtable flush");
@@ -144,12 +143,12 @@ namespace hedge::db
         return hedge::error("load not implemented");
     }
 
-    async::task<hedge::status> database::put_async(key_t key, const byte_buffer_t& value)
+    async::task<hedge::status> database::put_async(const key_t& key, const byte_buffer_t& value)
     {
         // prof::counter_guard guard(prof::get<"put_async">());
 
         // --- Try writing value to buffer first ---
-        auto _allocate_space_for_write_buffer = [this](write_buffer& write_buffer) -> hedge::status
+        auto _allocate_space_for_write_buffer = [this](thread_write_buffer& write_buffer) -> hedge::status
         {
             std::shared_ptr<value_table> value_table_local = this->_current_value_table.load();
             expected<size_t> allocation = value_table_local->allocate_pages_for_write(WRITE_BUFFER_DEFAULT_SIZE);
@@ -214,7 +213,7 @@ namespace hedge::db
     //     co_return co_await this->put_async(key, value, executor);
     // }
 
-    async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> database::_find_value_ptr_and_value_table(key_t key)
+    async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> database::_find_value_ptr_and_value_table(const key_t& key)
     {
         // Step 1: Check the memtable first (contains the most recent data).
         std::optional<value_ptr_t> value_ptr_opt;
@@ -225,7 +224,7 @@ namespace hedge::db
         if(!value_ptr_opt.has_value())
         {
             size_t matching_partition_id = this->_find_matching_partition_for_key(key);
-            std::vector<sorted_index_ptr_t> sorted_indices_local; // Local copy for safe iteration
+            std::vector<sst_ptr_t> sorted_indices_local; // Local copy for safe iteration
 
             {
                 std::shared_lock lk(this->_sorted_index_mutex);
@@ -236,6 +235,8 @@ namespace hedge::db
 
                 sorted_indices_local = sorted_indices_it->second;
             }
+
+             // Note: we are iterating in reverse order to check the newest indices first, as they are more likely to contain the key due to temporal locality.
 
             // Indices are sorted by epoch: newest (and most recent key first)
             // TODO: Add bloom filter support to skip unnecessary lookups.
@@ -282,7 +283,7 @@ namespace hedge::db
         co_return {value_ptr_opt.value(), std::move(table_ptr)};
     }
 
-    async::task<expected<database::byte_buffer_t>> database::get_async(key_t key)
+    async::task<expected<database::byte_buffer_t>> database::get_async(const key_t& key)
     {
         auto maybe_value_ptr_table = co_await this->_find_value_ptr_and_value_table(key);
 
@@ -322,7 +323,7 @@ namespace hedge::db
         return matching_partition_id;
     }
 
-    async::task<hedge::status> database::remove_async(key_t key)
+    async::task<hedge::status> database::remove_async(const key_t& key)
     {
         // First, locate the latest version of the key (value_ptr and its table).
         // This is necessary to potentially mark the entry deleted in the value log itself (if not already handled by GC).
@@ -435,7 +436,7 @@ namespace hedge::db
                                          &errors,
                                          this_iteration_id = this->_flush_iteration.fetch_add(1)](
                                             size_t indices_to_merge,
-                                            std::vector<sorted_index_ptr_t>& ordered_indices_vec,
+                                            std::vector<sst_ptr_t>& ordered_indices_vec,
                                             std::shared_ptr<async::wait_group> wg) -> async::task<void>
         {
             // set lower priority for thread
@@ -449,13 +450,13 @@ namespace hedge::db
                 .try_reading_from_cache = true,
             };
 
-            std::vector<const sorted_index*> index_ptrs;
+            std::vector<const sst*> index_ptrs;
             index_ptrs.reserve(indices_to_merge);
 
             for(auto it = ordered_indices_vec.rbegin(); it != ordered_indices_vec.rbegin() + indices_to_merge; ++it)
                 index_ptrs.emplace_back(it->get());
 
-            auto maybe_compacted_table = co_await index_ops::k_way_merge_async(
+            auto maybe_compacted_table = co_await index_ops::k_way_merge_async2(
                 merge_config,
                 index_ptrs,
                 async::this_thread_executor(),
@@ -478,7 +479,7 @@ namespace hedge::db
                 for(size_t i = 0; i < indices_to_merge; ++i)
                     ordered_indices_vec.pop_back();
 
-                ordered_indices_vec.insert(ordered_indices_vec.end(), std::make_shared<sorted_index>(std::move(maybe_compacted_table.value())));
+                ordered_indices_vec.insert(ordered_indices_vec.end(), std::make_shared<sst>(std::move(maybe_compacted_table.value())));
 
                 assert(check_is_sorted_by_epoch(ordered_indices_vec) && "Sorted indices vector is not sorted by epoch after compaction");
 
@@ -513,7 +514,7 @@ namespace hedge::db
                     partition_vec.begin(),
                     partition_vec.end(),
                     0UL,
-                    [](size_t acc, const sorted_index_ptr_t& idx_ptr)
+                    [](size_t acc, const sst_ptr_t& idx_ptr)
                     {
                         return acc + idx_ptr->size();
                     });
@@ -604,7 +605,7 @@ namespace hedge::db
                 auto range_start = db_sorted_indices_vec.begin();
                 auto range_end = range_start + initial_vec_sizes[prefix]; // In case new indices were pushed back while we were busy with compaction here
 
-                std::for_each(range_start, range_end, [](const std::shared_ptr<sorted_index>& sorted_index)
+                std::for_each(range_start, range_end, [](const std::shared_ptr<sst>& sorted_index)
                               { sorted_index->set_delete_on_obj_destruction(true); }); // Mark old indices for deletion
                                                                                        // At any time, there might be some coroutine owning the sorted_index shared_ptr,
                                                                                        // so actual deletion will happen when the last shared_ptr goes completely out of scope
@@ -619,7 +620,7 @@ namespace hedge::db
 
                 // This is needed when the `new_sorted_index_vec` still contains some of the original sorted indices shared_ptrs.
                 // Otherwise, we would accidentally delete them.
-                std::ranges::for_each(new_partition_vec, [](const std::shared_ptr<sorted_index>& sorted_index)
+                std::ranges::for_each(new_partition_vec, [](const std::shared_ptr<sst>& sorted_index)
                                       { sorted_index->set_delete_on_obj_destruction(false); });
             }
         }

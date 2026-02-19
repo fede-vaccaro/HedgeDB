@@ -1,14 +1,11 @@
 #include <algorithm>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <linux/perf_event.h>
 #include <optional>
-#include <stdexcept>
 #include <unistd.h>
-#include <vector>
 
 #include <error.hpp>
 #include <uuid.h>
@@ -20,26 +17,25 @@
 #include "fs/fs.hpp"
 #include "sorted_index.h"
 #include "types.h"
-#include "utils.h"
 
 #include <perf_counter.h>
 
 namespace hedge::db
 {
 
-    std::optional<size_t> sorted_index::_find_page_id(const key_t& key) const
+    std::optional<size_t> sorted_index::_find_page_id(const uuid_t& key) const
     {
-        auto meta_index_range_begin = this->_meta_index.begin();
-        auto meta_index_range_end = this->_meta_index.end();
+        const auto* meta_index_range_begin = this->_meta_index.begin();
+        const auto* meta_index_range_end = this->_meta_index.end();
 
-        auto comparator = [](const meta_index_entry& a, const key_t& b)
+        auto comparator = [](const meta_index_entry& a, const uuid_t& b)
         {
             return a.key < b;
         };
 
         if(this->_super_index.has_value())
         {
-            auto it = std::lower_bound(this->_super_index->begin(), this->_super_index->end(), key, comparator);
+            const auto* it = std::lower_bound(this->_super_index->begin(), this->_super_index->end(), key, comparator);
             if(it == this->_super_index->end())
                 return std::nullopt;
 
@@ -67,7 +63,7 @@ namespace hedge::db
         }
 
         // Perform the binary search on the meta-index.
-        auto it = std::lower_bound(meta_index_range_begin, meta_index_range_end, key, comparator);
+        const auto* it = std::lower_bound(meta_index_range_begin, meta_index_range_end, key, comparator);
 
         // If lower_bound returns the end iterator, it means the key is greater than
         // the maximum key of all pages in this index file.
@@ -84,7 +80,7 @@ namespace hedge::db
         return std::distance(this->_meta_index.begin(), it);
     }
 
-    hedge::expected<std::optional<value_ptr_t>> sorted_index::lookup(const key_t& key) const
+    hedge::expected<std::optional<value_ptr_t>> sorted_index::lookup(const uuid_t& key) const
     {
         // Step 1: Use the meta-index to find the potential page ID.
         auto maybe_page_id = this->_find_page_id(key);
@@ -131,7 +127,7 @@ namespace hedge::db
         return sorted_index::_find_in_page(key, page_start_ptr, page_end_ptr);
     }
 
-    async::task<expected<std::optional<value_ptr_t>>> sorted_index::lookup_async(const key_t& key, const std::shared_ptr<shared_page_cache>& cache) const
+    async::task<expected<std::optional<value_ptr_t>>> sorted_index::lookup_async(const uuid_t& key, const std::shared_ptr<sharded_page_cache>& cache) const
     {
         auto maybe_page_id = this->_find_page_id(key);
         if(!maybe_page_id)
@@ -159,7 +155,7 @@ namespace hedge::db
             if(maybe_page_guard.has_value())
             {
                 opt_page_guard = std::move(co_await maybe_page_guard.value());
-                page_ptr = opt_page_guard->data + opt_page_guard->idx;
+                page_ptr = opt_page_guard->data + opt_page_guard->offset;
                 prof::get<"cache_hits">().add(1);
                 prof::get<"lookup">().stop(false);
 
@@ -266,7 +262,7 @@ namespace hedge::db
         co_return hedge::ok();
     }
 
-    std::optional<value_ptr_t> sorted_index::_find_in_page(const key_t& key, const index_entry_t* start, const index_entry_t* end)
+    std::optional<value_ptr_t> sorted_index::_find_in_page(const uuid_t& key, const index_entry_t* start, const index_entry_t* end)
     {
         const auto* it = std::lower_bound(start, end, index_entry_t{.key = key, .value_ptr = {}}); // Create a dummy entry for comparison
 

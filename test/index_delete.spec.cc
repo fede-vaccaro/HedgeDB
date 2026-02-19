@@ -64,7 +64,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
                     this->_deleted_items.insert({uuid, value_ptr});
             }
 
-            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, {reinterpret_cast<hedge::db::memtable_impl_t*>(&memtable)}, NUM_PARTITION_EXPONENT, i, nullptr);
+            auto partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, &memtable, NUM_PARTITION_EXPONENT, i, nullptr);
 
             if(!partitioned_sorted_indices)
             {
@@ -85,7 +85,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
         {
             std::cout << "Deleted keys: " << this->_deleted_items.size() << '\n';
 
-            auto deleted_memtable = hedge::db::memtable_impl_t{};
+            auto deleted_memtable = hedge::db::memtable_impl_t{1};
             size_t n_keys = this->SECOND_TABLE_IS_DELETION_ONLY ? this->_deleted_items.size() : this->N_KEYS_PER_RUN;
 
             for(const auto& [key, value_ptr] : this->_deleted_items)
@@ -109,7 +109,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
             }
 
             // Flush the deleted items memtable
-            auto deleted_partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, {reinterpret_cast<hedge::db::memtable_impl_t*>(&deleted_memtable)}, NUM_PARTITION_EXPONENT, N_RUNS, nullptr);
+            auto deleted_partitioned_sorted_indices = hedge::db::index_ops::flush_mem_index(this->_base_path, &deleted_memtable, NUM_PARTITION_EXPONENT, N_RUNS, nullptr);
 
             if(!deleted_partitioned_sorted_indices)
             {
@@ -172,7 +172,7 @@ struct sorted_string_merge_test : public ::testing::TestWithParam<std::tuple<siz
     bool SECOND_TABLE_IS_DELETION_ONLY = false;
 
     std::vector<uuids::uuid> _uuids;
-    std::unordered_map<hedge::key_t, hedge::value_ptr_t> _deleted_items;
+    std::unordered_map<hedge::uuid_t, hedge::value_ptr_t> _deleted_items;
     std::map<uint16_t, std::vector<hedge::db::sorted_index>> _sorted_indices;
     std::string _base_path = "/tmp/hh/test";
     std::shared_ptr<hedge::async::executor_context> _executor{};
@@ -230,6 +230,8 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
     std::chrono::microseconds total_duration{0};
     auto t0 = std::chrono::high_resolution_clock::now();
 
+    merge_wg->set(this->_sorted_indices.size());
+
     for(auto& [prefix, sorted_indices] : this->_sorted_indices)
     {
         ASSERT_LE(sorted_indices.size(), this->N_RUNS + 1) << "Expected no more than " << this->N_RUNS + 1 << " sorted index after merging";
@@ -249,8 +251,6 @@ TEST_P(sorted_string_merge_test, test_merge_unified_async)
             {
                 return a.size() >= b.size();
             });
-
-        merge_wg->incr();
 
         this->_executor->submit_io_task(merge_task_factory(
             sorted_indices[0],

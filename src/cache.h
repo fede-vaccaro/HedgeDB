@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -92,7 +91,7 @@ namespace hedge::db
 
         std::vector<_metadata> _frames;
         tsl::sparse_map<page_tag, size_t> _lut;
-        aligned_buffer_t _data = aligned_buffer_t(nullptr, std::free);
+        buffer_t _data = buffer_t(nullptr, std::free);
 
     public:
         explicit page_cache(size_t bytes);
@@ -113,9 +112,12 @@ namespace hedge::db
             read_page_guard& operator=(read_page_guard&& other) noexcept;
 
             uint8_t* data{nullptr};
-            size_t idx{0};
+            size_t offset{0}; // TODO: REMOVE THIS. This field is only used for debugging and testing purposes, it is not used for any logic in the cache implementation.
 
-            const _metadata* frame() const { return this->_frame; }
+            [[nodiscard]] const _metadata* frame() const { return this->_frame; }
+
+            [[nodiscard]] const uint8_t* begin() const { return this->data + offset; }
+            [[nodiscard]] const uint8_t* end() const { return this->data + +offset + PAGE_SIZE_IN_BYTES; }
 
         private:
             friend struct awaitable_page_guard;
@@ -187,13 +189,13 @@ namespace hedge::db
         size_t _find_frame();
     };
 
-    class shared_page_cache
+    class sharded_page_cache
     {
         std::unique_ptr<page_cache[], void (*)(void*)> _caches = std::unique_ptr<page_cache[], void (*)(void*)>(nullptr, std::free);
         size_t _num_caches;
 
     public:
-        explicit shared_page_cache(size_t bytes, size_t num_caches)
+        explicit sharded_page_cache(size_t bytes, size_t num_caches)
         {
             void* caches = aligned_alloc(alignof(page_cache), sizeof(page_cache) * num_caches);
             if(caches == nullptr)
@@ -219,7 +221,7 @@ namespace hedge::db
             return this->_caches.get()[hash].lookup(page);
         }
 
-        ~shared_page_cache()
+        ~sharded_page_cache()
         {
             for(size_t i = 0; i < this->_num_caches; ++i)
             {
@@ -235,7 +237,7 @@ namespace hedge::db
     class point_cache
     {
         async::rw_spinlock _m{};
-        tsl::robin_map<key_t, value_ptr_t> _cache;
+        tsl::robin_map<uuid_t, value_ptr_t> _cache;
         size_t _max_page_capacity;
 
     public:
@@ -244,7 +246,7 @@ namespace hedge::db
             this->_cache.reserve(this->_max_page_capacity);
         }
 
-        void put(const key_t& key, const value_ptr_t& value_ptr)
+        void put(const uuid_t& key, const value_ptr_t& value_ptr)
         {
             std::lock_guard lk(this->_m);
             if(this->_cache.size() >= this->_max_page_capacity)
@@ -253,7 +255,7 @@ namespace hedge::db
             this->_cache[key] = value_ptr;
         }
 
-        std::optional<value_ptr_t> lookup(key_t key)
+        std::optional<value_ptr_t> lookup(uuid_t key)
         {
             std::shared_lock lk(this->_m);
             auto it = this->_cache.find(key);

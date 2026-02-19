@@ -18,7 +18,7 @@
 #include "tsl/robin_map.h"
 #include "types.h"
 #include "utils.h"
-
+#include "page_aligned_buffer.h"
 #include "perf_counter.h"
 
 namespace hedge::db
@@ -125,7 +125,7 @@ namespace hedge::db
          * `value_ptr_t` if the key is found, otherwise it's empty. Returns an error if file
          * operations fail.
          */
-        [[nodiscard]] hedge::expected<std::optional<value_ptr_t>> lookup(const key_t& key) const;
+        [[nodiscard]] hedge::expected<std::optional<value_ptr_t>> lookup(const uuid_t& key) const;
 
         /**
          * @brief Asynchronously looks up a key in the index using `io_executor` and `liburing`.
@@ -137,7 +137,7 @@ namespace hedge::db
          * @param executor A shared pointer to the `io_uring` executor context used for the read operation.
          * @return A `async::task` that resolves to an `expected` containing an `std::optional<value_ptr_t>`, or an error.
          */
-        [[nodiscard]] async::task<expected<std::optional<value_ptr_t>>> lookup_async(const key_t& key, const std::shared_ptr<shared_page_cache>& cache) const;
+        [[nodiscard]] async::task<expected<std::optional<value_ptr_t>>> lookup_async(const uuid_t& key, const std::shared_ptr<sharded_page_cache>& cache) const;
 
         /**
          * @brief Loads the entire main index data from the associated file into the in-memory `_index` vector.
@@ -184,7 +184,7 @@ namespace hedge::db
          * @param page_end Pointer to the end (one past the last element) of the page data.
          * @return An `std::optional<value_ptr_t>` containing the value pointer if the key is found, otherwise `std::nullopt`.
          */
-        static std::optional<value_ptr_t> _find_in_page(const key_t& key, const index_entry_t* page_start, const index_entry_t* page_end);
+        static std::optional<value_ptr_t> _find_in_page(const uuid_t& key, const index_entry_t* page_start, const index_entry_t* page_end);
 
         /**
          * @brief Finds the ID (index) of the data page that *might* contain the given key.
@@ -194,7 +194,7 @@ namespace hedge::db
          * @return An `std::optional<size_t>` containing the page ID (0-based index) if the key
          * falls within the range covered by the meta-index, otherwise `std::nullopt`.
          */
-        [[nodiscard]] std::optional<size_t> _find_page_id(const key_t& key) const;
+        [[nodiscard]] std::optional<size_t> _find_page_id(const uuid_t& key) const;
 
         /**
          * @brief Asynchronously loads a single data page (fixed size `PAGE_SIZE_IN_BYTES=4096 bytes`) from the index file using `io_executor` and `liburing`.

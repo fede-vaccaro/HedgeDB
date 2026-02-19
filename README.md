@@ -12,6 +12,8 @@ So far it is only Linux compatible as it heavily leverage [liburing](https://git
 
 ## Features & design principles
 
+- **I/O Determinism**: Using `O_DIRECT` bypasses the OS page cache to eliminate double-caching, giving your database engine predictable, fine-grained control over memory and disk I/O.
+
 - **Fiber-style job scheduling**: A brand new and custom `executor` has been implemented to provide an abstraction layer over the [liburing](https://github.com/axboe/liburing) for maximizing the available hardware IOPS capacity; C++20 coroutines and other concurrency facilities have been exploited to strees a modern NVMe SSD at full capacity, while keeping a more linear coding style, instead of unravel the typical callback jungle.
 
 - **Log Structured Merge (LSM) Tree**: The index is basically a LSM Trees: the NVMEs are great at executing random scattered operations, but they nonetheless enjoy sequential workloads. Also, the LSM Tree-based index architecture has been proved to be flexible over different workload or even device (such as HDD) types.  
@@ -22,11 +24,9 @@ So far it is only Linux compatible as it heavily leverage [liburing](https://git
 
 - **Lightweight dependencies**: One of the core principles of this project is being self-contained as much as possible, escaping the _dependency hell™_ that plagues software today.
 
-- **Memory Aware design**: Memory consumption and performance should be predictable: the user is able to control the trade-off between memory consumption and performance. Also, the database is meant to be transparent in regards of the OS buffered I/O (files can be opened with `O_DIRECT`).
-
 ### TODOs: _(in random order of priority)_
 
-- [ ] **Abitrary sized-keys**: 16 byte keys might be a commond use case, but it's too limiting; for the sake of prototyping I stuck to this case.
+- [x] **Abitrary sized-keys**: 16 byte keys might be a commond use case, but it's too limiting; for the sake of prototyping I stuck to this case.
 
 - [ ] **Values garbage collection**: space from deleted values is never reclaimed.
 
@@ -43,8 +43,6 @@ So far it is only Linux compatible as it heavily leverage [liburing](https://git
 - [ ] Optional **Quotient/Bloom filters** in front of each `sorted_index`: by using such filters, we can reduce write amplification (by accepting more tables in the same group with minor compaction pressure) and keeping a low read amplification, by trading-off some memory.
 
 - [x] RC-CLOCK cache (Reference-Counted CLOCK) cache (currently only implemented for the Index).
-
-- [ ] Merge procedure refactoring: I believe it is the most complicated code within this project: soon or later, it must to be refactored.
 
 - [ ] Ranged iterators: the use case I focused on is random look-ups; although, ranged search is supported from every database and should be supported here too.
 

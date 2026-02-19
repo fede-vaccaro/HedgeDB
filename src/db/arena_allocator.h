@@ -15,7 +15,7 @@
 namespace hedge::db
 {
 
-    template <typename T>
+    template <typename T, bool THREAD_SAFE = true>
     class arena_allocator
     {
     public:
@@ -45,6 +45,10 @@ namespace hedge::db
 
         ~arena_allocator()
         {
+            if(!this->_extents.empty())
+            {
+                this->_extents.back().count = this->_current_slot_index;
+            }
         }
 
         // Disable copy/move
@@ -57,19 +61,33 @@ namespace hedge::db
          */
         T* allocate()
         {
-            std::lock_guard lk(this->_mutex);
-
-            if(this->_current_slot_index >= this->_items_per_extent) [[unlikely]]
+            if constexpr(THREAD_SAFE)
             {
-                this->_curr_extent = this->_allocate_new_extent();
-                this->_current_slot_index = 0;
+                std::lock_guard lk(this->_mutex);
+                return this->_allocate_impl();
             }
+            else
+            {
+                return this->_allocate_impl();
+            }
+        }
 
-            if(this->_curr_extent == nullptr) [[unlikely]]
-                return nullptr;
-
-            T* ptr = this->_curr_extent + this->_current_slot_index++;
-            return ptr;
+        /**
+         * @brief Allocates multiple contiguous objects of type T.
+         * @param n_items Number of items to allocate.
+         * @return Pointer to allocated memory, or nullptr if budget exceeded or allocation failed.
+         */
+        T* allocate_many(size_t n_items)
+        {
+            if constexpr(THREAD_SAFE)
+            {
+                std::lock_guard lk(this->_mutex);
+                return this->_allocate_many_impl(n_items);
+            }
+            else
+            {
+                return this->_allocate_many_impl(n_items);
+            }
         }
 
         [[nodiscard]] size_t
@@ -89,13 +107,84 @@ namespace hedge::db
         T* _curr_extent{nullptr};
         std::size_t _current_slot_index{0};
 
-        using extent_t = std::unique_ptr<void, decltype(&std::free)>;
+        struct extent_t
+        {
+            std::unique_ptr<void, decltype(&std::free)> memory;
+            size_t count{0};
+
+            extent_t(void* mem, decltype(&std::free) free_func) : memory(mem, free_func)
+            {
+            }
+
+            ~extent_t()
+            {
+                if(memory)
+                {
+                    T* ptr = static_cast<T*>(memory.get());
+                    // Destroy items in reverse order of allocation
+                    for(size_t i = 0; i < count; ++i)
+                    {
+                        ptr[count - 1 - i].~T();
+                    }
+                }
+            }
+
+            extent_t(extent_t&&) = default;
+            extent_t& operator=(extent_t&&) = default;
+
+            extent_t(const extent_t&) = delete;
+            extent_t& operator=(const extent_t&) = delete;
+        };
 
         std::vector<extent_t> _extents;
         std::mutex _mutex;
 
+        T* _allocate_many_impl(size_t n_items)
+        {
+            if(this->_current_slot_index + n_items > this->_items_per_extent) [[unlikely]]
+            {
+                // If the request is larger than any single extent, it's an impossible request for this allocator design.
+                if(n_items > this->_items_per_extent) [[unlikely]]
+                {
+                    return nullptr;
+                }
+
+                // Otherwise, the current extent is just full. Get a new one.
+                this->_curr_extent = this->_allocate_new_extent();
+                this->_current_slot_index = 0;
+            }
+
+            if(this->_curr_extent == nullptr) [[unlikely]]
+                return nullptr;
+
+            T* ptr = this->_curr_extent + this->_current_slot_index;
+            this->_current_slot_index += n_items;
+            return ptr;
+        }
+
+        T* _allocate_impl()
+        {
+            if(this->_current_slot_index >= this->_items_per_extent) [[unlikely]]
+            {
+                this->_curr_extent = this->_allocate_new_extent();
+                this->_current_slot_index = 0;
+            }
+
+            if(this->_curr_extent == nullptr) [[unlikely]]
+                return nullptr;
+
+            T* ptr = this->_curr_extent + this->_current_slot_index++;
+            return ptr;
+        }
+
         T* _allocate_new_extent()
         {
+            // If we have an existing extent, save its item count
+            if(!this->_extents.empty())
+            {
+                this->_extents.back().count = this->_current_slot_index;
+            }
+
             // Check budget
             size_t current_total = this->_total_allocated.load(std::memory_order_relaxed);
             if(current_total + this->_extent_size > this->_budget)

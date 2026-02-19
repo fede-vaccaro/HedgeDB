@@ -33,13 +33,13 @@ namespace hedge::db
 
         auto* uint_ptr = static_cast<uint8_t*>(ptr);
         std::fill_n(uint_ptr, this->_max_page_capacity * PAGE_SIZE_IN_BYTES, 0);
-        this->_data = aligned_buffer_t(uint_ptr, std::free);
+        this->_data = buffer_t(uint_ptr, std::free);
     }
 
     // --- read_page_guard Implementation ---
 
     page_cache::read_page_guard::read_page_guard(uint8_t* data, size_t idx, _metadata* frame)
-        : data(data), idx(idx), _frame(frame)
+        : data(data), offset(idx), _frame(frame)
     {
         assert(this->_frame != nullptr);
     }
@@ -52,7 +52,7 @@ namespace hedge::db
 
     page_cache::read_page_guard::read_page_guard(read_page_guard&& other) noexcept
         : data(std::exchange(other.data, nullptr)),
-          idx(std::exchange(other.idx, 0)),
+          offset(std::exchange(other.offset, 0)),
           _frame(std::exchange(other._frame, nullptr))
     {
     }
@@ -65,7 +65,7 @@ namespace hedge::db
                 this->_frame->flags.fetch_sub(1);
 
             this->data = std::exchange(other.data, nullptr);
-            this->idx = std::exchange(other.idx, 0);
+            this->offset = std::exchange(other.offset, 0);
             this->_frame = std::exchange(other._frame, nullptr);
         }
         return *this;
@@ -228,7 +228,7 @@ namespace hedge::db
         return awaitable_page_guard{.pg = read_page_guard{this->_data.get(), idx * PAGE_SIZE_IN_BYTES, frame_ptr}};
     }
 
-    std::vector<std::optional<page_cache::awaitable_page_guard>> shared_page_cache::lookup_range(uint32_t id, size_t start_page_index, size_t num_pages, bool hint_evict)
+    std::vector<std::optional<page_cache::awaitable_page_guard>> sharded_page_cache::lookup_range(uint32_t id, size_t start_page_index, size_t num_pages, bool hint_evict)
     {
         std::vector<std::optional<page_cache::awaitable_page_guard>> results;
         // results.resize(num_pages);
@@ -252,7 +252,7 @@ namespace hedge::db
         return results;
     }
 
-    std::vector<page_cache::write_page_guard> shared_page_cache::get_write_slots_range(uint32_t id, size_t start_page_index, size_t num_pages)
+    std::vector<page_cache::write_page_guard> sharded_page_cache::get_write_slots_range(uint32_t id, size_t start_page_index, size_t num_pages)
     {
         std::vector<page_cache::write_page_guard> results;
         results.reserve(num_pages);

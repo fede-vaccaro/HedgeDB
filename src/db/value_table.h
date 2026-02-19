@@ -5,15 +5,16 @@
 #include <cstdio>
 #include <filesystem>
 #include <limits>
-#include <mutex> // Added for _delete_mutex documentation
+#include <mutex>
+#include <shared_mutex>
 
 #include <error.hpp>
-#include <shared_mutex>
 
 #include "async/io_executor.h"
 #include "async/task.h"
 #include "fs/fs.hpp"
 #include "types.h"
+#include "utils.h"
 
 namespace hedge::db
 {
@@ -32,8 +33,9 @@ namespace hedge::db
     struct file_header
     {
         std::array<uint8_t, 16> separator{FILE_SEPARATOR}; ///< Magic bytes to identify the start of a header.
-        key_t key{};                                       ///< The key associated with this value (primarily for recovery/validation).
-        uint32_t file_size{};                              ///< The size of the actual value data (excluding this header).
+        uint16_t key_size{};                               ///< The size of the encoded key (includes the length field)
+        uint32_t value_size{};                             ///< The size of the value
+        // TODO: Add key-value checksum
     };
 
     /**
@@ -41,7 +43,7 @@ namespace hedge::db
      */
     struct output_file
     {
-        file_header header{};            ///< The header read from the file.
+        key_t key;
         std::vector<uint8_t> binaries{}; ///< The actual value data.
     };
 
@@ -163,7 +165,7 @@ namespace hedge::db
          * @return `async::task<expected<hedge::value_ptr_t>>` resolving to the `value_ptr_t` pointing
          * to the newly written entry, or an error if the write fails.
          */
-        async::task<expected<hedge::value_ptr_t>> write_async(key_t key, const std::vector<uint8_t>& value, const write_reservation& reservation);
+        async::task<expected<hedge::value_ptr_t>> write_async(const key_t& key, const std::vector<uint8_t>& value, const write_reservation& reservation);
 
         /**
          * @brief Asynchronously reads a value entry (header + data) from a specific offset and size.
@@ -199,9 +201,9 @@ namespace hedge::db
     };
 
     // Per thread write buffer
-    class alignas(64) write_buffer
+    class alignas(64) thread_write_buffer
     {
-        std::unique_ptr<uint8_t> _buffer{nullptr};
+        buffer_t _buffer = buffer_t(nullptr, std::free);
         size_t _buffer_capacity{0};
         std::atomic_size_t _write_buffer_head{0};
 
@@ -212,20 +214,20 @@ namespace hedge::db
         std::mutex _write_lock;
 
     public:
-        write_buffer() = default;
-        write_buffer(size_t capacity)
-            : _buffer(static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, capacity))), _buffer_capacity(capacity)
+        thread_write_buffer() = default;
+        thread_write_buffer(size_t capacity)
+            : _buffer(static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, capacity)), std::free), _buffer_capacity(capacity)
         {
-            assert(_buffer);
+            assert(this->_buffer.get() != nullptr);
             assert(capacity % PAGE_SIZE_IN_BYTES == 0);
         }
 
-        void set(std::shared_ptr<value_table> reference_table, size_t reserved_offset)
+        void set(std::shared_ptr<value_table> reference_table, size_t offset)
         {
             std::lock_guard lk(this->_flush_mutex);
             this->_reference_table = std::move(reference_table);
             this->_write_buffer_head.store(0);
-            this->_file_offset = reserved_offset;
+            this->_file_offset = offset;
         }
 
         [[nodiscard]] bool is_set()

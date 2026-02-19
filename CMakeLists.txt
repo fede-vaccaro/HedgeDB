@@ -38,7 +38,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(tsl_sparse_map)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -71,15 +71,22 @@ set(DB_SOURCES
     src/perf_counter.cc
     src/utils.cc
     src/utils.h
+    src/db/block.h
+    src/db/block.cc
     src/db/sorted_index.cc
     src/db/sorted_index.h
+    src/db/sst.h
+    src/db/sst.cc
     src/db/index_ops.cc
+    src/db/index_ops2.cc
+    src/db/merge/merge.cc
     src/db/index_ops.h
     src/db/memtable.h
     src/db/memtable.cc
     src/fs/fs.hpp
     src/fs/fs.cc
     src/fs/file_reader.cc
+    src/fs/file_reader2.cc
     src/fs/file_reader.h
     src/db/value_table.cc
     src/db/value_table.h
@@ -108,6 +115,10 @@ target_link_libraries(executor_test uring gtest gtest_main)
 add_executable(index_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index.spec.cc)
 target_link_libraries(index_test gtest gtest_main uring atomic)
 
+# index2 tests
+add_executable(index2_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index2.spec.cc)
+target_link_libraries(index2_test gtest gtest_main uring atomic)
+
 # index (delete and merge) tests
 add_executable(index_delete_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_delete.spec.cc)
 target_link_libraries(index_delete_test gtest gtest_main uring atomic)
@@ -116,10 +127,28 @@ target_link_libraries(index_delete_test gtest gtest_main uring atomic)
 add_executable(file_reader_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/file_reader.spec.cc)
 target_link_libraries(file_reader_test uring gtest gtest_main atomic)
 
+# paginated_view tests
+add_executable(file_reader2_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/file_reader2.spec.cc)
+target_link_libraries(file_reader2_test uring gtest gtest_main atomic)
+
 # value_table tests
-# TODO: re-enable
-# add_executable(value_table_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/value_table.spec.cc)
-# target_link_libraries(value_table_test uring gtest gtest_main)
+set(VALUE_TABLE_TEST_SRCS 
+    src/types.h
+    src/perf_counter.cc
+    src/utils.cc
+    src/utils.h
+    src/fs/fs.hpp
+    src/fs/fs.cc
+    src/fs/file_reader.cc
+    src/fs/file_reader2.cc
+    src/fs/file_reader.h
+    src/db/value_table.cc
+    src/db/value_table.h
+    src/cache.h
+    src/cache.cc
+)
+add_executable(value_table_test ${IO_EXECUTOR_SRCS} ${VALUE_TABLE_TEST_SRCS} test/value_table.spec.cc)
+target_link_libraries(value_table_test uring gtest gtest_main)
 
 # worker tests
 add_executable(worker_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/worker.spec.cc)
@@ -160,6 +189,35 @@ target_link_libraries(skiplist_test gtest gtest_main)
 add_executable(btree_test test/btree.spec.cc)
 target_link_libraries(btree_test gtest gtest_main tcmalloc atomic)
 
-# rw_sync test
-add_executable(rw_sync_test test/rw_sync.spec.cc)
-target_link_libraries(rw_sync_test gtest gtest_main)
+# varint tests
+add_executable(varint_test test/varint.spec.cc)
+target_link_libraries(varint_test gtest gtest_main)
+
+# key tests
+add_executable(key_test test/key.spec.cc)
+target_link_libraries(key_test gtest gtest_main)
+
+# block tests
+add_executable(block_test src/db/block.cc test/block.spec.cc)
+target_link_libraries(block_test gtest gtest_main)
+
+
+# btree variant tests
+# add_executable(btree_variant_test test/btree_variant.spec.cc)
+# target_link_libraries(btree_variant_test gtest gtest_main tcmalloc atomic)
+
+# page_aligned_buffer tests
+add_executable(page_aligned_buffer_test test/page_aligned_buffer.spec.cc src/utils.cc)
+target_link_libraries(page_aligned_buffer_test gtest gtest_main)
+
+# error tests
+add_executable(error_test test/error.spec.cc)
+target_link_libraries(error_test gtest gtest_main)
+
+# rolling_buffer tests
+add_executable(rolling_buffer_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/rolling_buffer.spec.cc)
+target_link_libraries(rolling_buffer_test uring gtest gtest_main atomic)
+
+# debug test
+add_executable(index_merge ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_merge.spec.cc)
+target_link_libraries(index_merge gtest gtest_main uring atomic)

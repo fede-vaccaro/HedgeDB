@@ -3,84 +3,109 @@
 #include <cstdlib>
 
 #include "cache.h"
+#include "key.h"
 #include "memtable.h"
+#include "page_aligned_buffer.h"
 #include "sorted_index.h"
+#include "sst.h"
 #include "types.h"
-#include "utils.h"
 
 namespace hedge::db
 {
 
-    /**
-     * @brief Provides static utility functions for managing index files (mem_index and sorted_index).
-     * @details This struct encapsulates the core logic for operations that involve
-     * transforming or combining index structures, such as flushing in-memory data to disk,
-     * loading index files from disk, and merging existing index files during compaction.
-     * All methods are static as they operate on index objects rather than representing
-     * an index itself.
-     */
     struct index_ops
     {
-        /**
-         * @brief Loads a `sorted_index` representation from a file on disk.
-         * @details Reads the footer and meta-index from the specified file path. Optionally,
-         * it can also load the entire main index data into memory immediately. If the main index
-         * is not loaded, lookups will require disk access (either mmap or async reads).
-         * @param path The filesystem path to the `sorted_index` file.
-         * @param load_index If `true`, loads the entire main index data (`_index`) into memory upon loading.
-         * If `false` (default), only the footer and meta-index are loaded.
-         * @return An `expected<sorted_index>` containing the loaded `sorted_index` object on success,
-         * or an error if the file cannot be opened, read, or is malformed.
-         */
+
+        // Constants
+        static constexpr size_t SUPER_INDEX_ENABLED_THRESHOLD = 16;
+
+        struct sst_footer_builder
+        {
+            std::optional<uint64_t> upper_bound{};
+            std::optional<uint64_t> indexed_kv{};
+            std::optional<uint64_t> meta_index_entries{};
+            std::optional<uint64_t> index_offset{};
+            std::optional<uint64_t> meta_index_offset{};
+            std::optional<uint64_t> footer_offset{};
+            std::optional<uint64_t> epoch{};
+
+            hedge::expected<sst_footer> build()
+            {
+                // Simple validation: ensure all fields have been assigned a value.
+                if(!this->upper_bound.has_value())
+                    return hedge::error("Footer upper_bound not set");
+                if(!this->indexed_kv.has_value())
+                    return hedge::error("Footer indexed_keys not set");
+                if(!this->meta_index_entries.has_value())
+                    return hedge::error("Footer meta_index_entries not set");
+                if(!this->index_offset.has_value())
+                    return hedge::error("Footer index_offset not set");
+                if(!this->meta_index_offset.has_value())
+                    return hedge::error("Footer meta_index_offset not set");
+                if(!this->footer_offset.has_value())
+                    return hedge::error("Footer footer_offset not set");
+                if(!this->epoch.has_value())
+                    return hedge::error("Footer epoch not set");
+
+                return sst_footer{
+                    .version = sorted_index_footer::CURRENT_FOOTER_VERSION,
+                    .upper_bound = this->upper_bound.value(),
+                    .indexed_keys = this->indexed_kv.value(),
+                    .meta_index_entries = this->meta_index_entries.value(),
+                    .index_offset = this->index_offset.value(),
+                    .meta_index_offset = this->meta_index_offset.value(),
+                    .footer_offset = this->footer_offset.value(),
+                    .epoch = this->epoch.value()};
+            }
+        };
+
+        template <typename T, size_t PAGE_SIZE = PAGE_SIZE_IN_BYTES>
+        static page_aligned_buffer<key_t> create_super_index(const page_aligned_buffer<key_t>& meta_index);
+
+        static void append_meta_index_key(page_aligned_buffer<uint8_t>& buffer, const std::span<const uint8_t>& key_span)
+        {
+            size_t buf_size = buffer.size();
+
+            // Extend buffer size
+            buffer.resize(buf_size + key_span.size() + 1); // +1 for key size byte
+
+            // Write key size
+            write_key_unsafe(buffer.data(), key_span);
+        }
+
         static hedge::expected<sorted_index> load_sorted_index(const std::filesystem::path& path, bool use_direct, bool load_index = false);
 
-        /**
-         * @brief Creates a new `sorted_index` file on disk from a sorted vector of index entries.
-         * @details Writes the main index data, computes and writes the meta-index, and writes the
-         * footer to create a complete `sorted_index` file according to the defined format.
-         * The input vector `sorted_keys` is moved into the resulting `sorted_index` object if successful.
-         * @param path The filesystem path where the new `sorted_index` file should be created.
-         * @param sorted_keys An rvalue reference to a vector of `index_entry_t`, expected to be pre-sorted by key.
-         * @param upper_bound The upper bound key prefix for the partition this index belongs to.
-         * @param cache A shared pointer to the database's shared page cache for index caching. Use nullptr if no caching is desired.
-         * @param use_odirect If `true`, opens the file with O_DIRECT flag for direct I/O access.
-         * @return An `expected<sorted_index>` containing the newly created `sorted_index` object (representing the file)
-         * on success, or an error if file writing fails.
-         */
         static hedge::expected<sorted_index> save_as_sorted_index(
             const std::filesystem::path& path,
             page_aligned_buffer<index_entry_t>&& sorted_keys,
             size_t upper_bound,
             size_t epoch,
-            const std::shared_ptr<db::shared_page_cache>& cache,
+            const std::shared_ptr<db::sharded_page_cache>& cache,
             bool use_odirect);
 
-        /**
-         * @brief Flushes one or more `mem_index` instances to disk, creating potentially multiple `sorted_index` files based on key partitioning.
-         * @details This function orchestrates the process of turning in-memory data into persistent files.
-         * 1. Merges all input `mem_index` instances into a single sorted list using `merge_memtables_in_mem`.
-         * 2. Iterates through the sorted list, partitioning entries based on their key prefix (`extract_prefix`).
-         * 3. For each partition, calls `save_as_sorted_index` to write a new `sorted_index` file containing only the entries for that partition.
-         * The `flush_iteration` is used to generate unique file names within each partition directory.
-         * @param base_path The base directory where partition subdirectories (`00/`, `01/`, etc.) will be created.
-         * @param indices A vector of `mem_index` objects to flush (passed by rvalue reference).
-         * @param num_partition_exponent Determines the number of partitions (2^num_partition_exponent).
-         * @param flush_iteration A unique identifier for this flush operation, used in filenames
-         * to distinguish between multiple and independent flushes to the same partition (e.g., `ff/ff00.0`, `ff/ff00.1`).
-         * @param cache A shared pointer to the database's shared page cache for index caching. Use nullptr if no caching is desired.
-         * @return An `expected<std::vector<sorted_index>>` containing the newly created `sorted_index` objects on success,
-         * or an error if any step fails.
-         */
+        static hedge::expected<sst> save_as_sorted_index2(
+            const std::filesystem::path& path,
+            page_aligned_buffer<index_entry2_t>&& sorted_keys,
+            size_t average_key_length,
+            size_t upper_bound,
+            size_t epoch,
+            const std::shared_ptr<db::sharded_page_cache>& cache,
+            bool use_odirect);
+
         static hedge::expected<std::vector<sorted_index>> flush_mem_index(const std::filesystem::path& base_path,
                                                                           memtable_impl_t* index,
                                                                           size_t num_partition_exponent,
                                                                           size_t flush_iteration,
-                                                                          const std::shared_ptr<db::shared_page_cache>& cache,
+                                                                          const std::shared_ptr<db::sharded_page_cache>& cache,
                                                                           bool use_odirect = false);
 
-        /**
-         * @brief Configuration options for the `two_way_merge_async` and `two_way_merge` operations.
-         */
+        static hedge::expected<std::vector<sst>> flush_mem_index2(const std::filesystem::path& base_path,
+                                                                  memtable_impl2_t* index,
+                                                                  size_t num_partition_exponent,
+                                                                  size_t flush_iteration,
+                                                                  const std::shared_ptr<db::sharded_page_cache>& cache,
+                                                                  bool use_odirect = false);
+
         struct merge_config
         {
             size_t read_ahead_size{};              ///< Number of bytes to read from each input index file at a time during the merge. (e.g., 64 * 1024 for 64KB chunks).
@@ -94,34 +119,17 @@ namespace hedge::db
             bool try_reading_from_cache{false};    ///< If `true`, attempts to read input index pages from the shared page cache before issuing disk reads.
         };
 
-        /**
-         * @brief Asynchronously merges two `sorted_index` files into a new `sorted_index` file using `io_executor` `liburing`.
-         * @details Implements an external merge sort algorithm optimized for asynchronous I/O and reduced memory footprint.
-         * Reads chunks from `left` and `right` files, merges them in memory (handling key deduplication
-         * using `value_ptr_t::operator<` to keep the newest entry), and writes the result to a new file.
-         * @param config Configuration settings for the merge operation (`merge_config`).
-         * @param left The first `sorted_index` file to merge.
-         * @param right The second `sorted_index` file to merge.
-         * @param executor A shared pointer to the `liburing`-based executor context.
-         * @return A `async::task` that resolves to an `expected<sorted_index>` containing the newly created merged `sorted_index`
-         * object on success, or an error if the merge fails.
-         */
-        static async::task<hedge::expected<sorted_index>> k_way_merge_async(const merge_config& config, const std::vector<const sorted_index*>& indices, const std::shared_ptr<async::executor_context>& executor, const std::shared_ptr<db::shared_page_cache>& cache);
+        static async::task<hedge::expected<sorted_index>> k_way_merge_async(
+            const merge_config& config,
+            const std::vector<const sorted_index*>& indices,
+            const std::shared_ptr<async::executor_context>& executor,
+            const std::shared_ptr<db::sharded_page_cache>& cache);
 
-        /**
-         * @brief Synchronously merges two `sorted_index` files by running and waiting for `two_way_merge_async`.
-         * @details Provides a blocking wrapper around the asynchronous merge operation.
-         * Requires a valid `executor` to run the underlying asynchronous task.
-         * @param config Configuration settings for the merge operation (`merge_config`).
-         * @param left The first `sorted_index` file to merge.
-         * @param right The second `sorted_index` file to merge.
-         * @param executor A shared pointer to the `io_uring` executor context.
-         * @return An `expected<sorted_index>` containing the newly created merged `sorted_index` object on success,
-         * or an error if the merge fails or the executor is invalid.
-         */
-        static hedge::expected<sorted_index> two_way_merge(const merge_config& config, const sorted_index& left, const sorted_index& right, const std::shared_ptr<async::executor_context>& executor);
-
-        static hedge::expected<void> two_way_merge_mmap(const merge_config& config, const sorted_index& left, const sorted_index& right);
+        static async::task<hedge::expected<sst>> k_way_merge_async2(
+            const merge_config& config,
+            const std::vector<const sst*>& indices,
+            const std::shared_ptr<async::executor_context>& executor,
+            std::shared_ptr<db::sharded_page_cache> cache);
     };
 
 } // namespace hedge::db

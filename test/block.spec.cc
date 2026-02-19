@@ -15,14 +15,14 @@ namespace hedge::db
     struct BlockTest
     {
         // Poor man's reflection
-        [[nodiscard]] size_t get_bytes_written(const block_builder& builder) const
+        [[nodiscard]] size_t get_bytes_written(const block_encoder& builder) const
         {
             return static_cast<size_t>(builder._head - builder._base);
         }
 
         [[nodiscard]] uint32_t shared_prefix_length(std::span<const uint8_t> prev, std::span<const uint8_t> curr) const
         {
-            return block_builder::_shared_prefix_length(prev, curr);
+            return block_encoder::_compute_shared_prefix_length(prev, curr);
         }
     };
 
@@ -120,9 +120,9 @@ namespace hedge::db
             .block_size_in_bytes = 4096,
             .restart_group_size = 16};
 
-        block_builder builder(
-            cfg,
-            buffer.data());
+        block_encoder builder(
+            buffer.data(),
+            cfg);
 
         const std::string key = "afaf-afaf-afaf-afaf";      // 20 bytes
         const std::string value = generate_rand_value(300); // 300 bytes
@@ -136,7 +136,7 @@ namespace hedge::db
         check_restart_key(bytes_read, buffer, key, value);
 
         // Test iterator
-        block_iterator it(buffer.data(), buffer.size(), cfg.restart_group_size);
+        block_iterator it(buffer.data(), 0, builder.kv_count(), cfg.restart_group_size);
 
         ASSERT_TRUE(span_cmpr(it.key(), key)) << "Key mismatch: " << std::string(it.key().begin(), it.key().end()) << " vs " << key;
         ASSERT_TRUE(span_cmpr(it.value(), value)) << "Value mismatch: " << std::string(it.value().begin(), it.value().end()) << " vs " << value;
@@ -150,9 +150,9 @@ namespace hedge::db
             .block_size_in_bytes = 4096,
             .restart_group_size = 16};
 
-        block_builder builder(
-            cfg,
-            buffer.data());
+        block_encoder builder(
+            buffer.data(),
+            cfg);
 
         const std::string key_0 = "afaf-afaf-afaf-afaf00000000000000000000000"; // 43 bytes
         const std::string key_1 = "afaf-ffff-ffff-ffff-ffff";                   // 25 bytes (first 5 bytes shared with key_0)
@@ -167,7 +167,7 @@ namespace hedge::db
         status = builder.push(to_unsigned_span(key_1), to_unsigned_span(value_1));
         ASSERT_TRUE(status);
 
-        builder.finish();
+        builder.commit();
 
         size_t bytes_read{0};
 
@@ -176,7 +176,7 @@ namespace hedge::db
         check_delta_key(bytes_read, 5, buffer, key_1, value_1);
 
         // Test reader
-        block_reader reader(cfg, buffer.data());
+        block_decoder reader(buffer.data(), cfg);
         block_iterator it = reader.begin();
 
         ASSERT_TRUE(span_cmpr(it.key(), key_0)) << "Key 0 mismatch: " << std::string(it.key().begin(), it.key().end()) << " vs " << key_0;
@@ -198,9 +198,7 @@ namespace hedge::db
             .block_size_in_bytes = 4096,
             .restart_group_size = 16};
 
-        block_builder builder(
-            cfg,
-            buffer.data());
+        block_encoder builder(buffer.data(), cfg);
 
         const std::string key_0 = "afaf-afaf-afaf-afaf";      // 20 bytes
         const std::string key_1 = "afaf-ffff-ffff-ffff-ffff"; // 25 bytes (first 5 bytes shared with key_0)
@@ -221,6 +219,9 @@ namespace hedge::db
         status = builder.push(to_unsigned_span(key_2), to_unsigned_span(value_2));
         ASSERT_TRUE(status);
 
+        // Commit
+        builder.commit();
+
         // Readback
         size_t bytes_read{0};
         check_restart_key(bytes_read, buffer, key_0, value_0);
@@ -228,7 +229,7 @@ namespace hedge::db
         check_delta_key(bytes_read, 2, buffer, key_2, value_2);
 
         // Test reader
-        block_reader reader(cfg, buffer.data());
+        block_decoder reader(buffer.data(), cfg);
 
         block_iterator it = reader.begin();
 
@@ -354,9 +355,9 @@ namespace hedge::db
             .block_size_in_bytes = 4096,
             .restart_group_size = 16};
 
-        block_builder builder(
-            cfg,
-            buffer.data());
+        block_encoder builder(
+            buffer.data(),
+            cfg);
 
         constexpr size_t NUM_KEY_PAIRS = 1024; // They won't fit in one block
 
@@ -399,7 +400,7 @@ namespace hedge::db
         }
 
         // Test reader
-        block_reader reader(cfg, buffer.data());
+        block_decoder reader(buffer.data(), cfg);
         size_t idx = 0;
         for(auto it = reader.begin(); it != reader.end(); ++it)
         {
@@ -419,7 +420,8 @@ namespace hedge::db
         // Try find keys with reader
         for(auto i = 0UL; i < keys.size(); ++i)
         {
-            std::vector<uint8_t> found_value = reader.find(to_unsigned_span(keys[i]));
+            auto found_value_span = reader.find(to_unsigned_span(keys[i]));
+            auto found_value = std::vector<uint8_t>{found_value_span.begin(), found_value_span.end()};
 
             if(i < inserted_keys)
                 ASSERT_TRUE(span_cmpr(found_value, values[i])) << "Find value mismatch for key " << i << ": " << std::string(found_value.begin(), found_value.end()) << " vs " << values[i];

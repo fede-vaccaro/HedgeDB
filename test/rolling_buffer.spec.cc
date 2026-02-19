@@ -1,0 +1,234 @@
+#include <algorithm>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <gtest/gtest.h>
+#include <iostream>
+#include <random>
+#include <span>
+#include <vector>
+
+#include "async/io_executor.h"
+#include "async/wait_group.h"
+#include "db/block.h"
+#include "db/merge/rolling_buffer.h"
+#include "fs/fs.hpp"
+#include "types.h"
+
+using namespace hedge::db;
+using namespace hedge::fs;
+using namespace hedge;
+
+struct RollingBufferTest : public ::testing::TestWithParam<size_t>
+{
+    std::filesystem::path temp_file_path;
+
+    void SetUp() override
+    {
+        temp_file_path = std::filesystem::temp_directory_path() / "rolling_buffer_test.sst";
+        if(std::filesystem::exists(temp_file_path))
+        {
+            std::filesystem::remove(temp_file_path);
+        }
+    }
+
+    void TearDown() override
+    {
+        if(std::filesystem::exists(temp_file_path))
+        {
+            std::filesystem::remove(temp_file_path);
+        }
+    }
+
+    static void SetUpTestSuite()
+    {
+        try
+        {
+            hedge::async::executor_pool::init_static_pool(1, 32);
+        }
+        catch(...)
+        {
+        }
+    }
+};
+
+TEST_P(RollingBufferTest, WriteAndReadBack)
+{
+    size_t read_ahead_size = GetParam();
+    size_t N_ITEMS = 5000;
+
+    // 1. Generate Data
+    std::vector<std::pair<std::string, value_ptr_t>> data;
+    data.reserve(N_ITEMS);
+
+    std::mt19937 gen(42);
+    std::uniform_int_distribution<uint64_t> dist_u64;
+    std::uniform_int_distribution<uint32_t> dist_u32;
+    std::uniform_int_distribution<int> char_dist('a', 'z');
+    std::uniform_int_distribution<int> len_dist(10, 50);
+
+    for(size_t i = 0; i < N_ITEMS; ++i)
+    {
+        int len = len_dist(gen);
+        std::string key;
+        key.reserve(len);
+        for(int j = 0; j < len; ++j)
+        {
+            key.push_back(static_cast<char>(char_dist(gen)));
+        }
+
+        value_ptr_t val(dist_u64(gen), dist_u32(gen), dist_u32(gen));
+
+        data.emplace_back(std::move(key), val);
+    }
+
+    std::sort(data.begin(), data.end(), [](const auto& a, const auto& b)
+              { return a.first < b.first; });
+
+    // 2. Write to file
+    {
+        std::ofstream out(temp_file_path, std::ios::binary);
+        ASSERT_TRUE(out.is_open());
+
+        constexpr size_t BUFFER_SIZE = PAGE_SIZE_IN_BYTES * 4;
+        std::vector<uint8_t> buffer(BUFFER_SIZE);
+
+        block_buffer_writer writer(buffer.data(), buffer.data() + buffer.size());
+
+        for(const auto& [key_str, val] : data)
+        {
+            std::span<const uint8_t> key_span(reinterpret_cast<const uint8_t*>(key_str.data()), key_str.size());
+            std::span<const uint8_t> val_span(reinterpret_cast<const uint8_t*>(&val), sizeof(val));
+
+            auto push_status = writer.push(key_span, val_span, [](std::span<const uint8_t>) {});
+
+            if(!push_status && push_status.error().code() == errc::BUFFER_FULL)
+            {
+                out.write(reinterpret_cast<char*>(buffer.data()), writer.bytes_written());
+                writer.reset();
+
+                push_status = writer.push(key_span, val_span, [](std::span<const uint8_t>) {});
+                ASSERT_TRUE(push_status) << "Failed to push even after reset";
+            }
+            else
+            {
+                ASSERT_TRUE(push_status) << "Push failed with error: " << push_status.error().to_string();
+            }
+        }
+
+        if(!writer.empty())
+        {
+            writer.force_commit();
+            out.write(reinterpret_cast<char*>(buffer.data()), writer.bytes_written());
+        }
+        out.close();
+    }
+
+    size_t file_size = std::filesystem::file_size(temp_file_path);
+    ASSERT_GT(file_size, 0);
+
+    // 3. Read back
+    {
+        auto file_res = fs::file::from_path(temp_file_path, fs::file::open_mode::read_only);
+        ASSERT_TRUE(file_res) << "Failed to open file: " << file_res.error().to_string();
+        fs::file file = std::move(file_res.value());
+
+        fs::file_reader2_config config;
+        config.start_offset = 0;
+        config.end_offset = file_size;
+        config.read_ahead_size = read_ahead_size;
+
+        std::shared_ptr<db::sharded_page_cache> null_cache = nullptr;
+
+        auto wg = hedge::async::wait_group::make_shared();
+        wg->set(1);
+
+        auto executor_ptr = async::executor_pool::executor_from_static_pool();
+
+        auto read_task = [&]() -> async::task<void>
+        {
+            rolling_buffer2 rb(file, config, config.read_ahead_size, null_cache);
+            size_t idx = 0;
+
+            auto status = co_await rb.refresh(null_cache);
+            if(!status)
+            {
+                std::cerr << "Initial refresh failed: " << status.error().to_string() << std::endl;
+                wg->decr();
+                co_return;
+            }
+
+            while(true)
+            {
+                if(rb.buffer_empty())
+                {
+                    if(rb.is_eof())
+                        break;
+
+                    status = co_await rb.refresh(null_cache);
+                    if(!status)
+                    {
+                        std::cerr << "Refresh failed: " << status.error().to_string() << std::endl;
+                        break;
+                    }
+                    if(rb.buffer_empty())
+                        break;
+                }
+
+                const auto& it = rb.front();
+                auto read_key = it.key();
+                auto read_val = it.value();
+
+                if(idx >= data.size())
+                {
+                    EXPECT_LT(idx, data.size()) << "Read more items than expected";
+                    break;
+                }
+
+                const auto& [exp_key_str, exp_val] = data[idx];
+                std::span<const uint8_t> exp_key_span(reinterpret_cast<const uint8_t*>(exp_key_str.data()), exp_key_str.size());
+                std::span<const uint8_t> exp_val_span(reinterpret_cast<const uint8_t*>(&exp_val), sizeof(exp_val));
+
+                auto spans_equal = [](std::span<const uint8_t> a, std::span<const uint8_t> b)
+                {
+                    return a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size()) == 0;
+                };
+
+                if(!spans_equal(read_key, exp_key_span))
+                {
+                    std::string rk(reinterpret_cast<const char*>(read_key.data()), read_key.size());
+                    EXPECT_EQ(rk, exp_key_str) << "Keys mismatch at index " << idx;
+                }
+
+                if(!spans_equal(read_val, exp_val_span))
+                {
+                    EXPECT_TRUE(false) << "Values mismatch at index " << idx;
+                }
+
+                rb.pop_front();
+                idx++;
+            }
+
+            EXPECT_EQ(idx, data.size()) << "Read fewer items than expected";
+            wg->decr();
+            co_return;
+        };
+
+        executor_ptr->submit_io_task(read_task());
+        wg->wait();
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ReadAheadSizes,
+    RollingBufferTest,
+    ::testing::Values(
+        PAGE_SIZE_IN_BYTES,
+        PAGE_SIZE_IN_BYTES * 2,
+        PAGE_SIZE_IN_BYTES * 4,
+        PAGE_SIZE_IN_BYTES * 8,
+        PAGE_SIZE_IN_BYTES * 16),
+    [](const testing::TestParamInfo<RollingBufferTest::ParamType>& info)
+    {
+        return "ReadAhead_" + std::to_string(info.param);
+    });

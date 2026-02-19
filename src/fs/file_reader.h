@@ -8,6 +8,7 @@
 #include "fs.hpp"
 #include "mailbox.h"
 #include "mailbox_impl.h"
+#include "page_aligned_buffer.h"
 
 #include "cache.h"
 #include "types.h"
@@ -44,7 +45,7 @@ namespace hedge::fs
 
         using awaitable_from_cache_or_fs_t = std::variant<awaitable_read_request_t, awaitable_page_guard_t>;
 
-        std::vector<awaitable_from_cache_or_fs_t> next(const std::shared_ptr<db::shared_page_cache>& cache);
+        std::vector<awaitable_from_cache_or_fs_t> next(const std::shared_ptr<db::sharded_page_cache>& cache);
 
         [[nodiscard]] size_t get_current_offset() const;
         [[nodiscard]] bool is_eof() const;
@@ -55,7 +56,7 @@ namespace hedge::fs
 
     private:
         std::vector<awaitable_from_cache_or_fs_t> _next();
-        std::vector<awaitable_from_cache_or_fs_t> _next(const std::shared_ptr<db::shared_page_cache>& cache);
+        std::vector<awaitable_from_cache_or_fs_t> _next(const std::shared_ptr<db::sharded_page_cache>& cache);
     };
 
 } // namespace hedge::fs

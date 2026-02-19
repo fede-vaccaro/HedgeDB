@@ -2,7 +2,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <sched.h>
-#include <stdexcept>
 
 #include "cache.h"
 #include "db/sorted_index.h"
@@ -31,7 +30,7 @@ namespace hedge::fs
     }
 
     template <typename FILE>
-    std::vector<typename file_reader<FILE>::awaitable_from_cache_or_fs_t> file_reader<FILE>::next(const std::shared_ptr<db::shared_page_cache>& cache)
+    std::vector<typename file_reader<FILE>::awaitable_from_cache_or_fs_t> file_reader<FILE>::next(const std::shared_ptr<db::sharded_page_cache>& cache)
     {
         prof::get<"file_reader_next">().start();
         if(cache == nullptr)
@@ -84,7 +83,7 @@ namespace hedge::fs
     }
 
     template <typename FILE>
-    std::vector<typename file_reader<FILE>::awaitable_from_cache_or_fs_t> file_reader<FILE>::_next(const std::shared_ptr<db::shared_page_cache>& cache)
+    std::vector<typename file_reader<FILE>::awaitable_from_cache_or_fs_t> file_reader<FILE>::_next(const std::shared_ptr<db::sharded_page_cache>& cache)
     {
         if(this->_current_offset >= this->_config.end_offset)
             return {}; // EOF reached
@@ -166,7 +165,7 @@ namespace hedge::fs
                     last_page_size -= remainder;
                 }
                 std::span mem{
-                    page_guards[i]->pg.data + page_guards[i]->pg.idx,
+                    page_guards[i]->pg.data + page_guards[i]->pg.offset,
                     last_page_size};
 
                 result.emplace_back(awaitable_page_guard_t{std::move(page_guards[i].value()), mem});

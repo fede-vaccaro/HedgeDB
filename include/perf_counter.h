@@ -66,17 +66,17 @@ namespace hedge::prof
 
     struct noop_counter final : counter_i
     {
-        void add(size_t /*n*/, size_t /*c*/) final {}
+        void constexpr add(size_t /*n*/, size_t /*c*/) final {}
 
-        void start() final {}
+        void constexpr start() final {}
 
-        void stop(bool /*ignore*/) final {}
-        void reset() final {}
+        void constexpr  stop(bool /*ignore*/) final {}
+        void constexpr reset() final {}
 
-        [[nodiscard]] double avg() const final { return 0.0; }
-        [[nodiscard]] double total() const final { return 0.0; }
-        [[nodiscard]] double count() const final { return 0.0; }
-        [[nodiscard]] double duration_ns() const final { return 0.0; }
+        [[nodiscard]] double constexpr avg() const final { return 0.0; }
+        [[nodiscard]] double constexpr total() const final { return 0.0; }
+        [[nodiscard]] double constexpr count() const final { return 0.0; }
+        [[nodiscard]] double constexpr duration_ns() const final { return 0.0; }
     };
 
     inline static noop_counter NOOP_COUNTER{};

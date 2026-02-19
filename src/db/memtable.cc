@@ -15,9 +15,9 @@ namespace hedge::db
                        size_t num_partition_exponent,
                        std::filesystem::path indices_path,
                        std::atomic_size_t* flush_epoch_ptr,
-                       std::function<void(std::vector<sorted_index>)> push_new_indices,
+                       std::function<void(std::vector<sst>)> push_new_indices,
                        std::function<void()> trigger_compaction_callback,
-                       std::shared_ptr<db::shared_page_cache> page_cache)
+                       std::shared_ptr<db::sharded_page_cache> page_cache)
         : _cfg(cfg),
           _num_partition_exponent(num_partition_exponent),
           _indices_path(std::move(indices_path)),
@@ -69,9 +69,9 @@ namespace hedge::db
         }
     }
 
-    std::optional<value_ptr_t> memtable::get(const key_t& key)
+    std::optional<value_ptr_t> memtable::get(const key_t& key) const
     {
-        auto local_memtable_ref = this->_table.load(std::memory_order_relaxed);
+        const auto local_memtable_ref = this->_table.load(std::memory_order_relaxed);
 
         auto v = local_memtable_ref->ptr()->get(key);
 
@@ -162,12 +162,12 @@ namespace hedge::db
                     while(memtable_to_flush->any_active_writer()) // Wait until every writer is done with the object
                         std::this_thread::yield();
 
-                    auto partitioned_sorted_indices = index_ops::flush_mem_index(this->_indices_path,
-                                                                                 memtable_to_flush.get()->ptr(),
-                                                                                 this->_num_partition_exponent,
-                                                                                 curr_flush_epoch,
-                                                                                 this->_cache,
-                                                                                 this->_cfg.use_odirect);
+                    auto partitioned_sorted_indices = index_ops::flush_mem_index2(this->_indices_path,
+                                                                                  memtable_to_flush.get()->ptr(),
+                                                                                  this->_num_partition_exponent,
+                                                                                  curr_flush_epoch,
+                                                                                  this->_cache,
+                                                                                  this->_cfg.use_odirect);
 
                     if(!partitioned_sorted_indices.has_value())
                     {
