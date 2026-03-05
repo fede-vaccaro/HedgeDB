@@ -4,22 +4,17 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <vector>
 
 #include <sys/types.h>
 
 #include <error.hpp>
 
-#include "async/io_executor.h"
 #include "async/task.h"
 #include "cache.h"
 #include "fs/fs.hpp"
-#include "tsl/robin_map.h"
 #include "types.h"
-#include "utils.h"
 
 #include "page_aligned_buffer.h"
-#include "perf_counter.h"
 
 namespace hedge::db
 {
@@ -60,7 +55,7 @@ namespace hedge::db
         sst(const sst&) = delete;
         sst& operator=(const sst&) = delete;
 
-        [[nodiscard]] async::task<expected<std::optional<value_ptr_t>>> lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache) const;
+        [[nodiscard]] async::task<expected<value_t>> lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache) const;
 
         [[nodiscard]] size_t upper_bound() const { return this->_footer.upper_bound; }
 
@@ -73,7 +68,7 @@ namespace hedge::db
         void stats() const;
 
     private:
-        static std::optional<value_ptr_t> _find_in_page(const key_t& key, const uint8_t* page);
+        static hedge::expected<value_t> _find_in_page(const key_t& key, const uint8_t* page);
 
         [[nodiscard]] std::optional<size_t> _find_page_id(const key_t& key) const;
 

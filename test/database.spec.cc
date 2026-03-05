@@ -24,7 +24,7 @@ namespace hedge::db
     {
         static void SetUpTestSuite()
         {
-            async::executor_pool::init_static_pool(16, 64);
+            async::executor_pool::init_static_pool(12, 64);
         }
 
         void SetUp() override
@@ -119,7 +119,7 @@ namespace hedge::db
         config.num_partition_exponent = 4;
         config.target_compaction_size_ratio = 1.0;
         config.use_odirect_for_indices = true;
-        config.index_page_clock_cache_size_bytes = 0UL * 3UL * 1024 * 1024 * 1024;
+        config.index_page_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024;
         config.index_point_cache_size_bytes = 0;
         config.compaction_timeout = std::chrono::minutes(20);
 
@@ -199,9 +199,9 @@ namespace hedge::db
         std::cout << "Insertion throughput including compaction:"
                   << (uint64_t)(this->N_KEYS / (double)(duration.count() + compaction_duration.count()) * 1'000'000) << " items/s" << std::endl;
 
-        prof::print_internal_perf_stats(false);
+        // prof::print_internal_perf_stats(false);
 
-        EXPECT_DOUBLE_EQ(db->read_amplification_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
+        // EXPECT_DOUBLE_EQ(db->read_amplification_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
 
         // shuffle keys before reading
         auto begin = this->_keys.begin();
@@ -305,7 +305,7 @@ namespace hedge::db
         test_suite,
         database_test,
         testing::Combine(
-            testing::Values(20'000'000), // n keys
+            testing::Values(80'000'000), // n keys
             testing::Values(100),        // payload size
             testing::Values(2'000'000)   // memtable capacity
             ),

@@ -54,7 +54,6 @@ namespace hedge::async
         if(!ok)
         {
             std::lock_guard lk(this->_queue_m);
-
             this->_job_queue.emplace_back(std::move(job));
         }
     }
@@ -82,6 +81,14 @@ namespace hedge::async
         {
             std::deque<job_t> fetched_tasks;
 
+            // Fetch from deque
+            {
+                std::unique_lock lk(this->_queue_m);
+
+                while(!this->_job_queue.empty())
+                    fetched_tasks.emplace_back(pop_front(this->_job_queue));
+            }
+
             // Fetch from fast queue
             std::optional<job_t> job_from_fast_queue;
             while(true)
@@ -94,14 +101,6 @@ namespace hedge::async
                 fetched_tasks.emplace_back(std::move(job_from_fast_queue.value()));
             }
 
-            // Fetch from deque
-            {
-                std::unique_lock lk(this->_queue_m);
-
-                while(!this->_job_queue.empty())
-                    fetched_tasks.emplace_back(pop_front(this->_job_queue));
-            }
-
             while(!fetched_tasks.empty())
             {
                 pop_front(fetched_tasks)();
@@ -110,7 +109,7 @@ namespace hedge::async
             }
 
             while(this->_job_count.load(std::memory_order::relaxed) == 0 && this->_running)
-                std::this_thread::yield();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
             {
                 std::unique_lock lk(this->_queue_m);

@@ -51,7 +51,7 @@ namespace hedge::db
     struct block_config
     {
         size_t block_size_in_bytes{PAGE_SIZE_IN_BYTES};
-        size_t restart_group_size{16}; // Use power of 2
+        size_t restart_group_size{4}; // Use power of 2
     };
 
     struct block_footer

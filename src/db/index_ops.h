@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 
+#include "async/io_executor.h"
 #include "cache.h"
 #include "key.h"
 #include "memtable.h"
@@ -86,7 +87,7 @@ namespace hedge::db
         static hedge::expected<sst> save_as_sorted_index2(
             const std::filesystem::path& path,
             page_aligned_buffer<index_entry2_t>&& sorted_keys,
-            size_t average_key_length,
+            size_t average_key_value_length,
             size_t upper_bound,
             size_t epoch,
             const std::shared_ptr<db::sharded_page_cache>& cache,
@@ -100,11 +101,29 @@ namespace hedge::db
                                                                           bool use_odirect = false);
 
         static hedge::expected<std::vector<sst>> flush_mem_index2(const std::filesystem::path& base_path,
-                                                                  memtable_impl2_t* index,
+                                                                  memtable_impl3_t* index,
                                                                   size_t num_partition_exponent,
                                                                   size_t flush_iteration,
                                                                   const std::shared_ptr<db::sharded_page_cache>& cache,
                                                                   bool use_odirect = false);
+
+        struct partition_range
+        {
+            size_t partition_id;
+            skiplist_t::Accessor::iterator begin;
+            skiplist_t::Accessor::iterator end;
+            size_t count;
+            size_t sum_key_value_lengths;
+        };
+
+        static hedge::expected<std::vector<sst>> flush_mem_index2_parallel(
+            const std::filesystem::path& base_path,
+            memtable_impl3_t* index,
+            size_t num_partition_exponent,
+            size_t flush_iteration,
+            const std::shared_ptr<db::sharded_page_cache>& cache,
+            bool use_odirect,
+            const std::vector<std::shared_ptr<async::executor_context>>& executor_pool);
 
         struct merge_config
         {

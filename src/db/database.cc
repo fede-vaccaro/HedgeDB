@@ -11,6 +11,7 @@
 #include <utility>
 
 #include <error.hpp>
+#include <variant>
 
 #include "async/wait_group.h"
 #include "cache.h"
@@ -68,6 +69,7 @@ namespace hedge::db
                 .auto_compaction = config.auto_compaction,
                 .use_odirect = config.use_odirect_for_indices,
                 .num_writer_threads = async::executor_pool::static_pool().size(),
+                .flush_io_workers = config.flush_io_workers,
             },
             config.num_partition_exponent,
             db->_indices_path,
@@ -147,6 +149,12 @@ namespace hedge::db
     {
         // prof::counter_guard guard(prof::get<"put_async">());
 
+        if(value.size() < 512)
+        {
+            this->_memtable.put(key, value, hedge::value_type::IN_PLACE_VALUE);
+            co_return hedge::ok();
+        }
+
         // --- Try writing value to buffer first ---
         auto _allocate_space_for_write_buffer = [this](thread_write_buffer& write_buffer) -> hedge::status
         {
@@ -203,7 +211,7 @@ namespace hedge::db
         }
 
         // --- Update Memtable ---
-        this->_memtable.put(key, maybe_write.value());
+        this->_memtable.put(key, maybe_write.value(), hedge::value_type::VALUE_PTR);
 
         co_return hedge::ok();
     }
@@ -213,15 +221,15 @@ namespace hedge::db
     //     co_return co_await this->put_async(key, value, executor);
     // }
 
-    async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> database::_find_value_ptr_and_value_table(const key_t& key)
+    async::task<expected<value_t>> database::_find_value(const key_t& key)
     {
         // Step 1: Check the memtable first (contains the most recent data).
-        std::optional<value_ptr_t> value_ptr_opt;
+        std::optional<value_t> value_opt;
 
-        value_ptr_opt = this->_memtable.get(key);
+        value_opt = this->_memtable.get(key);
 
         // Step 2: If not found in memtable and cache, search the relevant sorted index files.
-        if(!value_ptr_opt.has_value())
+        if(!value_opt.has_value())
         {
             size_t matching_partition_id = this->_find_matching_partition_for_key(key);
             std::vector<sst_ptr_t> sorted_indices_local; // Local copy for safe iteration
@@ -236,61 +244,74 @@ namespace hedge::db
                 sorted_indices_local = sorted_indices_it->second;
             }
 
-             // Note: we are iterating in reverse order to check the newest indices first, as they are more likely to contain the key due to temporal locality.
+            // Note: we are iterating in reverse order to check the newest indices first, as they are more likely to contain the key due to temporal locality.
 
             // Indices are sorted by epoch: newest (and most recent key first)
             // TODO: Add bloom filter support to skip unnecessary lookups.
             for(const auto& sorted_index_ptr : std::ranges::reverse_view(sorted_indices_local))
             {
                 auto maybe_value_ptr = co_await sorted_index_ptr->lookup_async(key, this->_page_cache);
-                if(!maybe_value_ptr.has_value())
+                if(!maybe_value_ptr.has_value() && maybe_value_ptr.error().code() != errc::KEY_NOT_FOUND)
                     co_return hedge::error(std::format("An error occurred while reading index at path {}: {}", sorted_index_ptr->path().string(), maybe_value_ptr.error().to_string()));
 
-                if(auto& opt_value_ptr = maybe_value_ptr.value(); opt_value_ptr.has_value())
+                if(maybe_value_ptr.has_value())
                 {
-                    value_ptr_opt = opt_value_ptr.value();
-                    break; // Found the key in this index, no need to check older indices
+                    if(std::holds_alternative<tombstone_t>(maybe_value_ptr.value()))
+                    {
+                        value_opt = tombstone_t{};
+                        break;
+                    }
+                    value_opt = maybe_value_ptr.value();
+                    break;
                 }
             }
         }
 
-        if(!value_ptr_opt.has_value())
+        if(!value_opt.has_value())
             co_return hedge::error("Key not found", errc::KEY_NOT_FOUND);
 
-        if(value_ptr_opt.value().is_deleted())
-            co_return hedge::error("Key deleted from index", errc::DELETED);
+        co_return std::move(value_opt.value());
+    }
 
-        // Step 4: Find the corresponding value table based on the table ID in the value pointer.
-        auto table_finder = [this](uint32_t id) -> std::shared_ptr<value_table>
+    std::shared_ptr<value_table> database::_find_value_table_by_id(uint32_t id)
+    {
+        if(this->_current_value_table.load(std::memory_order::relaxed)->id() == id)
+            return this->_current_value_table;
+
         {
-            if(this->_current_value_table.load(std::memory_order::relaxed)->id() == id)
-                return this->_current_value_table;
-
-            {
-                std::shared_lock lk(this->_value_tables_mutex);
-                auto it = this->_value_tables.find(id);
-                if(it != this->_value_tables.end())
-                    return it->second;
-            }
-            return nullptr;
-        };
-
-        // Get the table pointer using the finder lambda.
-        std::shared_ptr<value_table> table_ptr = table_finder(value_ptr_opt->table_id());
-        if(table_ptr == nullptr)
-            co_return hedge::error("Value table with ID " + std::to_string(value_ptr_opt->table_id()) + " not found");
-
-        co_return {value_ptr_opt.value(), std::move(table_ptr)};
+            std::shared_lock lk(this->_value_tables_mutex);
+            auto it = this->_value_tables.find(id);
+            if(it != this->_value_tables.end())
+                return it->second;
+        }
+        return nullptr;
     }
 
     async::task<expected<database::byte_buffer_t>> database::get_async(const key_t& key)
     {
-        auto maybe_value_ptr_table = co_await this->_find_value_ptr_and_value_table(key);
+        auto maybe_value = co_await this->_find_value(key);
 
-        if(!maybe_value_ptr_table)
-            co_return maybe_value_ptr_table.error();
+        if(!maybe_value)
+            co_return maybe_value.error();
 
-        auto [value_ptr, table_ptr] = std::move(maybe_value_ptr_table.value());
+        auto value = std::move(maybe_value.value());
+
+        if(std::holds_alternative<std::vector<uint8_t>>(value))
+        {
+            co_return std::move(std::get<std::vector<uint8_t>>(value));
+        }
+
+        if(std::holds_alternative<tombstone_t>(value))
+        {
+            co_return hedge::error("Key is deleted", errc::DELETED);
+        }
+
+        if(!std::holds_alternative<value_ptr_t>(value))
+            co_return hedge::error("Invalid value type found for key");
+
+        const auto& value_ptr = std::get<value_ptr_t>(value);
+
+        auto table_ptr = this->_find_value_table_by_id(value_ptr.table_id());
 
         // Try reading from write_buffer
         for(auto& write_buf : this->_write_buffers)
@@ -323,25 +344,9 @@ namespace hedge::db
         return matching_partition_id;
     }
 
-    async::task<hedge::status> database::remove_async(const key_t& key)
+    async::task<hedge::status> database::remove_async(const key_t& /* key */)
     {
-        // First, locate the latest version of the key (value_ptr and its table).
-        // This is necessary to potentially mark the entry deleted in the value log itself (if not already handled by GC).
-        auto maybe_value_ptr_table = co_await this->_find_value_ptr_and_value_table(key);
-
-        // TODO: We might want to allow deleting non-existing keys (idempotent delete)
-        // and completely skip the lookup. This will create some overhead in the memtable
-        // bu7t should not be inconsistent
-        if(!maybe_value_ptr_table)
-            co_return maybe_value_ptr_table.error();
-
-        auto [value_ptr, table_ptr] = std::move(maybe_value_ptr_table.value());
-
-        // TODO: As written above, we might want to allow deleting non-existing keys
-        // Hence, we might want to always run this step
-        this->_memtable.put(key, value_ptr_t::apply_delete(value_ptr));
-
-        co_return hedge::ok();
+        co_return hedge::error("remove_async not implemented yet");
     }
 
     hedge::expected<std::shared_ptr<value_table>> database::_rotate_value_table(std::shared_ptr<value_table> rotating)
@@ -405,7 +410,7 @@ namespace hedge::db
 
     hedge::expected<size_t> database::_compaction_job(bool ignore_size_ratio)
     {
-        this->_logger.log("Starting compaction job");
+        // this->_logger.log("Starting compaction job");
 
         sorted_indices_map_t indices_local_copy;
 
@@ -431,10 +436,12 @@ namespace hedge::db
 
         wg->set(indices_local_copy.size()); // One task per partition
 
+        auto iteration_id = this->_flush_iteration.fetch_add(1, std::memory_order::relaxed);
+
         auto make_compaction_sub_task = [this,
                                          &total_bytes_written,
                                          &errors,
-                                         this_iteration_id = this->_flush_iteration.fetch_add(1)](
+                                         iteration_id](
                                             size_t indices_to_merge,
                                             std::vector<sst_ptr_t>& ordered_indices_vec,
                                             std::shared_ptr<async::wait_group> wg) -> async::task<void>
@@ -442,11 +449,11 @@ namespace hedge::db
             // set lower priority for thread
             auto merge_config = hedge::db::index_ops::merge_config{
                 .read_ahead_size = this->_config.compaction_read_ahead_size_bytes,
-                .new_index_id = this_iteration_id,
+                .new_index_id = iteration_id,
                 .base_path = this->_indices_path,
                 .discard_deleted_keys = false,
                 .create_new_with_odirect = this->_config.use_odirect_for_indices,
-                .populate_cache_with_output = true,
+                .populate_cache_with_output = false,
                 .try_reading_from_cache = true,
             };
 
@@ -464,7 +471,7 @@ namespace hedge::db
 
             if(!maybe_compacted_table)
             {
-                errors.emplace_back(std::format("An error occurred on compaction: {}", errors.front().to_string()));
+                errors.emplace_back(std::format("An error occurred on compaction: {}", maybe_compacted_table.error().to_string()));
             }
             else
             {
@@ -625,7 +632,7 @@ namespace hedge::db
             }
         }
 
-        this->_logger.log("Compaction job completed successfully");
+        // this->_logger.log("Compaction job completed successfully");
 
         return total_bytes_written.load();
     }
@@ -665,7 +672,7 @@ namespace hedge::db
                 promise->set_value(std::move(maybe_bytes_written));
             });
 
-        this->_logger.log("Compaction job submitted to background worker.");
+        // this->_logger.log("Compaction job submitted to background worker.");
 
         return compaction_future;
     }

@@ -19,6 +19,8 @@
 #include "db/index_ops.h"
 #include "db/memtable.h"
 #include "db/sst.h"
+#include "single_buffer_arena_allocator.h"
+#include "types.h"
 #include "utils.h"
 
 namespace
@@ -36,8 +38,8 @@ namespace
     }
 } // namespace
 
-// Parameters: <N_KEYS_PER_RUN, N_RUNS, NUM_PARTITION_EXPONENT, READ_AHEAD_SIZE, USE_CACHE>
-class merge_test_suite : public ::testing::TestWithParam<std::tuple<size_t, size_t, size_t, size_t, bool>>
+// Parameters: <N_KEYS_PER_RUN, N_RUNS, NUM_PARTITION_EXPONENT, READ_AHEAD_SIZE, USE_CACHE, VALUE_TYPE>
+class merge_test_suite : public ::testing::TestWithParam<std::tuple<size_t, size_t, size_t, size_t, bool, hedge::value_type>>
 {
 public:
     void SetUp() override
@@ -47,6 +49,7 @@ public:
         this->NUM_PARTITION_EXPONENT = std::get<2>(GetParam());
         this->READ_AHEAD_SIZE = std::get<3>(GetParam());
         this->USE_CACHE = std::get<4>(GetParam());
+        this->VALUE_TYPE = std::get<5>(GetParam());
 
         // Skip if too few keys for partitions (avoid empty partitions effectively)
         if(this->NUM_PARTITION_EXPONENT > 0 && this->N_KEYS_PER_RUN < (1ULL << this->NUM_PARTITION_EXPONENT))
@@ -94,6 +97,82 @@ public:
         return k;
     }
 
+    static void generate_inline_value(std::span<uint8_t> buffer, size_t seed)
+    {
+        assert(buffer.size() == TEST_VALUE_SIZE);
+        seed = seed * 31 + 17; // Simple LCG for deterministic pseudo-random generation
+        auto byte_seed = static_cast<uint8_t>(seed & 0xFF);
+        std::ranges::for_each(
+            buffer,
+            [&](uint8_t& byte)
+            {
+                byte = byte_seed;
+                byte_seed = byte_seed * 31 + 17; // Update seed for next byte
+            });
+    }
+
+    static void generate_value_ptr(std::span<uint8_t> buffer, size_t seed)
+    {
+        assert(buffer.size() == sizeof(hedge::value_ptr_t));
+        hedge::value_ptr_t vp(static_cast<uint64_t>(seed), 100, 0);
+        std::memcpy(buffer.data(), &vp, sizeof(vp)); // Write the value_ptr_t into the buffer
+    }
+
+    std::span<uint8_t> generate_value(hedge::single_buffer_arena_allocator& arena, size_t seed, hedge::value_type type)
+    {
+        std::span<uint8_t> buffer;
+
+        switch(type)
+        {
+            case hedge::value_type::VALUE_PTR:
+                buffer = arena.allocate(sizeof(hedge::value_ptr_t) + 1);
+                assert(!buffer.empty());
+                buffer[0] = static_cast<uint8_t>(hedge::value_type::VALUE_PTR);
+                generate_value_ptr(buffer.subspan(1), seed);
+                break;
+            case hedge::value_type::IN_PLACE_VALUE:
+                buffer = arena.allocate(TEST_VALUE_SIZE + 1);
+                assert(!buffer.empty());
+                buffer[0] = static_cast<uint8_t>(hedge::value_type::IN_PLACE_VALUE);
+                generate_inline_value(buffer.subspan(1), seed);
+                break;
+            case hedge::value_type::TOMBSTONE:
+                buffer = arena.allocate(1);
+                assert(!buffer.empty());
+                buffer[0] = static_cast<uint8_t>(hedge::value_type::TOMBSTONE);
+                break;
+            default:
+                throw std::invalid_argument("Invalid value type: " + std::to_string(static_cast<int>(type)));
+        }
+
+        return buffer;
+    }
+
+    bool check_returned_payload(const hedge::value_t& value, size_t seed)
+    {
+        bool match =
+            std::visit(hedge::overloaded{
+                           [seed](const hedge::value_ptr_t& v) -> bool
+                           {
+                               hedge::value_ptr_t groundtruth{};
+                               generate_value_ptr(std::span<uint8_t>{reinterpret_cast<uint8_t*>(&groundtruth), sizeof(groundtruth)}, seed);
+                               return groundtruth == v;
+                           },
+                           [seed](const std::vector<uint8_t>& v) -> bool
+                           {
+                               std::vector<uint8_t> groundtruth(TEST_VALUE_SIZE);
+                               generate_inline_value(groundtruth, seed);
+                               return std::equal(groundtruth.begin(), groundtruth.end(), v.begin());
+                           },
+                           [](const hedge::tombstone_t& /*v*/) -> bool
+                           {
+                               return true;
+                           },
+                       },
+                       value);
+        return match;
+    }
+
     std::string _base_path = "/tmp/hh/test_merge_suite";
     std::shared_ptr<hedge::async::executor_context> _executor{};
     std::shared_ptr<hedge::db::sharded_page_cache> _cache{};
@@ -103,11 +182,16 @@ public:
     size_t NUM_PARTITION_EXPONENT;
     size_t READ_AHEAD_SIZE;
     bool USE_CACHE;
+    hedge::value_type VALUE_TYPE = hedge::value_type::UNDEFINED;
+
+    static constexpr size_t TEST_VALUE_SIZE = 100;
 
     size_t seed{107279581};
     std::mt19937 generator{seed};
     std::uniform_int_distribution<uint8_t> dist{0, 255};
     std::uniform_int_distribution<size_t> len_dist{64, 128};
+
+    hedge::single_buffer_arena_allocator arena{1024 * 1024 * 512};
 
     void run_merge_test(bool variable_keys) // NOLINT(readability-function-cognitive-complexity)
     {
@@ -128,7 +212,7 @@ public:
 
         for(size_t run_idx = 0; run_idx < N_RUNS; ++run_idx)
         {
-            auto memtable = hedge::db::memtable_impl2_t{};
+            auto memtable = hedge::db::memtable_impl3_t{1024 * 1024 * 128};
             auto& keys = all_keys_per_run[run_idx];
             keys.reserve(N_KEYS_PER_RUN);
 
@@ -136,8 +220,9 @@ public:
             {
                 auto key = variable_keys ? generate_key(len_dist(generator)) : generate_key(16);
                 keys.push_back(key);
-                // Value: run_idx * 1M + i (to be unique enough for verification)
-                memtable.insert(key, {static_cast<uint64_t>((run_idx * 1000000) + i), 100, 0});
+                size_t value_seed = (run_idx * 1000000) + i;
+                auto buffer = generate_value(arena, value_seed, VALUE_TYPE);
+                memtable.insert(key, buffer);
             }
 
             auto res = hedge::db::index_ops::flush_mem_index2(
@@ -231,7 +316,7 @@ public:
 
         size_t partition_key_prefix_range = (1 << 16) / (1 << NUM_PARTITION_EXPONENT);
 
-        auto lookup_func = [&](const hedge::key_t& key, uint64_t expected_val_offset) -> hedge::async::task<void>
+        auto lookup_func = [&](const hedge::key_t& key, uint64_t value_seed) -> hedge::async::task<void>
         {
             size_t partition_id = hedge::find_partition_prefix_for_key(key, partition_key_prefix_range);
             auto it = merged_sst_map.find(partition_id);
@@ -239,17 +324,21 @@ public:
             if(it != merged_sst_map.end())
             {
                 auto res = co_await it->second->lookup_async(key, _cache);
-                if(res.has_value() && res.value().has_value())
-                {
-                    if(res.value().value().offset() == expected_val_offset)
-                        found_count.fetch_add(1);
-                    else
-                        std::cerr << "Value mismatch for key " << to_hex_string(key) << "\n";
-                }
-
-                if(res.has_error())
+                if(!res.has_value())
                 {
                     std::cerr << "Lookup error for key " << to_hex_string(key) << ": " << res.error().to_string() << "\n";
+                }
+                else
+                {
+                    auto val = std::move(res.value());
+                    if(check_returned_payload(val, value_seed))
+                    {
+                        found_count.fetch_add(1);
+                    }
+                    else
+                    {
+                        std::cerr << "Value mismatch for key " << to_hex_string(key) << "\n";
+                    }
                 }
             }
             query_wg->decr();
@@ -260,8 +349,8 @@ public:
             for(size_t i = 0; i < N_KEYS_PER_RUN; ++i)
             {
                 const auto& key = all_keys_per_run[run_idx][i];
-                uint64_t expected_val = (run_idx * 1000000) + i;
-                _executor->submit_io_task(lookup_func(key, expected_val));
+                uint64_t expected_val_seed = (run_idx * 1000000) + i;
+                _executor->submit_io_task(lookup_func(key, expected_val_seed));
             }
         }
 
@@ -284,11 +373,12 @@ INSTANTIATE_TEST_SUITE_P(
     MergeTests,
     merge_test_suite,
     testing::Combine(
-        testing::Values(10'000, 100'000, 1'000'000), // N_KEYS_PER_RUN
-        testing::Values(2, 3, 4),                    // N_RUNS
-        testing::Values(0, 1, 2, 4),                 // NUM_PARTITION_EXPONENT
-        testing::Values(4096, 65536),                // READ_AHEAD_SIZE
-        testing::Bool()                              // USE_CACHE
+        testing::Values(10'000, 100'000, 500'000),                                       // N_KEYS_PER_RUN
+        testing::Values(2, 4),                                                           // N_RUNS
+        testing::Values(0, 1, 2, 4),                                                     // NUM_PARTITION_EXPONENT
+        testing::Values(4096, 65536),                                                    // READ_AHEAD_SIZE
+        testing::Bool(),                                                                 // USE_CACHE
+        testing::Values(hedge::value_type::VALUE_PTR, hedge::value_type::IN_PLACE_VALUE) // VALUE_TYPE
         ),
     [](const testing::TestParamInfo<merge_test_suite::ParamType>& info)
     {
@@ -297,7 +387,9 @@ INSTANTIATE_TEST_SUITE_P(
         auto part = std::get<2>(info.param);
         auto ra = std::get<3>(info.param);
         auto cache = std::get<4>(info.param);
+        auto value_type = std::get<5>(info.param);
         std::stringstream ss;
         ss << "Keys" << keys << "_Runs" << runs << "_PartExp" << part << "_RA" << ra << "_Cache" << (cache ? "On" : "Off");
+        ss << (value_type == hedge::value_type::VALUE_PTR ? "_V_PTR" : "_V_INPLACE");
         return ss.str();
     });

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -75,7 +76,8 @@ namespace hedge::db
     {
         friend class PageCacheTest;
 
-        async::rw_spinlock _m{};
+        std::shared_mutex _m{};
+        // async::rw_spinlock _m{};
         std::atomic_size_t _clock_hand{};
         size_t _max_page_capacity{};
 
@@ -85,7 +87,7 @@ namespace hedge::db
             async::spinlock waiters_mutex{};
 
             using coro_frame_t = std::pair<async::task<>, std::coroutine_handle<>>;
-            std::vector<coro_frame_t> waiters{}; // root task and this continuation
+            std::list<coro_frame_t> waiters{}; // root task and this continuation
             page_tag key{};
         };
 
@@ -149,9 +151,14 @@ namespace hedge::db
         {
             read_page_guard pg;
 
-            [[nodiscard]] bool await_ready() const noexcept
+            bool ready() const noexcept
             {
                 return (pg._frame->flags.load() & PAGE_FLAG_READY) != 0UL;
+            }
+
+            [[nodiscard]] bool await_ready() const noexcept
+            {
+                return this->ready();
             }
 
             template <typename PROMISE_TYPE>
@@ -182,6 +189,8 @@ namespace hedge::db
         };
 
         write_page_guard get_write_slot(page_tag page);
+        std::optional<write_page_guard> try_get_write_slot(page_tag page);
+
         std::optional<awaitable_page_guard> lookup(page_tag page, bool hint_evict = false);
         std::optional<awaitable_page_guard> try_lookup(page_tag page, bool hint_evict = false);
 
@@ -215,10 +224,22 @@ namespace hedge::db
             return this->_caches.get()[hash].get_write_slot(page);
         }
 
+        std::optional<page_cache::write_page_guard> try_get_write_slot(page_tag page)
+        {
+            size_t hash = std::hash<page_tag>{}(page) % this->_num_caches;
+            return this->_caches.get()[hash].try_get_write_slot(page);
+        }
+
         std::optional<page_cache::awaitable_page_guard> lookup(page_tag page)
         {
             size_t hash = std::hash<page_tag>{}(page) % this->_num_caches;
             return this->_caches.get()[hash].lookup(page);
+        }
+
+        std::optional<page_cache::awaitable_page_guard> try_lookup(page_tag page, bool hint_evict = false)
+        {
+            size_t hash = std::hash<page_tag>{}(page) % this->_num_caches;
+            return this->_caches.get()[hash].try_lookup(page, hint_evict);
         }
 
         ~sharded_page_cache()

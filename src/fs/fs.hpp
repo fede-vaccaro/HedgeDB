@@ -112,6 +112,8 @@ namespace hedge::fs
 
             int fd = open(path.c_str(), flag, 0777); // NOLINT
 
+            // std::cout << "Opened file " << path.string() << " with fd " << fd << "\n";
+
             if(fd == -1)
             {
                 auto err = std::string(strerror(errno));
@@ -168,7 +170,7 @@ namespace hedge::fs
             if(!stats.exists && mode == open_mode::read_only)
                 co_return hedge::error("File does not exist: " + path.string());
 
-            if(stats.exists && mode == open_mode::write_new)
+            if(stats.exists && (mode == open_mode::write_new || mode == open_mode::read_write_new))
                 co_return hedge::error("File already exists: " + path.string());
 
             // Open the file;
@@ -186,7 +188,7 @@ namespace hedge::fs
 
             int fd = open_retvalue.file_descriptor;
 
-            size_t file_size = stats.file_size;
+            size_t file_size = stats.exists ? stats.file_size : expected_size.value_or(0);
 
             if(expected_size.has_value())
             {

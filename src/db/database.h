@@ -45,7 +45,7 @@ namespace hedge::db
         /// Higher target_compaction_size_ratio means less frequent compactions (lower write amplification) but higher read amplification (more data read during compaction).
         double target_compaction_size_ratio = 0.2;
         /// Amount of data read ahead from each sorted_index file during compaction merges.
-        size_t compaction_read_ahead_size_bytes = 16384;
+        size_t compaction_read_ahead_size_bytes = 4 * 1024 * 1024;
         /// Maximum time to wait for a compaction job (currently for sub-tasks within the job) before timing out.
         std::chrono::milliseconds compaction_timeout{120000};
         /// If true, compaction is automatically triggered when the memtable is flushed and merge conditions are met.
@@ -55,11 +55,13 @@ namespace hedge::db
         /// If true, use O_DIRECT flag for sorted_index file I/O to bypass
         bool use_odirect_for_indices = true;
         /// Use 0 no cache is desired; the cache size in bytes otherwise
-        size_t index_page_clock_cache_size_bytes = 1UL * 1024 * 1024 * 1024;
+        size_t index_page_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024;
         /// Experimental; it's like a giant memtable; do not use
         size_t index_point_cache_size_bytes = 0;
         /// Number of background workers to be used for compaction
         size_t compaction_io_workers = 4;
+        /// Number of io_uring executor threads for parallel memtable flush
+        size_t flush_io_workers = 4;
     };
 
     /**
@@ -266,7 +268,9 @@ namespace hedge::db
          * @param executor The I/O executor for potential sorted_index lookups.
          * @return An async task resolving to an expected containing the pair {value_ptr, value_table_ptr} or an error (e.g., KEY_NOT_FOUND, DELETED).
          */
-        async::task<expected<std::pair<value_ptr_t, std::shared_ptr<value_table>>>> _find_value_ptr_and_value_table(const key_t& key);
+        async::task<expected<value_t>> _find_value(const key_t& key);
+
+        std::shared_ptr<value_table> _find_value_table_by_id(uint32_t id);
 
         static std::function<void(std::vector<sst>)> make_push_indices_callback(const std::shared_ptr<database>& db);
         static std::function<void()> make_compaction_callback(const std::shared_ptr<database>& db);

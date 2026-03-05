@@ -422,6 +422,24 @@ namespace hedge::async
         {
             auto new_executor = executor_context::make_new(queue_depth);
 
+            auto set_affinity = [](int32_t tid) -> async::task<int32_t>
+            {
+                cpu_set_t cpuset;
+                CPU_ZERO(&cpuset);
+                CPU_SET(tid, &cpuset);
+
+                pthread_t thread_id = pthread_self();
+                int result = pthread_setaffinity_np(thread_id, sizeof(cpu_set_t), &cpuset);
+                if(result != 0)
+                {
+                    std::cerr << "Failed to set thread affinity: " << strerror(result) << std::endl;
+                    throw std::runtime_error("Failed to set thread affinity: " + std::string(strerror(result)));
+                }
+                co_return 0;
+            };
+
+            new_executor->sync_submit(set_affinity(i));
+
             this->_executors.emplace_back(std::move(new_executor));
         }
     }

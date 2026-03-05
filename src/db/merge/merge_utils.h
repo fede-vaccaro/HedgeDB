@@ -214,37 +214,35 @@ namespace hedge::db
         }
     };
 
+    using value_buffer_t = hedge::key<>;
+
+    struct merge_entry_t
+    {
+        key_t key;
+        value_buffer_t value;
+    };
+
     class merge_iterator2
     {
-        std::optional<index_entry2_t> _to_be_checked_item{}; ///< Holds the current lowest-priority candidate for the ongoing key group.
-        std::optional<index_entry2_t> _ready_item{};         ///< Holds the finalized item from the *previous* key group, ready to be emitted.
+        std::optional<merge_entry_t> _to_be_checked_item{};
+        std::optional<merge_entry_t> _ready_item{};
 
     public:
-        /** @brief Default constructor. Initializes with empty state. */
         merge_iterator2() = default;
 
-        /**
-         * @brief Pushes a new item into the deduplicator, updating state based on key comparison.
-         * @param new_item The next `index_entry_t` from the merged input stream.
-         */
-        void push(const index_entry2_t& new_item)
+        void push(merge_entry_t&& new_item)
         {
-            if(!this->_to_be_checked_item) // If this is the very first item pushed, just store it.
+            if(!this->_to_be_checked_item)
             {
-                this->_to_be_checked_item = new_item;
+                this->_to_be_checked_item = std::move(new_item);
             }
             else if(this->_to_be_checked_item->key != new_item.key) // If the new item's key is different from the buffered item's key...
             {
                 // ...it means the key group for `this->_to_be_checked_item` is complete.
                 // Move the completed item to `this->_ready_item` using std::exchange,
                 // and store the `new_item` as the start of the next potential key group.
-                this->_ready_item = std::exchange(this->_to_be_checked_item, new_item);
+                this->_ready_item = std::exchange(this->_to_be_checked_item, std::move(new_item));
             }
-            else if(new_item.value_ptr < this->_to_be_checked_item->value_ptr) // If the new item's key is the SAME as the buffered item's key...
-            {
-                this->_to_be_checked_item = new_item; // Keep the one with higher priority (lower value_ptr means higher priority/newer).
-            }
-            // else: new_item has same key but lower priority, so we discard it by doing nothing.
         }
 
         /**
@@ -256,15 +254,7 @@ namespace hedge::db
             return this->_ready_item.has_value();
         }
 
-        /**
-         * @brief Retrieves the last buffered item, intended for use only at the very end of the stream.
-         * @details This should only be called after processing all input and after checking/popping any `this->_ready_item`.
-         * It retrieves the item representing the final key group.
-         * @return The `index_entry_t` stored in `this->_to_be_checked_item`.
-         * @throws std::runtime_error If `this->_ready_item` still contains data (should have been popped)
-         * or if `this->_to_be_checked_item` is unexpectedly empty.
-         */
-        index_entry2_t force_pop()
+        merge_entry_t force_pop()
         {
             if(this->_ready_item.has_value()) // Ensure no item is waiting in the ready slot. In case, the ready item should be properly handled.
                 throw std::runtime_error("Ready item still present, cannot force_pop last buffered item");
@@ -272,15 +262,15 @@ namespace hedge::db
             if(!this->_to_be_checked_item.has_value()) // Ensure there is actually an item buffered.
                 throw std::runtime_error("No buffered item to force_pop");
 
-            return this->_to_be_checked_item.value();
+            return std::exchange(this->_to_be_checked_item, std::nullopt).value();
         }
 
         /**
          * @brief Retrieves the finalized item from the ready slot.
-         * @return The `index_entry_t` that was stored in `_ready_item`.
+         * @return The `merge_entry_t` that was stored in `_ready_item`.
          * @throws std::runtime_error If `ready()` is false (no item is ready to be popped).
          */
-        index_entry2_t pop()
+        merge_entry_t pop()
         {
             if(this->_ready_item.has_value())
                 return std::exchange(this->_ready_item, std::nullopt).value();

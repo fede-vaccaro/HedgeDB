@@ -107,6 +107,14 @@ set(IO_EXECUTOR_SRCS
 add_executable(executor_read_test ${IO_EXECUTOR_SRCS} src/executor_read_test.cc)
 target_link_libraries(executor_read_test uring tcmalloc)
 
+# skiplist_executor_test — benchmarks executor + skiplist insert without full DB machinery
+add_executable(skiplist_executor_test ${IO_EXECUTOR_SRCS} src/skiplist_executor_test.cc)
+target_link_libraries(skiplist_executor_test uring tcmalloc atomic)
+
+# memtable_perf_test — benchmarks executor + memtable::put() (adds rw_sync + value arenas)
+add_executable(memtable_perf_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/memtable_perf_test.cc)
+target_link_libraries(memtable_perf_test uring tcmalloc atomic)
+
 # executor tests
 add_executable(executor_test ${IO_EXECUTOR_SRCS} test/io_executor.spec.cc)
 target_link_libraries(executor_test uring gtest gtest_main)
@@ -118,6 +126,10 @@ target_link_libraries(index_test gtest gtest_main uring atomic)
 # index2 tests
 add_executable(index2_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index2.spec.cc)
 target_link_libraries(index2_test gtest gtest_main uring atomic)
+
+# parallel flush tests
+add_executable(index_test_parallel_flush ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_test.cc)
+target_link_libraries(index_test_parallel_flush gtest gtest_main uring atomic)
 
 # index (delete and merge) tests
 add_executable(index_delete_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_delete.spec.cc)
@@ -218,6 +230,15 @@ target_link_libraries(error_test gtest gtest_main)
 add_executable(rolling_buffer_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/rolling_buffer.spec.cc)
 target_link_libraries(rolling_buffer_test uring gtest gtest_main atomic)
 
+# single_buffer_arena_allocator tests
+add_executable(single_buffer_arena_allocator_test test/single_buffer_arena_allocator.spec.cc)
+target_link_libraries(single_buffer_arena_allocator_test gtest gtest_main)
+
+
 # debug test
 add_executable(index_merge ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_merge.spec.cc)
 target_link_libraries(index_merge gtest gtest_main uring atomic)
+
+# concurrent_skiplist tests
+add_executable(concurrent_skiplist_test test/concurrent_skiplist.spec.cc)
+target_link_libraries(concurrent_skiplist_test gtest gtest_main atomic tcmalloc)

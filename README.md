@@ -12,9 +12,9 @@ So far it is only Linux compatible as it heavily leverage [liburing](https://git
 
 ## Features & design principles
 
-- **I/O Determinism**: Using `O_DIRECT` bypasses the OS page cache to eliminate double-caching, giving your database engine predictable, fine-grained control over memory and disk I/O.
-
 - **Fiber-style job scheduling**: A brand new and custom `executor` has been implemented to provide an abstraction layer over the [liburing](https://github.com/axboe/liburing) for maximizing the available hardware IOPS capacity; C++20 coroutines and other concurrency facilities have been exploited to strees a modern NVMe SSD at full capacity, while keeping a more linear coding style, instead of unravel the typical callback jungle.
+
+- **Direct I/O**: Using `O_DIRECT` bypasses the OS page cache to eliminate double-caching, giving your database engine predictable, fine-grained control over memory and disk I/O.
 
 - **Log Structured Merge (LSM) Tree**: The index is basically a LSM Trees: the NVMEs are great at executing random scattered operations, but they nonetheless enjoy sequential workloads. Also, the LSM Tree-based index architecture has been proved to be flexible over different workload or even device (such as HDD) types.  
 

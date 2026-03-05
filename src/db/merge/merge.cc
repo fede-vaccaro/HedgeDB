@@ -73,6 +73,8 @@ namespace hedge::db
         if(!fd_maybe.has_value())
             co_return hedge::error("Failed to create file descriptor for merged index at " + new_path.string() + ": " + fd_maybe.error().to_string());
 
+        // std::cout << "Created file for merged index at " << new_path.string() << " with estimated size " << estimated_size << " bytes\n";
+
         auto output_file = std::move(fd_maybe.value());
 
         auto maybe_read_file = co_await fs::file::from_path_async(
@@ -121,7 +123,7 @@ namespace hedge::db
         {
             for(auto* it = rbufs_begin; it < rbufs_end; ++it)
             {
-                if((double)it->size() / (double)read_ahead_size < 0.15)
+                if((double)it->size() / (double)read_ahead_size < 0.35)
                 {
                     if(auto status = co_await it->refresh(config.try_reading_from_cache ? cache : nullptr); !status)
                         co_return hedge::error("Failed to read from buffer during buffer refresh: " + status.error().to_string());
@@ -154,7 +156,7 @@ namespace hedge::db
         merge_write_buffer write_buffer(read_ahead_size * 2);
 
         // Hot path: returns true if buffer is full and item was NOT written
-        auto try_push_kv = [&] [[nodiscard]] (const index_entry2_t& kv) -> bool
+        auto try_push_kv = [&] [[nodiscard]] (const merge_entry_t& kv) -> bool
         {
             auto s = write_buffer.write_item(kv, merged_meta_index, merged_meta_index_bytes);
             return (bool)s;
@@ -182,7 +184,7 @@ namespace hedge::db
         };
 
         // Cold path: flushes and retries writing the item
-        auto flush_and_retry = [&](const index_entry2_t& kv) -> async::task<hedge::status>
+        auto flush_and_retry = [&](const merge_entry_t& kv) -> async::task<hedge::status>
         {
             auto flush_result = co_await flush();
             if(!flush_result)
@@ -190,19 +192,19 @@ namespace hedge::db
 
             // Retry
             if(!try_push_kv(kv)) [[unlikely]]
-                co_return hedge::error(std::format("Could not flush item of size: k[{}]v[{}]", kv.key.size(), sizeof(kv.value_ptr)));
+                co_return hedge::error(std::format("Could not flush item of size: k[{}]v[{}]", kv.key.size(), 0)); // TODO: fix size using visitor
 
             co_return hedge::ok();
         };
 
         [[maybe_unused]] size_t iteration_count{0};
 
-        using heap_item_t = std::pair<index_entry2_t, rolling_buffer2*>; // Index entry + source buffer pointer
+        using heap_item_t = std::pair<merge_entry_t, rolling_buffer2*>; // Index entry + source buffer pointer
 
-        auto heap_item_t_comparator = [](const auto& lhs, const auto& rhs)
+        auto heap_item_t_comparator = [](const heap_item_t& lhs, const heap_item_t& rhs)
         {
             // Cpp heap is a max-heap by default, we need a min-heap
-            return !(lhs.first < rhs.first);
+            return !(lhs.first.key < rhs.first.key);
         };
 
         std::vector<heap_item_t> key_heap;
@@ -220,14 +222,11 @@ namespace hedge::db
                         co_return hedge::error("Failed to refresh views: " + status.error().to_string());
                 }
 
-                index_entry2_t new_keypair;
-                new_keypair.key = rbuf->front().key();
-                std::optional<value_ptr_t> value_ptr_opt = value_ptr_t::try_from_span(rbuf->front().value());
+                merge_entry_t new_keypair{
+                    .key = rbuf->front().key(),
+                    .value = rbuf->front().value(),
+                };
 
-                if(!value_ptr_opt.has_value())
-                    co_return hedge::error("Failed to parse value_ptr from index entry during heap initialization");
-
-                new_keypair.value_ptr = value_ptr_opt.value();
                 rbuf->pop_front();
 
                 key_heap.emplace_back(std::move(new_keypair), rbuf);
@@ -242,10 +241,10 @@ namespace hedge::db
             // prof::counter_guard counter_guard{prof::get<"inner_merge_loop">()};
 
             std::ranges::pop_heap(key_heap, heap_item_t_comparator);
-            const auto& key_and_ref_buf = key_heap.back();
-            dedup.push(key_and_ref_buf.first);
-            auto* rbuf = key_and_ref_buf.second;
+            auto [keyvalue, rbuf] = std::move(key_heap.back());
             key_heap.pop_back();
+
+            dedup.push(std::move(keyvalue));
 
             if(!rbuf->is_eof()) [[likely]]
             {
@@ -256,14 +255,15 @@ namespace hedge::db
                         co_return hedge::error("Failed to refresh views: " + status.error().to_string());
                 }
 
-                index_entry2_t new_keypair;
-                new_keypair.key = rbuf->front().key();
-                std::optional<value_ptr_t> value_ptr_opt = value_ptr_t::try_from_span(rbuf->front().value());
+                auto maybe_value = value_from_span(rbuf->front().value());
+                if(!maybe_value.has_value())
+                    co_return hedge::error("Failed to parse value from index entry during heap initialization: " + maybe_value.error().to_string());
 
-                if(!value_ptr_opt.has_value())
-                    co_return hedge::error("Failed to parse value_ptr from index entry during heap initialization");
+                merge_entry_t new_keypair{
+                    .key = rbuf->front().key(),
+                    .value = rbuf->front().value(),
+                };
 
-                new_keypair.value_ptr = value_ptr_opt.value();
                 rbuf->pop_front();
 
                 key_heap.emplace_back(std::move(new_keypair), rbuf);
@@ -278,11 +278,11 @@ namespace hedge::db
                 // After popping from `dedup`, there is still one entry sitting there waiting to get checked against the next pushed one and thus getting ready
                 auto new_item = dedup.pop();
 
-                if(config.discard_deleted_keys && new_item.value_ptr.is_deleted())
-                {
-                    filtered_keys++;
-                    continue;
-                }
+                // if(config.discard_deleted_keys && new_item.value_ptr.is_deleted())
+                // {
+                // filtered_keys++;
+                // continue;
+                // }
 
                 if(!try_push_kv(new_item)) [[unlikely]]
                 {
@@ -305,25 +305,25 @@ namespace hedge::db
         // The deduplicator maintains a 1-item lag.
 
         // Handle remaining keys from the non exhausted-view
-        std::vector<index_entry2_t> last_items{};
+        std::vector<merge_entry_t> last_items{};
         last_items.reserve(2); // The deduplicator might contain up to two items
 
         // We enter this block ONLY IF the non_empty_view had at least one item left
         if(dedup.ready())
-            last_items.push_back(dedup.pop());
+            last_items.emplace_back(dedup.pop());
 
         // Empty the deduplicator buffer
-        last_items.push_back(dedup.force_pop());
+        last_items.emplace_back(dedup.force_pop());
 
         for(const auto& new_item : last_items)
         {
             assert(last_written_key < new_item.key);
 
-            if(config.discard_deleted_keys && new_item.value_ptr.is_deleted())
-            {
-                filtered_keys++;
-                continue;
-            }
+            // if(config.discard_deleted_keys && new_item.value_ptr.is_deleted())
+            // {
+            // filtered_keys++;
+            // continue;
+            // }
 
             if(!try_push_kv(new_item)) [[unlikely]]
             {

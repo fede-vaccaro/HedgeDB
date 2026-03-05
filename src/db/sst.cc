@@ -1,12 +1,10 @@
-#include "sst.h"
-#include "db/block.h"
-#include "key.h"
-#include "types.h"
-
 #include <cstdint>
 #include <cstring>
 #include <utility>
 
+#include "db/block.h"
+#include "sst.h"
+#include "types.h"
 namespace hedge::db
 {
 
@@ -15,11 +13,11 @@ namespace hedge::db
     {
     }
 
-    async::task<expected<std::optional<value_ptr_t>>> sst::lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache) const
+    async::task<expected<value_t>> sst::lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache) const
     {
         auto maybe_page_id = this->_find_page_id(key);
         if(!maybe_page_id)
-            co_return std::nullopt;
+            co_return hedge::error("", errc::KEY_NOT_FOUND);
 
         auto page_id = maybe_page_id.value();
 
@@ -42,10 +40,17 @@ namespace hedge::db
 
             if(maybe_page_guard.has_value())
             {
-                opt_page_guard = std::move(co_await maybe_page_guard.value());
-                page_ptr = opt_page_guard->data + opt_page_guard->offset;
-                prof::get<"cache_hits">().add(1);
-                prof::get<"lookup">().stop(false);
+                if(!maybe_page_guard->ready())
+                {
+                    should_read_from_fs = true;
+                }
+                else
+                {
+                    opt_page_guard = std::move(co_await maybe_page_guard.value());
+                    page_ptr = opt_page_guard->data + opt_page_guard->offset;
+                    prof::get<"cache_hits">().add(1);
+                    prof::get<"lookup">().stop(false);
+                }
 
                 // std::cout << "cache hit for fd " << this->fd() << " and file " << this->path() << " page offset " << page_start_offset << "\n";
 
@@ -63,16 +68,14 @@ namespace hedge::db
         if(!should_read_from_fs && !opt_page_guard.has_value())
         {
             should_read_from_fs = true;
-
-            prof::get<"get_slot">().start();
-            auto maybe_write_slot = cache->get_write_slot(page_tag);
-
-            opt_write_guard = std::move(maybe_write_slot);
-            page_ptr = opt_write_guard->data + opt_write_guard->idx;
-
-            prof::get<"get_slot">().stop();
-
             prof::get<"cache_hits">().add(0);
+
+            auto maybe_write_slot = cache->try_get_write_slot(page_tag);
+            if(maybe_write_slot.has_value())
+            {
+                opt_write_guard = std::move(maybe_write_slot);
+                page_ptr = opt_write_guard->data + opt_write_guard->idx;
+            }
         }
 
         if(should_read_from_fs)
@@ -101,7 +104,7 @@ namespace hedge::db
 
         prof::get<"find_in_page">().start();
         assert(page_id < this->_footer.meta_index_offset * PAGE_SIZE_IN_BYTES);
-        hedge::expected<std::optional<value_ptr_t>> res = sst::_find_in_page(key, page_ptr);
+        hedge::expected<value_t> res = sst::_find_in_page(key, page_ptr);
         prof::get<"find_in_page">().stop(should_read_from_fs);
 
         co_return res;
@@ -112,13 +115,20 @@ namespace hedge::db
         // TODO
     }
 
-    std::optional<value_ptr_t> sst::_find_in_page(const key_t& key, const uint8_t* page)
+    hedge::expected<value_t> sst::_find_in_page(const key_t& key, const uint8_t* page)
     {
         block_decoder reader(page);
 
         auto value = reader.find(key);
 
-        return value_ptr_t::try_from_span(value);
+        if(value.empty())
+            return hedge::error("", errc::KEY_NOT_FOUND);
+
+        auto value_result = value_from_span(value);
+        if(!value_result)
+            return value_result.error();
+
+        return value_result.value();
     }
 
     std::optional<size_t> sst::_find_page_id(const key_t& key) const

@@ -5,13 +5,12 @@
 #include "cache.h"
 #include "db/block.h"
 #include "db/index_ops.h"
+#include "db/merge/merge_utils.h"
 #include "error.hpp"
 #include "io_executor.h"
-#include "mailbox.h"
 #include "mailbox_impl.h"
 #include "page_aligned_buffer.h"
 #include "types.h"
-#include "utils.h"
 
 namespace hedge::db
 {
@@ -29,12 +28,12 @@ namespace hedge::db
         {
         }
 
-        hedge::status write_item(const index_entry2_t& kv,
+        hedge::status write_item(const merge_entry_t& kv,
                                  page_aligned_buffer<key_t>& merged_meta_index,
                                  page_aligned_buffer<uint8_t>& merged_meta_index_bytes)
         {
             auto s = this->_block_writer.push(
-                kv.key, kv.value_ptr,
+                kv.key, kv.value,
                 [&merged_meta_index, &merged_meta_index_bytes](const auto& last_pushed_key)
                 {
                     index_ops::append_meta_index_key(merged_meta_index_bytes, last_pushed_key);
@@ -66,7 +65,7 @@ namespace hedge::db
             return this->_indexed_kvs;
         }
 
-        async::awaitable_mailbox<async::write_response> flush(
+        async::task<async::write_response> flush(
             int32_t output_fd,
             uint32_t new_file_id, // NB: A File ID is not a File Descriptor
             size_t write_offset,
@@ -84,14 +83,15 @@ namespace hedge::db
                 .size = bytes_written,
                 .offset = write_offset});
 
-            // TODO: We might try yielding here to let the write request to be asynchronously processed
+            // Yielding has the purpose to allow the executor/io_uring to start processing the request while we reset the cache
+            co_await async::this_thread_executor()->yield();
 
             if(cache != nullptr)
                 this->_populate_cache(new_file_id, write_offset, bytes_written, cache);
 
             this->_block_writer.reset();
 
-            return awaitable_write_response;
+            co_return co_await awaitable_write_response;
         }
 
     private:

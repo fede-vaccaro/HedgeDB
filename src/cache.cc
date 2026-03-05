@@ -171,12 +171,42 @@ namespace hedge::db
 
                 frame_ptr->flags.fetch_or(PAGE_FLAG_RECENTLY_USED);
                 frame_ptr->flags.fetch_and(~PAGE_FLAG_READY); // unset ready flag
-                frame_ptr->waiters.reserve(4);
+                // frame_ptr->waiters.reserve(4);
                 frame_ptr->key = page;
             }
 
             return {this->_data.get(), idx * PAGE_SIZE_IN_BYTES, frame_ptr};
         }
+    }
+
+    std::optional<page_cache::write_page_guard> page_cache::try_get_write_slot(page_tag page)
+    {
+
+        size_t idx = this->_find_frame() % this->_max_page_capacity;
+        _metadata* frame_ptr = &this->_frames[idx];
+
+        {
+            std::unique_lock lk(this->_m, std::try_to_lock_t{});
+            if(!lk.owns_lock())
+                return std::nullopt;
+
+            // If refcount > 1, a reader pinned it between _find_frame and our lock.
+            if((frame_ptr->flags.load() & PAGE_FLAG_REFERENCE_COUNT_MASK) != 1)
+            {
+                frame_ptr->flags.fetch_sub(1);
+                return std::nullopt;
+            }
+
+            this->_lut.erase(frame_ptr->key);
+            this->_lut[page] = idx;
+
+            frame_ptr->flags.fetch_or(PAGE_FLAG_RECENTLY_USED);
+            frame_ptr->flags.fetch_and(~PAGE_FLAG_READY); // unset ready flag
+            // frame_ptr->waiters.reserve(4);
+            frame_ptr->key = page;
+        }
+
+        return std::optional{page_cache::write_page_guard{this->_data.get(), idx * PAGE_SIZE_IN_BYTES, frame_ptr}};
     }
 
     std::optional<page_cache::awaitable_page_guard> page_cache::lookup(page_tag page, bool hint_evict)
@@ -207,7 +237,10 @@ namespace hedge::db
         size_t idx = 0;
         _metadata* frame_ptr = nullptr;
         {
-            std::shared_lock lk(this->_m);
+            std::shared_lock lk(this->_m, std::try_to_lock);
+            if(!lk.owns_lock())
+                return std::nullopt;
+
             auto it = this->_lut.find(page);
             if(it == this->_lut.end())
                 return std::nullopt;

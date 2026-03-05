@@ -1,12 +1,14 @@
 #pragma once
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <sys/types.h>
 #include <uuid.h>
 
+#include "error.hpp"
 #include "key.h"
-
+#include "overloaded.h"
 namespace hedge
 {
 
@@ -196,11 +198,74 @@ namespace hedge
         bool operator==(const index_entry_t& other) const = default;
     };
 
+    struct tombstone_t
+    {
+    };
+
+    using value_t = std::variant<value_ptr_t, std::vector<uint8_t>, tombstone_t>;
+
+    static constexpr auto sizeof_value_t = sizeof(value_t);
+
+    enum class value_type : uint8_t
+    {
+        VALUE_PTR = 0,
+        IN_PLACE_VALUE = 1,
+        TOMBSTONE = 2,
+        UNDEFINED = 255,
+    };
+
+    inline hedge::expected<value_t> value_from_span(std::span<const uint8_t> span)
+    {
+        const auto type = static_cast<value_type>(*span.data());
+        switch(type)
+        {
+            case value_type::VALUE_PTR:
+            {
+                if(span.size() != 1 + sizeof(value_ptr_t))
+                    return hedge::error("Invalid span size for value_ptr_t");
+                value_ptr_t vp;
+                std::memcpy(&vp, span.data() + 1, sizeof(value_ptr_t));
+                return vp;
+            }
+            case value_type::IN_PLACE_VALUE:
+            {
+                return std::vector<uint8_t>(span.data() + 1, span.data() + span.size());
+            }
+            case value_type::TOMBSTONE:
+            {
+                if(span.size() != 1)
+                    return hedge::error("Invalid span size for tombstone_t");
+                return tombstone_t{};
+            }
+            default:
+                return hedge::error("Invalid value type");
+        }
+    }
+
+    inline std::span<const uint8_t> value_to_span(const value_t& value)
+    {
+        return std::visit(
+            overloaded{[](const value_ptr_t& vp) -> std::span<const uint8_t>
+                       {
+                           return std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(&vp), sizeof(value_ptr_t)};
+                       },
+                       [](const std::vector<uint8_t>& vec) -> std::span<const uint8_t>
+                       {
+                           return std::span<const uint8_t>{vec};
+                       },
+                       [](const tombstone_t&) -> std::span<const uint8_t>
+                       {
+                           static const auto tombstone_marker = static_cast<uint8_t>(value_type::TOMBSTONE);
+                           return std::span<const uint8_t>{&tombstone_marker, 1};
+                       }},
+            value);
+    }
+
     struct index_entry2_t
     {
 
-        key_t key{};             ///< The key (UUID).
-        value_ptr_t value_ptr{}; ///< The pointer to the value's location and status.
+        key_t key{};                      ///< The key (UUID).
+        std::span<const uint8_t> value{}; ///< The pointer to the value's location and status.
 
         ~index_entry2_t() = default;
 
@@ -216,7 +281,10 @@ namespace hedge
         }
 
         // Default comparison for equality (needed for some algorithms if used)
-        bool operator==(const index_entry2_t& other) const = default;
+        bool operator==(const index_entry2_t& other) const
+        {
+            return key == other.key && std::ranges::equal(value, other.value);
+        }
     };
 
     /** @brief Standard page size used for I/O operations (typically 4 KiB). */
