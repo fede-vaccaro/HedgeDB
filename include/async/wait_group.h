@@ -31,10 +31,14 @@ namespace hedge::async
         // TODO: make some wait_group_guard that automatically calls decr on destruction
         void decr()
         {
-            size_t c = this->_counter.fetch_sub(1, std::memory_order::seq_cst) - 1;
+            // acq_rel: the release ensures all work done before decr() is visible to the
+            // thread that observes c==0; the acquire chains with prior releases so that
+            // each decrement sees a consistent counter value.
+            // On x86 a LOCK RMW already implies a full barrier, so this is free.
+            size_t c = this->_counter.fetch_sub(1, std::memory_order::acq_rel) - 1;
             if(c == 0)
             {
-                this->_done.store(true, std::memory_order::seq_cst);
+                this->_done.store(true, std::memory_order::release);
                 this->_done.notify_all();
                 this->_cv.notify_all();
             }
@@ -45,7 +49,7 @@ namespace hedge::async
             // std::unique_lock lk(this->_mutex);
             // this->_cv.wait(lk, [this]()
             //    { return this->_done.load(std::memory_order::relaxed); });
-            this->_done.wait(false, std::memory_order::seq_cst);
+            this->_done.wait(false, std::memory_order::acquire);
         }
 
         bool wait_for(std::chrono::milliseconds timeout)

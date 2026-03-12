@@ -384,7 +384,7 @@ namespace hedge::db
         if(spans_across_more_page_than_needed)
         {
             // Align the current offset (where the file is being written) to the following page
-            next_offset = hedge::ceil_page_align(next_offset);
+            alignment_padding = hedge::ceil_page_align(curr_relative_offset) - curr_relative_offset;
         }
 
         if(curr_relative_offset + alignment_padding + total_file_size > this->_buffer_capacity)

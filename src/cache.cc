@@ -149,12 +149,15 @@ namespace hedge::db
 
     // --- page_cache Methods ---
 
-    page_cache::write_page_guard page_cache::get_write_slot(page_tag page)
+    std::optional<page_cache::write_page_guard> page_cache::get_write_slot(page_tag page)
     {
         while(true)
         {
+            auto maybe_idx = this->_find_frame();
+            if(!maybe_idx)
+                return std::nullopt;
 
-            size_t idx = this->_find_frame() % this->_max_page_capacity;
+            size_t idx = maybe_idx.value() % this->_max_page_capacity;
             _metadata* frame_ptr = &this->_frames[idx];
 
             {
@@ -175,18 +178,22 @@ namespace hedge::db
                 frame_ptr->key = page;
             }
 
-            return {this->_data.get(), idx * PAGE_SIZE_IN_BYTES, frame_ptr};
+            return page_cache::write_page_guard{this->_data.get(), idx * PAGE_SIZE_IN_BYTES, frame_ptr};
         }
     }
 
     std::optional<page_cache::write_page_guard> page_cache::try_get_write_slot(page_tag page)
     {
 
-        size_t idx = this->_find_frame() % this->_max_page_capacity;
+        auto maybe_idx = this->_find_frame();
+        if(!maybe_idx)
+            return std::nullopt;
+
+        size_t idx = maybe_idx.value() % this->_max_page_capacity;
         _metadata* frame_ptr = &this->_frames[idx];
 
         {
-            std::unique_lock lk(this->_m, std::try_to_lock_t{});
+            std::unique_lock lk(this->_m, std::try_to_lock);
             if(!lk.owns_lock())
                 return std::nullopt;
 
@@ -285,9 +292,9 @@ namespace hedge::db
         return results;
     }
 
-    std::vector<page_cache::write_page_guard> sharded_page_cache::get_write_slots_range(uint32_t id, size_t start_page_index, size_t num_pages)
+    std::vector<std::optional<page_cache::write_page_guard>> sharded_page_cache::get_write_slots_range(uint32_t id, size_t start_page_index, size_t num_pages)
     {
-        std::vector<page_cache::write_page_guard> results;
+        std::vector<std::optional<page_cache::write_page_guard>> results;
         results.reserve(num_pages);
 
         for(size_t i = 0; i < num_pages; ++i)
@@ -299,7 +306,7 @@ namespace hedge::db
         return results;
     }
 
-    size_t page_cache::_find_frame()
+    std::optional<size_t> page_cache::_find_frame()
     {
         size_t cur_pos = this->_clock_hand.fetch_add(1);
 
@@ -332,7 +339,12 @@ namespace hedge::db
 
             frame.flags.fetch_and(~PAGE_FLAG_RECENTLY_USED); // Unset recently used
             cur_pos = this->_clock_hand.fetch_add(1);
-            spins++;
+
+            if(++spins == 32) // Max spins
+            {
+                prof::get<"cache_find_frame_spins">().add(spins);
+                return std::nullopt;
+            }
         }
     }
 

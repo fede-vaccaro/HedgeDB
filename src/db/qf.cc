@@ -8,8 +8,11 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 
 #include "qf.h"
+#include "types.h"
+#include "utils.h"
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define LOW_MASK(n) ((1ULL << (n)) - 1ULL)
@@ -32,8 +35,15 @@ namespace hedge::db::third_party
         qf->qf_elem_mask = LOW_MASK(qf->qf_elem_bits);
         qf->qf_entries = 0;
         qf->qf_max_size = 1 << q;
-        qf->qf_table = (uint64_t*)calloc(qf_table_size(q, r), 1);
-        return qf->qf_table != NULL;
+
+        const size_t table_size_bytes = hedge::ceil_page_align(qf_table_size(q, r));
+        void* mem = std::aligned_alloc(PAGE_SIZE_IN_BYTES, table_size_bytes);
+        if(mem == nullptr)
+            throw std::runtime_error("Failed to allocate memory for quotient filter");
+        std::memset(mem, 0, table_size_bytes);
+        qf->qf_table = (uint64_t*)mem;
+
+        return true;
     }
 
     /* Return QF[idx] in the lower bits. */
@@ -477,7 +487,7 @@ namespace hedge::db::third_party
 
     void qf_destroy(struct quotient_filter* qf)
     {
-        free(qf->qf_table);
+        std::free(qf->qf_table);
     }
 
     void qfi_start(struct quotient_filter* qf, struct qf_iterator* i)
@@ -548,6 +558,11 @@ namespace hedge::db::third_party
         abort();
     }
 
-} // namespace hedge::third_party
+    size_t qf_allocated_size(const struct quotient_filter* qf)
+    {
+        return hedge::ceil_page_align(qf_table_size(qf->qf_qbits, qf->qf_rbits));
+    }
+
+} // namespace hedge::db::third_party
 
 // NOLINTEND

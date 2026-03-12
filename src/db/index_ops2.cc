@@ -5,9 +5,13 @@
 
 #include "async/wait_group.h"
 #include "db/block.h"
+#include "db/merge/merge_utils.h"
+#include "db/merge/write_buffer.h"
+#include "db/quotient_filter.h"
 #include "db/sorted_index.h"
 #include "generator.h"
 #include "index_ops.h"
+#include "mailbox_impl.h"
 #include "page_aligned_buffer.h"
 #include "sst.h"
 #include "types.h"
@@ -86,7 +90,7 @@ namespace hedge::db
                 auto dir_path = base_path / dir_prefix;
                 std::filesystem::create_directories(dir_path);
 
-                auto path = dir_path / with_extension(file_prefix, std::format(".{}", flush_iteration));
+                auto path = dir_path / with_extension(file_prefix, std::format(".{:06}", flush_iteration));
 
                 current_partition_entries.resize(curr_partition_count);
 
@@ -252,6 +256,24 @@ namespace hedge::db
         return res;
     }
 
+    static constexpr size_t QF_BITS_PER_KEY = 10;
+    static constexpr size_t QF_FLAG_BITS = 3;
+
+    static hedge::expected<quotient_filter> create_qf_for_key_count(size_t num_keys)
+    {
+        // Target ~75% load factor: slots = num_keys / 0.75
+        size_t slots = (num_keys * 4 + 2) / 3; // ceil(num_keys / 0.75)
+        uint32_t q = 0;
+        size_t s = 1;
+        while(s < slots)
+        {
+            s <<= 1;
+            q++;
+        }
+        uint32_t r = QF_BITS_PER_KEY; // remainder bits = 7
+        return quotient_filter::make(q, r);
+    }
+
     hedge::expected<sst> index_ops::save_as_sorted_index2(
         const std::filesystem::path& path,
         page_aligned_buffer<index_entry2_t>&& keys,
@@ -264,11 +286,27 @@ namespace hedge::db
         auto sorted_keys = std::move(keys);
         size_t num_keys = sorted_keys.size();
         tmp_in_mem_sst in_mem = prepare_in_mem(sorted_keys, average_key_value_length);
+
+        // Build quotient filter from all keys before releasing them
+        auto maybe_qf = create_qf_for_key_count(num_keys);
+        std::optional<quotient_filter> qf;
+        if(maybe_qf)
+        {
+            qf = std::move(maybe_qf.value());
+            for(size_t i = 0; i < num_keys; ++i)
+                qf->insert(std::hash<key_t>{}(sorted_keys[i].key));
+        }
+
         sorted_keys.free(); // Not needed anymore, release memory
+
+        size_t qf_total_size = 0;
+        if(qf.has_value())
+            qf_total_size = PAGE_SIZE_IN_BYTES + hedge::ceil_page_align(qf->data_as_byte_span().size());
 
         const size_t sst_size =
             in_mem.index.size() + // Already page-aligned
             hedge::round_up(in_mem.meta_index_bytes.size(), PAGE_SIZE_IN_BYTES) +
+            qf_total_size +
             hedge::round_up(sizeof(sst_footer), PAGE_SIZE_IN_BYTES);
 
         assert(is_page_aligned(sst_size));
@@ -307,8 +345,38 @@ namespace hedge::db
         if(!maybe_res)
             return hedge::error("Failed to write meta-index data to sorted index file: " + maybe_res.error().to_string());
         bytes_written += maybe_res.value();
-        fbuilder.footer_offset = bytes_written;
         in_mem.meta_index_bytes.free(); // Release memory
+
+        // Write quotient filter (header page + data pages)
+        if(qf.has_value())
+        {
+            fbuilder.qf_offset = bytes_written;
+
+            // Write QF header (the struct itself, padded to one page)
+            auto header_span = qf->header_as_byte_span();
+            page_aligned_buffer<uint8_t> qf_header_buf(PAGE_SIZE_IN_BYTES);
+            std::memcpy(qf_header_buf.data(), header_span.data(), header_span.size());
+
+            maybe_res = pwrite_buffer(fd, qf_header_buf, bytes_written);
+            if(!maybe_res)
+                return hedge::error("Failed to write QF header: " + maybe_res.error().to_string());
+            bytes_written += maybe_res.value();
+
+            // Write QF data (page-aligned)
+            auto data_span = qf->data_as_byte_span();
+            size_t data_write_size = hedge::ceil_page_align(data_span.size());
+            page_aligned_buffer<uint8_t> qf_data_buf(data_write_size);
+            std::memcpy(qf_data_buf.data(), data_span.data(), data_span.size());
+
+            maybe_res = pwrite_buffer(fd, qf_data_buf, bytes_written);
+            if(!maybe_res)
+                return hedge::error("Failed to write QF data: " + maybe_res.error().to_string());
+            bytes_written += maybe_res.value();
+
+            fbuilder.qf_size = bytes_written - *fbuilder.qf_offset;
+        }
+
+        fbuilder.footer_offset = bytes_written;
 
         // Build footer
         auto maybe_footer = fbuilder.build();
@@ -330,8 +398,12 @@ namespace hedge::db
         {
             size_t curr_offset = 0;
             auto pages = cache->get_write_slots_range(maybe_sorted_index_file.value().id(), 0, footer.meta_index_offset / PAGE_SIZE_IN_BYTES);
-            for(auto& page : pages)
+            for(auto& maybe_page : pages)
             {
+                if(!maybe_page.has_value())
+                    continue;
+
+                auto& page = maybe_page.value();
                 std::memcpy(page.data + page.idx, in_mem.index.data() + curr_offset, PAGE_SIZE_IN_BYTES);
                 curr_offset += PAGE_SIZE_IN_BYTES;
             }
@@ -354,7 +426,7 @@ namespace hedge::db
         //     std::cout << to_hex_string(key) << std::endl;
 
         // Create the final object, moving the key and meta-index data into it.
-        auto ss = sst(std::move(maybe_sorted_index_file.value()), std::move(in_mem.meta_index), footer, std::move(super_index));
+        auto ss = sst(std::move(maybe_sorted_index_file.value()), std::move(in_mem.meta_index), footer, std::move(super_index), std::move(qf));
 
         return ss;
     }
@@ -411,67 +483,6 @@ namespace hedge::db
         co_return;
     }
 
-    static tmp_in_mem_sst prepare_in_mem_from_range(
-        skiplist_t::Accessor::iterator begin,
-        skiplist_t::Accessor::iterator end,
-        size_t entry_count,
-        size_t average_key_value_length)
-    {
-        size_t key_values_per_page_estimate = hedge::ceil(PAGE_SIZE_IN_BYTES, average_key_value_length);
-        size_t pages_estimate = hedge::ceil(entry_count, key_values_per_page_estimate);
-
-        page_aligned_buffer<uint8_t> index(PAGE_SIZE_IN_BYTES, pages_estimate * PAGE_SIZE_IN_BYTES);
-        page_aligned_buffer<uint8_t> meta_index_bytes(0, pages_estimate * PAGE_SIZE_IN_BYTES);
-        page_aligned_buffer<key_t> meta_index(0, pages_estimate);
-        size_t pages_written = 0;
-
-        block_encoder bb(index.data());
-
-        auto it = begin;
-        while(it != end)
-        {
-            auto s = bb.push(it->key, it->value);
-
-            if(!s && s.error().code() == errc::BUFFER_FULL)
-            {
-                index_ops::append_meta_index_key(meta_index_bytes, bb.last_pushed_key());
-                meta_index.emplace_back(bb.last_pushed_key());
-                assert(bb.committed());
-
-                constexpr double SLACK = 0.15;
-                if(index.size() == index.capacity())
-                    index.reserve(index.size() * (1.0 + SLACK));
-
-                pages_written++;
-                index.resize(index.size() + PAGE_SIZE_IN_BYTES);
-                bb.reset(index.data() + (PAGE_SIZE_IN_BYTES * pages_written));
-
-                continue;
-            }
-
-            ++it;
-        }
-
-        if(bb.kv_count() == 0)
-        {
-            index.resize(pages_written * PAGE_SIZE_IN_BYTES);
-        }
-        else
-        {
-            index_ops::append_meta_index_key(meta_index_bytes, bb.last_pushed_key());
-            meta_index.emplace_back(bb.last_pushed_key());
-            bb.commit();
-        }
-
-        meta_index_bytes.shrink_to_fit();
-        meta_index.shrink_to_fit();
-
-        return tmp_in_mem_sst{
-            .index = std::move(index),
-            .meta_index_bytes = std::move(meta_index_bytes),
-            .meta_index = std::move(meta_index)};
-    }
-
     static async::task<hedge::expected<sst>> save_as_sorted_index2_async(
         std::filesystem::path path,
         skiplist_t::Accessor::iterator begin,
@@ -483,73 +494,151 @@ namespace hedge::db
         std::shared_ptr<db::sharded_page_cache> cache,
         bool use_odirect)
     {
-        auto t0 = std::chrono::high_resolution_clock::now();
-        tmp_in_mem_sst in_mem = prepare_in_mem_from_range(begin, end, entry_count, average_key_value_length);
-        auto t1 = std::chrono::high_resolution_clock::now();
-        [[maybe_unused]] auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0);
-        // std::cout << "Prepared in-memory structures for SST flush in " << duration.count() << " ms\n";
+        constexpr size_t WRITE_BUF_SIZE = PAGE_SIZE_IN_BYTES * 256;
 
-        const size_t sst_size =
-            in_mem.index.size() +
-            hedge::round_up(in_mem.meta_index_bytes.size(), PAGE_SIZE_IN_BYTES) +
-            hedge::round_up(sizeof(sst_footer), PAGE_SIZE_IN_BYTES);
+        // Estimate file size
+        size_t key_values_per_page_estimate = hedge::ceil(PAGE_SIZE_IN_BYTES, average_key_value_length);
+        size_t pages_estimate = hedge::ceil(entry_count, key_values_per_page_estimate);
+        size_t estimated_index_size = pages_estimate * PAGE_SIZE_IN_BYTES;
+        size_t estimated_meta_index_size = hedge::round_up(pages_estimate * sizeof(key_t), PAGE_SIZE_IN_BYTES);
+        size_t estimated_size = estimated_index_size + estimated_meta_index_size + PAGE_SIZE_IN_BYTES; // +footer
 
-        assert(is_page_aligned(sst_size));
-
-        auto executor = async::this_thread_executor();
+        const auto& executor = async::this_thread_executor();
 
         auto maybe_file = co_await fs::file::from_path_async(
             path,
             fs::file::open_mode::read_write_new,
             executor,
             use_odirect,
-            sst_size);
+            estimated_size);
 
         if(!maybe_file)
             co_return hedge::error("Failed to create sorted index file: " + maybe_file.error().to_string());
 
-        auto fd = maybe_file.value().fd();
+        auto& file = maybe_file.value();
+        auto fd = file.fd();
+        auto file_id = file.id();
 
-        // Build footer
-        index_ops::sst_footer_builder fbuilder{};
-        fbuilder.indexed_kv = entry_count;
-        fbuilder.upper_bound = upper_bound;
-        fbuilder.index_offset = 0;
-        fbuilder.meta_index_entries = in_mem.meta_index.size();
-        fbuilder.epoch = epoch;
+        // Allocate meta-index buffers
+        auto meta_index = page_aligned_buffer<key_t>(0, pages_estimate);
+        auto meta_index_bytes = page_aligned_buffer<uint8_t>(0, pages_estimate * sizeof(key_t));
 
+        // Create quotient filter
+        auto maybe_qf = create_qf_for_key_count(entry_count);
+        std::optional<quotient_filter> qf;
+        if(maybe_qf)
+            qf = std::move(maybe_qf.value());
+
+        merge_write_buffer write_buffer(WRITE_BUF_SIZE);
         size_t bytes_written = 0;
 
-        // Write main index
-        size_t index_write_size = hedge::round_up(in_mem.index.size(), PAGE_SIZE_IN_BYTES);
-        auto index_write_res = co_await executor->submit_request(async::write_request{
-            .fd = fd,
-            .data = in_mem.index.data(),
-            .size = index_write_size,
-            .offset = 0});
+        auto flush = [&]() -> async::task<hedge::status>
+        {
+            auto write_response = co_await write_buffer.flush(
+                fd, file_id, bytes_written, cache, executor);
 
-        if(index_write_res.error_code < 0)
-            co_return hedge::error("Failed to write index data: " + std::string(strerror(-index_write_res.error_code)));
+            if(write_response.error_code)
+                co_return hedge::error("Failed to write index data: " + std::string(strerror(-write_response.error_code)));
 
-        bytes_written += index_write_res.bytes_written;
-        fbuilder.meta_index_offset = bytes_written;
+            bytes_written += write_response.bytes_written;
+            co_return hedge::ok();
+        };
+
+        for(auto it = begin; it != end; ++it)
+        {
+            if(qf.has_value())
+                qf->insert(std::hash<key_t>{}(it->key));
+
+            auto s = write_buffer.write_item(it->key, it->value, meta_index, meta_index_bytes);
+            if(!s)
+            {
+                // Buffer full — flush and retry
+                auto flush_result = co_await flush();
+                if(!flush_result)
+                    co_return flush_result.error();
+
+                auto retry = write_buffer.write_item(it->key, it->value, meta_index, meta_index_bytes);
+                if(!retry)
+                    co_return hedge::error("Could not write item after flush");
+            }
+        }
+
+        // Flush remaining blocks
+        if(!write_buffer.empty())
+        {
+            const auto& last_pushed_key = write_buffer.encoder().last_pushed_key();
+            meta_index.emplace_back(last_pushed_key);
+            index_ops::append_meta_index_key(meta_index_bytes, last_pushed_key);
+
+            auto flush_result = co_await flush();
+            if(!flush_result)
+                co_return flush_result.error();
+        }
 
         // Write meta-index
-        size_t meta_write_size = hedge::round_up(in_mem.meta_index_bytes.size(), PAGE_SIZE_IN_BYTES);
+        size_t meta_write_size = hedge::ceil_page_align(meta_index_bytes.size());
         auto meta_write_res = co_await executor->submit_request(async::write_request{
             .fd = fd,
-            .data = in_mem.meta_index_bytes.data(),
+            .data = meta_index_bytes.data(),
             .size = meta_write_size,
-            .offset = *fbuilder.meta_index_offset});
+            .offset = bytes_written});
 
         if(meta_write_res.error_code < 0)
             co_return hedge::error("Failed to write meta-index data: " + std::string(strerror(-meta_write_res.error_code)));
 
+        size_t meta_index_offset = bytes_written;
         bytes_written += meta_write_res.bytes_written;
-        fbuilder.footer_offset = bytes_written;
-        in_mem.meta_index_bytes.free();
+        meta_index_bytes.free();
+
+        // Write quotient filter (header page + data pages)
+        index_ops::sst_footer_builder fbuilder{};
+        if(qf.has_value())
+        {
+            fbuilder.qf_offset = bytes_written;
+
+            // Write QF header (padded to one page)
+            auto header_span = qf->header_as_byte_span();
+            page_aligned_buffer<uint8_t> qf_header_buf(PAGE_SIZE_IN_BYTES);
+            std::memcpy(qf_header_buf.data(), header_span.data(), header_span.size());
+
+            auto qf_header_res = co_await executor->submit_request(async::write_request{
+                .fd = fd,
+                .data = qf_header_buf.data(),
+                .size = PAGE_SIZE_IN_BYTES,
+                .offset = bytes_written});
+
+            if(qf_header_res.error_code < 0)
+                co_return hedge::error("Failed to write QF header: " + std::string(strerror(-qf_header_res.error_code)));
+            bytes_written += qf_header_res.bytes_written;
+
+            // Write QF data (page-aligned)
+            auto data_span = qf->data_as_byte_span();
+            size_t data_write_size = hedge::ceil_page_align(data_span.size());
+            page_aligned_buffer<uint8_t> qf_data_buf(data_write_size);
+            std::memcpy(qf_data_buf.data(), data_span.data(), data_span.size());
+
+            auto qf_data_res = co_await executor->submit_request(async::write_request{
+                .fd = fd,
+                .data = qf_data_buf.data(),
+                .size = data_write_size,
+                .offset = bytes_written});
+
+            if(qf_data_res.error_code < 0)
+                co_return hedge::error("Failed to write QF data: " + std::string(strerror(-qf_data_res.error_code)));
+            bytes_written += qf_data_res.bytes_written;
+
+            fbuilder.qf_size = bytes_written - *fbuilder.qf_offset;
+        }
 
         // Build and write footer
+        fbuilder.indexed_kv = write_buffer.indexed_kv();
+        fbuilder.upper_bound = upper_bound;
+        fbuilder.index_offset = 0;
+        fbuilder.meta_index_offset = meta_index_offset;
+        fbuilder.meta_index_entries = meta_index.size();
+        fbuilder.epoch = epoch;
+        fbuilder.footer_offset = bytes_written;
+
         auto maybe_footer = fbuilder.build();
         if(!maybe_footer)
             co_return hedge::error("Failed to build footer: " + maybe_footer.error().to_string());
@@ -558,39 +647,36 @@ namespace hedge::db
         page_aligned_buffer<sst_footer> footer_buf(1);
         footer_buf[0] = footer;
 
-        size_t footer_write_size = hedge::round_up(sizeof(sst_footer), PAGE_SIZE_IN_BYTES);
         auto footer_write_res = co_await executor->submit_request(async::write_request{
             .fd = fd,
             .data = reinterpret_cast<uint8_t*>(footer_buf.data()),
-            .size = footer_write_size,
-            .offset = *fbuilder.footer_offset});
+            .size = PAGE_SIZE_IN_BYTES,
+            .offset = bytes_written});
 
         if(footer_write_res.error_code < 0)
             co_return hedge::error("Failed to write footer: " + std::string(strerror(-footer_write_res.error_code)));
 
-        assert(bytes_written + footer_write_res.bytes_written == sst_size);
+        bytes_written += footer_write_res.bytes_written;
 
-        // Prepopulate cache
-        if(cache != nullptr)
+        // Truncate file to actual written size
         {
-            size_t curr_offset = 0;
-            auto pages = cache->get_write_slots_range(maybe_file.value().id(), 0, footer.meta_index_offset / PAGE_SIZE_IN_BYTES);
-            for(auto& page : pages)
-            {
-                std::memcpy(page.data + page.idx, in_mem.index.data() + curr_offset, PAGE_SIZE_IN_BYTES);
-                curr_offset += PAGE_SIZE_IN_BYTES;
-            }
+            auto res = co_await executor->submit_request(async::ftruncate_request{
+                .fd = fd,
+                .length = bytes_written,
+            });
+
+            if(res.error_code != 0)
+                co_return hedge::error("Failed to truncate file to final size: " + std::string(strerror(res.error_code)));
         }
-        in_mem.index.free();
 
         constexpr size_t REF_PAGE_SIZE = PAGE_SIZE_IN_BYTES;
         constexpr size_t KEYS_PER_META_INDEX_PAGE = REF_PAGE_SIZE / sizeof(key_t);
 
         std::optional<page_aligned_buffer<key_t>> super_index;
-        if(in_mem.meta_index.size() > KEYS_PER_META_INDEX_PAGE * index_ops::SUPER_INDEX_ENABLED_THRESHOLD)
-            super_index = index_ops::create_super_index<key_t, REF_PAGE_SIZE>(in_mem.meta_index);
+        if(meta_index.size() > KEYS_PER_META_INDEX_PAGE * index_ops::SUPER_INDEX_ENABLED_THRESHOLD)
+            super_index = index_ops::create_super_index<key_t, REF_PAGE_SIZE>(meta_index);
 
-        co_return sst(std::move(maybe_file.value()), std::move(in_mem.meta_index), footer, std::move(super_index));
+        co_return sst(std::move(file), std::move(meta_index), footer, std::move(super_index), std::move(qf));
     }
 
     static async::task<void> flush_partition_task(
@@ -662,7 +748,7 @@ namespace hedge::db
             auto dir_path = base_path / dir_prefix;
             std::filesystem::create_directories(dir_path);
 
-            auto path = base_path / dir_prefix / with_extension(file_prefix, std::format(".{}", flush_iteration));
+            auto path = base_path / dir_prefix / with_extension(file_prefix, std::format(".{:06}", flush_iteration));
 
             const auto& executor = executor_pool[executor_id++ % executor_pool.size()];
             executor->submit_io_task(flush_partition_task(
@@ -683,7 +769,7 @@ namespace hedge::db
             range_count++;
         }
 
-        for(size_t i = range_count; i < (1 << num_partition_exponent); ++i)
+        for(size_t i = range_count; i < (size_t)(1 << num_partition_exponent); ++i)
             wg->decr(); // Decr for the partitions that don't exist
 
         wg->wait();

@@ -8,13 +8,23 @@
 namespace hedge::db
 {
 
-    sst::sst(fs::file fd, page_aligned_buffer<key_t> meta_index, sst_footer footer, std::optional<page_aligned_buffer<key_t>> super_index)
-        : fs::file(std::move(fd)), _meta_index(std::move(meta_index)), _super_index(std::move(super_index)), _footer(footer)
+    sst::sst(fs::file fd, page_aligned_buffer<key_t> meta_index, sst_footer footer, std::optional<page_aligned_buffer<key_t>> super_index, std::optional<quotient_filter> qf)
+        : fs::file(std::move(fd)), _meta_index(std::move(meta_index)), _super_index(std::move(super_index)), _qf(std::move(qf)), _footer(footer)
     {
     }
 
-    async::task<expected<value_t>> sst::lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache) const
+    async::task<expected<value_t>> sst::lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache, std::optional<uint64_t> key_hash) const
     {
+        if(this->_qf.has_value())
+        {
+            uint64_t hash = key_hash.value_or(std::hash<key_t>{}(key));
+            if(!this->_qf->may_contain(hash))
+            {
+                prof::get<"qf_false_positives">().add(0);
+                co_return hedge::error("", errc::KEY_NOT_FOUND);
+            }
+        }
+
         auto maybe_page_id = this->_find_page_id(key);
         if(!maybe_page_id)
             co_return hedge::error("", errc::KEY_NOT_FOUND);
@@ -36,7 +46,7 @@ namespace hedge::db
         if(!should_read_from_fs)
         {
             prof::get<"lookup">().start();
-            auto maybe_page_guard = cache->lookup(page_tag);
+            auto maybe_page_guard = cache->try_lookup(page_tag);
 
             if(maybe_page_guard.has_value())
             {
@@ -61,6 +71,7 @@ namespace hedge::db
             }
             else
             {
+                // should_read_from_fs = true;
                 prof::get<"lookup">().stop(true);
             }
         }
@@ -106,6 +117,9 @@ namespace hedge::db
         assert(page_id < this->_footer.meta_index_offset * PAGE_SIZE_IN_BYTES);
         hedge::expected<value_t> res = sst::_find_in_page(key, page_ptr);
         prof::get<"find_in_page">().stop(should_read_from_fs);
+
+        if(this->_qf.has_value() && !res.has_value())
+            prof::get<"qf_false_positives">().add(1);
 
         co_return res;
     }

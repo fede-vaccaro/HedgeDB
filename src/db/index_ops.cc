@@ -344,9 +344,14 @@ namespace hedge::db
         {
             size_t curr_offset = 0;
             auto pages = cache->get_write_slots_range(maybe_sorted_index_file.value().id(), 0, (footer.index_end_offset + index_padding_bytes) / PAGE_SIZE_IN_BYTES);
-            for(auto& page : pages)
+            for(auto& maybe_page : pages)
             {
-                std::memcpy(page.data + page.idx, reinterpret_cast<uint8_t*>(sorted_keys.data()) + curr_offset, PAGE_SIZE_IN_BYTES);
+                if(!maybe_page.has_value())
+                {
+                    auto& page = maybe_page.value();
+                    std::memcpy(page.data + page.idx, reinterpret_cast<uint8_t*>(sorted_keys.data()) + curr_offset, PAGE_SIZE_IN_BYTES);
+                }
+
                 curr_offset += PAGE_SIZE_IN_BYTES;
             }
         }
@@ -524,10 +529,10 @@ namespace hedge::db
 
         public:
             rolling_buffer2(const sorted_index& file, size_t read_ahead_size, const std::shared_ptr<db::sharded_page_cache>& cache) : _read_ahead_size(read_ahead_size),
-                                                                                                                                     _reader(file, fs::file_reader_config{
-                                                                                                                                                       .start_offset = file._footer.index_start_offset,
-                                                                                                                                                       .end_offset = file._footer.index_end_offset,
-                                                                                                                                                       .read_ahead_size = read_ahead_size})
+                                                                                                                                      _reader(file, fs::file_reader_config{
+                                                                                                                                                        .start_offset = file._footer.index_start_offset,
+                                                                                                                                                        .end_offset = file._footer.index_end_offset,
+                                                                                                                                                        .read_ahead_size = read_ahead_size})
             {
                 this->_pending_reads = this->_reader.next(cache);
             }
@@ -794,9 +799,14 @@ namespace hedge::db
                 // std::cout << "requested slots for: " << read_fd.value().id() << " path:" << read_fd.value().path() << "\n";
 
                 size_t cur_page = 0;
-                for(auto& page : page_guards)
+                for(auto& maybe_page : page_guards)
                 {
                     assert(cur_page < page_guards.size());
+
+                    if(!maybe_page.has_value())
+                        continue;
+
+                    auto& page = maybe_page.value();
 
                     auto* dst = page.data + page.idx;
                     auto* src_begin = reinterpret_cast<uint8_t*>(write_buffer.begin()) + (cur_page * PAGE_SIZE_IN_BYTES);

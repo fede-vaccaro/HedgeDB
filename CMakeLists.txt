@@ -38,6 +38,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(tsl_sparse_map)
 
+# download xxhashct
+FetchContent_Declare(
+    xxhashct
+    GIT_REPOSITORY https://github.com/ekpyron/xxhashct.git
+)
+FetchContent_MakeAvailable(xxhashct)
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -65,6 +72,7 @@ include_directories(PRIVATE "src")
 
 include_directories(PUBLIC ${tsl_robin_map_SOURCE_DIR}/include)
 include_directories(PUBLIC ${tsl_sparse_map_SOURCE_DIR}/include)
+include_directories(PUBLIC ${xxhashct_SOURCE_DIR})
 
 set(DB_SOURCES
     src/types.h
@@ -79,6 +87,8 @@ set(DB_SOURCES
     src/db/sst.cc
     src/db/index_ops.cc
     src/db/index_ops2.cc
+    src/db/qf.cc
+    src/db/quotient_filter.cc
     src/db/merge/merge.cc
     src/db/index_ops.h
     src/db/memtable.h
@@ -114,6 +124,10 @@ target_link_libraries(skiplist_executor_test uring tcmalloc atomic)
 # memtable_perf_test — benchmarks executor + memtable::put() (adds rw_sync + value arenas)
 add_executable(memtable_perf_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/memtable_perf_test.cc)
 target_link_libraries(memtable_perf_test uring tcmalloc atomic)
+
+# database_perf_test — full database write+read benchmark (no gtest)
+add_executable(database_perf_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/database_perf_test.cc)
+target_link_libraries(database_perf_test uring tcmalloc atomic)
 
 # executor tests
 add_executable(executor_test ${IO_EXECUTOR_SRCS} test/io_executor.spec.cc)
@@ -176,7 +190,7 @@ target_link_libraries(cache_test uring gtest gtest_main atomic)
 
 # database tests
 add_executable(database_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/database.spec.cc)
-target_link_libraries(database_test uring gtest gtest_main atomic tcmalloc)
+target_link_libraries(database_test uring gtest gtest_main atomic tcmalloc tbb)
 
 # skiplist tests
 add_executable(skiplist_test test/skiplist.spec.cc)

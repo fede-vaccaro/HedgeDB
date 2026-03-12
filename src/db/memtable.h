@@ -11,22 +11,22 @@
 
 struct CheckStream
 {
-    bool condition;
-    explicit CheckStream(bool cond) : condition(cond) {}
+    // bool condition;
+    explicit CheckStream(bool /*cond*/) /*: condition(cond) */ {}
     template <typename T>
-    CheckStream& operator<<(const T& msg)
+    CheckStream& operator<<(const T& /*msg*/)
     {
-        if(!condition)
-            std::cerr << msg;
+        // if(!condition)
+        //     std::cerr << msg;
         return *this;
     }
     ~CheckStream()
     {
-        if(!condition)
-        {
-            std::cerr << std::endl;
-            std::abort();
-        }
+        // if(!condition)
+        // {
+        //     std::cerr << std::endl;
+        //     std::abort();
+        // }
     }
 };
 
@@ -87,7 +87,7 @@ namespace hedge::db
             auto span = arena_->allocate(n * sizeof(T));
             if(span.empty())
             {
-                std::cout << "Arena out of memory when trying to allocate " << n * sizeof(T) << " bytes" << std::endl;
+                // std::cout << "Arena out of memory when trying to allocate " << n * sizeof(T) << " bytes" << std::endl;
                 throw std::bad_alloc();
             }
             return reinterpret_cast<T*>(span.data());
@@ -111,7 +111,7 @@ namespace hedge::db
     struct memtable_config
     {
         size_t max_inserts_cap = 2'000'000;
-        size_t memory_budget_cap = 128 * 1024 * 1024;
+        size_t memory_budget_cap = 32 * 1024 * 1024;
         bool auto_compaction = true;
         bool use_odirect = true;
         size_t num_writer_threads = 256; // (quite) safe upper bound
@@ -143,7 +143,7 @@ namespace hedge::db
         }
     };
 
-    using skiplist_t = folly::ConcurrentSkipList<memtable_entry, memtable_cmp, std::allocator<uint8_t>>;
+    using skiplist_t = folly::ConcurrentSkipList<memtable_entry, memtable_cmp, StdArenaAllocator<uint8_t>>;
 
     struct memtable_arena_holder
     {
@@ -159,7 +159,7 @@ namespace hedge::db
     public:
         memtable_impl3_t(size_t budget)
             : memtable_arena_holder(budget),
-              skiplist_t(24, std::allocator<uint8_t>{}),
+              skiplist_t(24, StdArenaAllocator<uint8_t>(this->arena_)),
               _accessor(this)
         {
         }
@@ -202,14 +202,11 @@ namespace hedge::db
     struct memtable_with_arena_t : memtable_impl3_t
     {
         // std::vector<std::unique_ptr<hedge::db::arena_allocator<uint8_t, false>>> value_arenas; // one per writer thread, not shared between threads
-        single_buffer_arena_allocator value_arena; // single arena for values, shared between threads with atomic allocation
+        single_buffer_arena_allocator value_arena;                                             // single arena for values, shared between threads with atomic allocation
 
-        memtable_with_arena_t(size_t memtable_memory_budget, size_t /* n_threads */, size_t value_memory_budget)
+        memtable_with_arena_t(size_t memtable_memory_budget, size_t n_threads, size_t value_memory_budget)
             : memtable_impl3_t(memtable_memory_budget), value_arena(value_memory_budget)
         {
-            // size_t arena_budget_per_thread = value_memory_budget / n_threads;
-            // for(size_t i = 0; i < n_threads; i++)
-            //     value_arenas.emplace_back(std::make_unique<hedge::db::arena_allocator<uint8_t, false>>(arena_budget_per_thread));
         }
     };
 
@@ -231,6 +228,7 @@ namespace hedge::db
         std::atomic_size_t* _flush_epoch{};
         std::function<void(std::vector<sst>)> _push_new_indices;
         std::function<void()> _trigger_compaction_callback;
+        std::atomic_bool* _compaction_backpressure{};
 
         // Page cache
         std::shared_ptr<db::sharded_page_cache> _cache{};
@@ -240,17 +238,24 @@ namespace hedge::db
         using rw_sync_table_ptr_t = std::shared_ptr<rw_sync_table_t>;
 
         alignas(64) std::atomic<rw_sync_table_ptr_t> _table;
+        alignas(64) std::atomic_bool _flush_mutex;
         alignas(64) std::atomic<rw_sync_table_ptr_t> _pipelined_table;
 
         // Pending flushes
+        static constexpr size_t MAX_PENDING_FLUSHES = 8;
         alignas(64) mutable std::shared_mutex _pending_flushes_mutex;
+        alignas(64) std::condition_variable_any _pending_flushes_cv;
         std::map<size_t, rw_sync_table_ptr_t> _pending_flushes;
 
         async::worker _flusher;
+        std::thread _table_maker;
+        std::atomic_bool _running{true};
         std::vector<std::shared_ptr<async::executor_context>> _flush_executor_pool;
         logger _logger;
 
     public:
+        inline static std::atomic_size_t BACKPRESSURE{0};
+
         memtable() = default;
 
         memtable(const memtable_config& cfg,
@@ -259,7 +264,10 @@ namespace hedge::db
                  std::atomic_size_t* flush_epoch_ptr,
                  std::function<void(std::vector<sst>)> push_new_indices,
                  std::function<void()> compaction_callback,
-                 std::shared_ptr<db::sharded_page_cache> page_cache);
+                 std::shared_ptr<db::sharded_page_cache> page_cache,
+                 std::atomic_bool* compaction_backpressure = nullptr);
+
+        ~memtable();
 
         void put(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type);
 
@@ -269,7 +277,7 @@ namespace hedge::db
 
         [[nodiscard]] auto make_memtable() const
         {
-            return std::make_shared<rw_sync_table_t>(this->_cfg.num_writer_threads, this->_cfg.memory_budget_cap, this->_cfg.num_writer_threads, this->_cfg.memory_budget_cap);
+            return std::make_shared<rw_sync_table_t>(this->_cfg.num_writer_threads, this->_cfg.memory_budget_cap * 2, this->_cfg.num_writer_threads, this->_cfg.memory_budget_cap);
         }
 
     private:

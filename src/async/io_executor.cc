@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -10,7 +9,6 @@
 #include <iostream>
 #include <iterator>
 #include <liburing/io_uring.h>
-#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -90,6 +88,7 @@ namespace hedge::async
         auto sq_to_submit = std::min(static_cast<int32_t>(sq_space_left), cqe_space_margin);
 
         thread_local std::vector<std::unique_ptr<mailbox>> requests;
+        requests.clear();
 
         pop_n(requests, this->_waiting_for_io_queue, sq_to_submit);
 
@@ -104,6 +103,7 @@ namespace hedge::async
 
             io_uring_sqe_set_data64(sqe, this_req_id);
 
+            // std::cout << "preparing sqe with id" << this_req_id << "\n";
             mailbox->prepare_sqe(sqe);
 
             this->_in_flight_requests.emplace(this_req_id, std::move(mailbox));
@@ -187,7 +187,7 @@ namespace hedge::async
 
         while(!requeued.empty())
         {
-            this->_waiting_for_io_queue.emplace_back(std::move(requeued.front()));
+            this->_io_ready_queue.emplace_back(std::move(requeued.front()));
             requeued.pop_front();
         }
     }
@@ -439,6 +439,8 @@ namespace hedge::async
             };
 
             new_executor->sync_submit(set_affinity(i));
+
+            pthread_setname_np(new_executor->_worker.native_handle(), "io-extor-pool");
 
             this->_executors.emplace_back(std::move(new_executor));
         }

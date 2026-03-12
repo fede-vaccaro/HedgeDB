@@ -1,11 +1,13 @@
 #pragma once
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <future>
 #include <map>
 #include <memory>
+#include <unordered_set>
 
 #include <error.hpp>
 #include <logger.h>
@@ -20,6 +22,7 @@
 #include "sst.h"
 #include "types.h"
 #include "value_table.h"
+#include "wait_group.h"
 
 namespace hedge::db
 {
@@ -113,10 +116,14 @@ namespace hedge::db
         memtable _memtable;
 
         // --- Background Workers ---
-        /// Worker thread dedicated to handling index compaction jobs.
-        async::worker _compaction_worker{};                                               ///< It just controls the flow for compaction, the actual I/O is done by the pool _compaction_executor
-        async::worker _value_table_worker{};                                              ///< Worker thread for instantiating new value tables
+        // NOTE: _compation_executor_pool must be declared BEFORE _compaction_worker
+        // so that executors outlive the worker thread (C++ destroys members in reverse declaration order).
         std::vector<std::shared_ptr<async::executor_context>> _compation_executor_pool{}; ///< Pool of executors managing background compactions
+
+        /// Worker thread dedicated to handling index compaction jobs.
+        async::worker _compaction_worker{}; ///< It just controls the flow for compaction, the actual I/O is done by the pool _compaction_executor
+
+        async::worker _value_table_worker{};                                              ///< Worker thread for instantiating new value tables
 
         // Index page cache
         std::shared_ptr<sharded_page_cache> _page_cache;
@@ -159,47 +166,36 @@ namespace hedge::db
          * @return An async task resolving to a status indicating success or failure (e.g., key not found).
          */
         async::task<hedge::status> remove_async(const key_t& key);
-        /**
-         * @brief Submits a compaction job to the background compaction worker.
-         * Iteratively merges pairs of sorted_index files within partitions based on configured ratios until stable.
-         * Stable means that no further merges can be performed because of the size ratio criteria between sorted indices
-         * is met, or there is only one sorted index file left in the partition.
-         *
-         * @example Consider that for a given ID, we have this set indices with the following sizes:
-         * - A: 200,000,000 entries
-         * - B: 30,000,000 entries
-         * - C: 5,000,000 entries
-         * - D: 1,000,000 entries
-         *
-         * This is a STABLE state if the target_compaction_size_ratio is 0.2, because:
-         * - B / A = 0.15 < 0.2 ---> merge will be skipped
-         * - C / B = 0.166 < 0.2 ---> merge will be skipped
-         * - D / C = 0.2 <= 0.2 ---> merge will be skipped
-         *
-         * But now we add a new index E with 1,000,000 entries. This is how the sizes look now:
-         * - A: 200,000,000 entries
-         * - B: 30,000,000 entries
-         * - C: 5,000,000 entries
-         * - D: 1,000,000 entries
-         * - E: 1,000,000 entries
-         *
-         * Now the state is UNSTABLE, because:
-         * E and D will be merged (size_ratio is 1.0), resulting in a new index F with 2,000,000 entries.
-         * F' and C will be merged (size_ratio is 0.4), resulting in a new index F'' with 7,000,000 entries.
-         * F'' and B will be merged (size_ratio is 0.23), resulting in a new index F''' with 37,000,000 entries.
-         * Finally, A and F''' will NOT be merged as the size_ratio is 37/200 = 0.185 < 0.2.
-         *
-         * This is the final STABLE state after compaction:
-         * - A: 200,000,000 entries
-         * - F''': 37,000,000 entries
-         *
-         * If new sorted indices are added during the compaction (e.g., due to memtable flushes),
-         * they will NOT be considered in the current compaction job.
-         * @param ignore_ratio If true, forces merges even if size ratio criteria aren't met (e.g., for full compaction).
-         * @param executor The I/O executor context used *within* the compaction job for disk I/O.
-         * @return A future that resolves to the total number of bytes written during compaction, or an error if the compaction failed.
-         */
-        std::future<expected<size_t>> compact_sorted_indices(bool ignore_size_ratio);
+
+        struct compaction_stats
+        {
+            size_t input_bytes{0};
+            size_t output_bytes{0};
+            size_t num_inputs{0};
+            size_t items_merged{0};
+
+            compaction_stats& operator+=(const compaction_stats& other)
+            {
+                this->input_bytes += other.input_bytes;
+                this->output_bytes += other.output_bytes;
+                this->num_inputs += other.num_inputs;
+                this->items_merged += other.items_merged;
+                return *this;
+            }
+        };
+        std::future<expected<compaction_stats>> compact_sorted_indices(bool ignore_size_ratio);
+
+        void wait_for_compactions_to_finish();
+
+        using compaction_fn_t = std::function<hedge::expected<compaction_stats>(bool compact_all)>;
+
+        std::mutex _pending_compactions_mutex;
+        size_t _pending_compacting_sst_count{0};
+        std::condition_variable _pending_compactions_cv;
+
+        alignas(64) std::atomic_bool _compaction_backpressure{false};
+
+        hedge::expected<database::compaction_stats> _compaction_job_size_check(bool compact_all);
 
         /**
          * @brief Factory function to create a new database instance at the specified path.
@@ -254,13 +250,28 @@ namespace hedge::db
          */
         hedge::expected<std::shared_ptr<value_table>> _rotate_value_table(std::shared_ptr<value_table> rotating);
 
-        /**
-         * @brief The core logic for performing index compaction, run by the `compaction_worker`.
-         * Updates the main `_sorted_indices` map upon completion.
-         * @param ignore_size_ratio If true, forces merges regardless of size ratios.
-         * @return Bytes written from the compaction, otherwise an error indicating the overall success or failure of the compaction job.
-         */
-        hedge::expected<size_t> _compaction_job(bool ignore_size_ratio);
+        struct compaction_output
+        {
+            struct compaction_args
+            {
+                std::vector<sst_ptr_t> inputs;
+                hedge::expected<sst_ptr_t> output;
+
+                size_t input_bytes{};
+                size_t output_bytes{};
+            };
+
+            std::mutex m;
+            std::vector<compaction_args> results;
+        };
+
+        async::task<> _make_compaction_task(compaction_output& output,
+                                            std::vector<database::sst_ptr_t> inputs,
+                                            std::shared_ptr<async::wait_group> wg);
+
+        async::task<> _make_self_completing_compaction_task(std::vector<database::sst_ptr_t> inputs);
+
+        hedge::expected<compaction_stats> _compaction_job_size_tiered(bool compact_all);
         /**
          * @brief Internal helper to find the most recent `value_ptr_t` and the corresponding `value_table` for a key.
          * Searches memtable, then relevant sorted_indices. Handles deleted entries.

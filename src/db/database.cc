@@ -2,12 +2,15 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <ranges>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include <error.hpp>
@@ -65,7 +68,7 @@ namespace hedge::db
         ::new(memtable_mem) memtable(
             memtable_config{
                 .max_inserts_cap = config.keys_in_mem_before_flush,
-                .memory_budget_cap = 128 * 1024 * 1024, // default
+                .memory_budget_cap = 48 * 1024 * 1024, // default
                 .auto_compaction = config.auto_compaction,
                 .use_odirect = config.use_odirect_for_indices,
                 .num_writer_threads = async::executor_pool::static_pool().size(),
@@ -76,7 +79,8 @@ namespace hedge::db
             &db->_flush_iteration,
             make_push_indices_callback(db),
             make_compaction_callback(db),
-            db->_page_cache);
+            db->_page_cache,
+            &db->_compaction_backpressure);
 
         // Create first value table
         auto first_value_table = value_table::make_new(db->_values_path, 0);
@@ -149,7 +153,7 @@ namespace hedge::db
     {
         // prof::counter_guard guard(prof::get<"put_async">());
 
-        if(value.size() < 512)
+        if(value.size() < 512) [[likely]]
         {
             this->_memtable.put(key, value, hedge::value_type::IN_PLACE_VALUE);
             co_return hedge::ok();
@@ -223,47 +227,49 @@ namespace hedge::db
 
     async::task<expected<value_t>> database::_find_value(const key_t& key)
     {
+        // prof::counter_guard guard(prof::get<"find_value_in_sst">());
+
         // Step 1: Check the memtable first (contains the most recent data).
         std::optional<value_t> value_opt;
 
         value_opt = this->_memtable.get(key);
 
+        if(value_opt.has_value())
+            co_return std::move(value_opt.value());
+
         // Step 2: If not found in memtable and cache, search the relevant sorted index files.
-        if(!value_opt.has_value())
+        size_t matching_partition_id = this->_find_matching_partition_for_key(key);
+        std::vector<sst_ptr_t> sorted_indices_local; // Local copy for safe iteration
+
         {
-            size_t matching_partition_id = this->_find_matching_partition_for_key(key);
-            std::vector<sst_ptr_t> sorted_indices_local; // Local copy for safe iteration
+            std::shared_lock lk(this->_sorted_index_mutex);
+            auto sorted_indices_it = this->_sorted_indices.find(matching_partition_id);
 
+            if(sorted_indices_it == this->_sorted_indices.end())
+                co_return hedge::error("Key partition not found in sorted indices", errc::KEY_NOT_FOUND);
+
+            sorted_indices_local = sorted_indices_it->second;
+        }
+
+        // Note: we are iterating in reverse order to check the newest indices first, as they are more likely to contain the key due to temporal locality.
+
+        // Indices are sorted by epoch: newest (and most recent key first)
+        uint64_t key_hash = std::hash<key_t>{}(key);
+        for(const auto& sorted_index_ptr : std::ranges::reverse_view(sorted_indices_local))
+        {
+            auto maybe_value_ptr = co_await sorted_index_ptr->lookup_async(key, this->_page_cache, key_hash);
+            if(!maybe_value_ptr.has_value() && maybe_value_ptr.error().code() != errc::KEY_NOT_FOUND)
+                co_return hedge::error(std::format("An error occurred while reading index at path {}: {}", sorted_index_ptr->path().string(), maybe_value_ptr.error().to_string()));
+
+            if(maybe_value_ptr.has_value())
             {
-                std::shared_lock lk(this->_sorted_index_mutex);
-                auto sorted_indices_it = this->_sorted_indices.find(matching_partition_id);
-
-                if(sorted_indices_it == this->_sorted_indices.end())
-                    co_return hedge::error("Key partition not found in sorted indices", errc::KEY_NOT_FOUND);
-
-                sorted_indices_local = sorted_indices_it->second;
-            }
-
-            // Note: we are iterating in reverse order to check the newest indices first, as they are more likely to contain the key due to temporal locality.
-
-            // Indices are sorted by epoch: newest (and most recent key first)
-            // TODO: Add bloom filter support to skip unnecessary lookups.
-            for(const auto& sorted_index_ptr : std::ranges::reverse_view(sorted_indices_local))
-            {
-                auto maybe_value_ptr = co_await sorted_index_ptr->lookup_async(key, this->_page_cache);
-                if(!maybe_value_ptr.has_value() && maybe_value_ptr.error().code() != errc::KEY_NOT_FOUND)
-                    co_return hedge::error(std::format("An error occurred while reading index at path {}: {}", sorted_index_ptr->path().string(), maybe_value_ptr.error().to_string()));
-
-                if(maybe_value_ptr.has_value())
+                if(std::holds_alternative<tombstone_t>(maybe_value_ptr.value()))
                 {
-                    if(std::holds_alternative<tombstone_t>(maybe_value_ptr.value()))
-                    {
-                        value_opt = tombstone_t{};
-                        break;
-                    }
-                    value_opt = maybe_value_ptr.value();
+                    value_opt = tombstone_t{};
                     break;
                 }
+                value_opt = maybe_value_ptr.value();
+                break;
             }
         }
 
@@ -408,7 +414,282 @@ namespace hedge::db
         return this->_current_value_table.load();
     }
 
-    hedge::expected<size_t> database::_compaction_job(bool ignore_size_ratio)
+    async::task<> database::_make_compaction_task(compaction_output& output,
+                                                  std::vector<database::sst_ptr_t> inputs,
+                                                  std::shared_ptr<async::wait_group> wg)
+    {
+        // set lower priority for thread
+        auto merge_config = hedge::db::index_ops::merge_config{
+            .read_ahead_size = this->_config.compaction_read_ahead_size_bytes,
+            .new_index_id = this->_flush_iteration.fetch_add(1, std::memory_order::relaxed),
+            .base_path = this->_indices_path,
+            .discard_deleted_keys = false,
+            .create_new_with_odirect = this->_config.use_odirect_for_indices,
+            .populate_cache_with_output = false,
+            .try_reading_from_cache = true,
+        };
+
+        std::vector<const sst*> indices;
+        indices.reserve(indices.size());
+        for(const auto& i : inputs)
+            indices.emplace_back(i.get());
+
+        hedge::expected<sst> merge_result = co_await index_ops::k_way_merge_async2(merge_config,
+                                                                                   indices,
+                                                                                   async::this_thread_executor(),
+                                                                                   this->_page_cache);
+
+        hedge::expected<sst_ptr_t> result = [&]() -> hedge::expected<sst_ptr_t>
+        {
+            if(!merge_result)
+                return merge_result.error();
+
+            return std::make_shared<sst>(std::move(merge_result.value()));
+        }();
+
+        size_t input_bytes = std::accumulate(inputs.begin(), inputs.end(), 0UL, [](size_t sum, const sst_ptr_t& ptr)
+                                             { return sum + ptr->file_size(); });
+
+        {
+            std::lock_guard lk(output.m);
+            output.results.emplace_back(
+                compaction_output::compaction_args{
+                    .inputs = inputs,
+                    .output = result,
+                    .input_bytes = input_bytes,
+                    .output_bytes = (result.has_value() ? result.value()->file_size() : 0),
+                });
+        }
+
+        wg->decr();
+    }
+
+    async::task<> database::_make_self_completing_compaction_task(std::vector<database::sst_ptr_t> inputs)
+    {
+        auto merge_config = hedge::db::index_ops::merge_config{
+            .read_ahead_size = this->_config.compaction_read_ahead_size_bytes,
+            .new_index_id = this->_flush_iteration.fetch_add(1, std::memory_order::relaxed),
+            .base_path = this->_indices_path,
+            .discard_deleted_keys = false,
+            .create_new_with_odirect = this->_config.use_odirect_for_indices,
+            .populate_cache_with_output = false,
+            .try_reading_from_cache = true,
+        };
+
+        std::vector<const sst*> indices;
+        indices.reserve(inputs.size());
+        for(const auto& i : inputs)
+            indices.emplace_back(i.get());
+
+        hedge::expected<sst> merge_result = co_await index_ops::k_way_merge_async2(merge_config,
+                                                                                   indices,
+                                                                                   async::this_thread_executor(),
+                                                                                   this->_page_cache);
+
+        size_t input_count = inputs.size();
+        std::unordered_set<size_t> input_ids;
+        input_ids.reserve(input_count);
+        for(const auto& i : inputs)
+            input_ids.insert(i->id());
+
+        if(merge_result)
+        {
+            // std::cout << "Launching compactions with input indices: \n"
+            //           << std::accumulate(inputs.begin(), inputs.end(), std::string{}, [](std::string acc, const sst_ptr_t& ptr)
+            //                              { return acc + " - " + ptr->path().string() + " id: " + std::to_string(ptr->id()) + " size: " + std::to_string(ptr->file_size()) + "\n"; });
+
+            // std::cout << "Output index: " << merge_result.value().path().string() << " id: " << merge_result.value().id() << "\n";
+            auto output_ptr = std::make_shared<sst>(std::move(merge_result.value()));
+
+            // Apply index update under exclusive lock
+            std::lock_guard lk(this->_sorted_index_mutex);
+
+            // All inputs belong to the same partition
+            auto partition_prefix = inputs[0]->upper_bound();
+            auto& partition_ssts = this->_sorted_indices[partition_prefix];
+
+            auto begin_it = std::ranges::find_if(partition_ssts, [&inputs](const sst_ptr_t& sst)
+                                                 { return sst->id() == (*inputs.rbegin())->id(); });
+
+            auto end_it = std::next(std::ranges::find_if(partition_ssts, [&inputs](const sst_ptr_t& sst)
+                                                         { return sst->id() == (*inputs.begin())->id(); }));
+
+            if(std::distance(begin_it, end_it) != (int64_t)inputs.size())
+            {
+                std::string from_indices_list;
+                std::string input_list;
+
+                for(auto it = begin_it; it != end_it; ++it)
+                    from_indices_list += std::format("{} {}; \n", (*it)->path().string(), (*it)->id());
+
+                for(const auto& input : inputs)
+                {
+                    input_list += std::format("{} {}; \n", (input)->path().string(), (input)->id());
+                }
+
+                throw std::runtime_error("Mismatch between compaction and range in SST list: " +
+                                         std::to_string(std::distance(begin_it, end_it)) + " vs " + std::to_string(inputs.size()) +
+                                         " from_indices_list: \n" + from_indices_list + " input_list :\n" + input_list);
+            }
+            // Remove inputs from fs
+            for(auto it = begin_it; it != end_it; ++it)
+            {
+                (*it)->set_delete_on_obj_destruction(true);
+                (*it)->set_compaction_state(compaction_progress_state::COMPACTED);
+            }
+            // Replaces one of the inputs with the new value
+            begin_it->swap(output_ptr);
+
+            // Remove the other inputs
+            partition_ssts.erase(std::next(begin_it), end_it);
+        }
+        else
+        {
+            for(const auto& input : inputs)
+                input->set_compaction_state(compaction_progress_state::COMPACTION_ERROR);
+
+            this->_logger.log("Self-completing compaction failed: ", merge_result.error().to_string());
+        }
+
+        // Always decrement counter and remove in-flight IDs
+        {
+            std::lock_guard lk(this->_pending_compactions_mutex);
+            this->_pending_compacting_sst_count -= input_count;
+
+            bool under_pressure = this->_pending_compacting_sst_count > 16 * (1UL << this->_config.num_partition_exponent);
+            this->_compaction_backpressure.store(under_pressure, std::memory_order::release);
+
+            this->_pending_compactions_cv.notify_all();
+        }
+    }
+
+    hedge::expected<database::compaction_stats> database::_compaction_job_size_tiered(bool /*compact_all*/)
+    {
+        compaction_stats stats{};
+        sorted_indices_map_t indices_snapshot;
+
+        {
+            std::shared_lock lk(this->_sorted_index_mutex);
+            indices_snapshot = this->_sorted_indices;
+        }
+
+        {
+            // 1. Compute buckets of SSTs to be merged (size-tiered)
+            using buckets_t = std::multimap<size_t, std::vector<database::sst_ptr_t>>; // The key value represents the bucket size
+            using buckets_per_partiton_t = std::unordered_map<uint16_t, buckets_t>;
+
+            buckets_per_partiton_t buckets_per_partitions;
+
+            constexpr double bucket_factor = 1.5;
+            constexpr size_t min_merge_width = 4;
+            // constexpr size_t max_merge_width = 32;
+            constexpr size_t max_merge_width = std::numeric_limits<size_t>::max();
+
+            // Snapshot in-flight IDs for filtering
+            [[maybe_unused]] size_t jobs_count = 0;
+
+            // Iterate for every partition
+            for(auto& [partition_prefix, ssts] : indices_snapshot)
+            {
+                buckets_t& buckets = (buckets_per_partitions[partition_prefix] = buckets_t{});
+
+                if(ssts.size() < min_merge_width)
+                    continue;
+
+                std::vector<sst_ptr_t> candidates;
+                candidates.reserve(min_merge_width);
+
+                auto it = ssts.rbegin();
+                while(it != ssts.rend() && !(*it)->pickable_for_compaction())
+                    it = std::next(it);
+
+                if(it == ssts.rend())
+                    continue;
+
+                candidates.emplace_back(*it);
+
+                size_t sizes_sum = (*it)->file_size(); // For computing the average
+
+                for(it = std::next(it); it != ssts.rend(); ++it)
+                {
+                    size_t file_size = (*it)->file_size();
+                    auto new_avg = (double)(sizes_sum + file_size) / (candidates.size() + 1);
+
+                    const bool pickable_for_compaction = (*it)->pickable_for_compaction();
+
+                    // Form candidate set
+                    if(pickable_for_compaction && (file_size <= new_avg * bucket_factor) && (candidates.size() < max_merge_width))
+                    {
+                        // std::cout << "Adding to candidate set: " << (*it)->path().string() << " id: " << (*it)->id() << " size: " << file_size << " new_avg: " << new_avg << "\n";
+                        candidates.emplace_back(*it);
+                        sizes_sum += file_size;
+
+                        if(std::next(it) != ssts.rend())
+                            continue;
+                    }
+
+                    // Try emitting candidate set
+                    if(candidates.size() >= min_merge_width)
+                    {
+                        for(auto& c : candidates)
+                            c->set_compaction_state(compaction_progress_state::IN_COMPACTION);
+
+                        // std::cout << "Emitting bucket bucket_ref_size: " << static_cast<size_t>(static_cast<double>(sizes_sum) / candidates.size()) << "\n"
+                        //           << std::accumulate(candidates.begin(), candidates.end(), std::string{}, [](std::string acc, const sst_ptr_t& ptr)
+                        //                              { return acc + " - " + ptr->path().string() + " id: " + std::to_string(ptr->id()) + " size: " + std::to_string(ptr->file_size()) + "\n"; });
+
+                        auto bucket_reference_size = static_cast<size_t>(static_cast<double>(sizes_sum) / candidates.size());
+                        buckets.insert({bucket_reference_size, std::exchange(candidates, {})});
+                    }
+
+                    // Skip SSTs not pickable for compaction
+                    while(it != ssts.rend() && !(*it)->pickable_for_compaction())
+                        it = std::next(it);
+
+                    if(it == ssts.rend())
+                        break;
+
+                    // Move to the next bucket, reset candidates
+                    candidates.clear();
+                    candidates.emplace_back(*it);
+                    sizes_sum = (*it)->file_size();
+                }
+            }
+
+            // 2. For each bucket: register in-flight IDs, increment pending count, submit self-completing task
+            size_t executor_idx = 0;
+
+            for(auto& [partition_prefix, buckets] : buckets_per_partitions)
+            {
+                for(auto& [bucket_ref_size, inputs] : buckets)
+                {
+                    size_t bucket_input_count = inputs.size();
+
+                    // Increment pending count and update backpressure
+                    {
+                        std::lock_guard lk(this->_pending_compactions_mutex);
+                        this->_pending_compacting_sst_count += bucket_input_count;
+
+                        const auto threshold = 32 * (1UL << this->_config.num_partition_exponent);
+                        bool under_pressure = this->_pending_compacting_sst_count > threshold;
+                        this->_compaction_backpressure.store(under_pressure, std::memory_order::release);
+                    }
+
+                    // Submit self-completing task
+                    auto task = this->_make_self_completing_compaction_task(std::move(inputs));
+                    this->_compation_executor_pool[executor_idx++ % this->_compation_executor_pool.size()]->submit_io_task(std::move(task));
+                    jobs_count++;
+                }
+            }
+
+            // Return immediately — tasks complete independently
+            return compaction_stats{};
+        }
+
+        return stats;
+    }
+
+    hedge::expected<database::compaction_stats> database::_compaction_job_size_check(bool compact_all)
     {
         // this->_logger.log("Starting compaction job");
 
@@ -428,7 +709,7 @@ namespace hedge::db
         for(auto& [prefix, vec] : indices_local_copy)
             initial_vec_sizes.emplace(prefix, vec.size());
 
-        std::atomic_size_t total_bytes_written{0};
+        compaction_stats stats{};
 
         // Main compaction loop
         std::vector<hedge::error> errors;
@@ -439,7 +720,7 @@ namespace hedge::db
         auto iteration_id = this->_flush_iteration.fetch_add(1, std::memory_order::relaxed);
 
         auto make_compaction_sub_task = [this,
-                                         &total_bytes_written,
+                                         &stats,
                                          &errors,
                                          iteration_id](
                                             size_t indices_to_merge,
@@ -475,6 +756,14 @@ namespace hedge::db
             }
             else
             {
+                size_t input_bytes = 0;
+                size_t items_merged = 0;
+                for(auto it = ordered_indices_vec.rbegin(); it != ordered_indices_vec.rbegin() + indices_to_merge; ++it)
+                {
+                    input_bytes += (*it)->file_size();
+                    items_merged += (*it)->size();
+                }
+
                 // Remove temporary (or not) tables
                 for(auto it = ordered_indices_vec.rbegin(); it != ordered_indices_vec.rbegin() + indices_to_merge; ++it)
                     it->get()->set_delete_on_obj_destruction(true);
@@ -490,13 +779,21 @@ namespace hedge::db
 
                 assert(check_is_sorted_by_epoch(ordered_indices_vec) && "Sorted indices vector is not sorted by epoch after compaction");
 
-                total_bytes_written.fetch_add(bytes_written, std::memory_order::relaxed);
+                // Update stats
+                std::atomic_ref<size_t>(stats.input_bytes).fetch_add(input_bytes, std::memory_order::relaxed);
+                std::atomic_ref<size_t>(stats.output_bytes).fetch_add(bytes_written, std::memory_order::relaxed);
+                std::atomic_ref<size_t>(stats.num_inputs).fetch_add(indices_to_merge, std::memory_order::relaxed);
+                std::atomic_ref<size_t>(stats.items_merged).fetch_add(items_merged, std::memory_order::relaxed);
             }
 
             wg->decr();
         };
 
-        size_t compaction_executor_id = 0;
+        size_t total_included_indices = 0;
+
+        std::vector<async::task<>> compaction_tasks;
+        compaction_tasks.reserve(indices_local_copy.size());
+
         for(auto& [prefix, partition_vec] : indices_local_copy)
         {
             if(partition_vec.size() <= 1) // Nothing to compact
@@ -513,7 +810,7 @@ namespace hedge::db
             size_t included_indices = 1;
             size_t cumulative_size = partition_vec.rbegin()->get()->size();
 
-            if(ignore_size_ratio)
+            if(compact_all)
             {
                 included_indices = partition_vec.size();
 
@@ -539,14 +836,21 @@ namespace hedge::db
                 // candidate_size = 1, cumulative_size = 1: 1/1 <= 1.0 -> included indices = {1, 1}
                 // candidate_size = 1, cumulative_size = 2: 1/(1+1) = 0.5 <= 1.0 -> included indices = {1, 1, 1}
                 // candidate_size = 2, cumulative_size = 3: 2/(1+1+1) = 0.67 <= 1.0 -> included indices = {1, 1, 1, 2}
-                // candidate_size = 6, cumulative_size = 5: 6/5 = 1.2 > 0 -> STOP (do not include index with 6M items)
+                // candidate_size = 6, cumulative_size = 5: 6/5 = 1.2 > 1.0 -> STOP (do not include index with 6M items)
                 for(auto it = partition_vec.rbegin() + 1; it != partition_vec.rend(); ++it)
                 {
                     size_t candidate_size = it->get()->size();
-                    if((double)candidate_size / (double)cumulative_size <= this->_config.target_compaction_size_ratio)
+                    if((double)cumulative_size / this->_config.target_compaction_size_ratio <= (double)candidate_size ||
+                       (double)candidate_size <= this->_config.target_compaction_size_ratio * (double)cumulative_size)
                     {
                         cumulative_size += it->get()->size();
                         ++included_indices;
+
+                        constexpr size_t max_merge_width = 32;
+                        if(included_indices >= max_merge_width)
+                        {
+                            break;
+                        }
                     }
                     else
                     {
@@ -555,27 +859,37 @@ namespace hedge::db
                 }
             }
 
-            if(included_indices < 2)
+            constexpr auto min_merge_width = 4;
+
+            if(included_indices < min_merge_width)
             {
                 wg->decr();
                 continue;
             }
+
+            total_included_indices += included_indices;
+            compaction_tasks.emplace_back(make_compaction_sub_task(
+                included_indices,
+                partition_vec,
+                wg));
 
             // TODO: If only two sorted indices are left to compact, the merge_config.filter_deleted_keys should be true
             // Otherwise, if
             // - filter_delete_keys is `true`
             // - A key is in more than two sorted indices and is deleted in one of them
             // The key would appear again, because we lost track of it after merging the first two indices
+        }
 
-            // this->_logger.log("Triggering compaction of ", std::to_string(included_indices), " indices for ", std::to_string(cumulative_size / 1000), "K key pairs");
-            // for(auto it = partition_vec.rbegin(); it != partition_vec.rbegin() + included_indices; ++it)
-            // {
-            //     this->_logger.log(" - Index path: ", (*it)->path().string(),
-            //                       ", epoch: ", (*it)->epoch(),
-            //                       ", size: ", (*it)->size() / 1000, "K key pairs");
-            // }
+        {
+            std::lock_guard lk(this->_pending_compactions_mutex);
+            this->_pending_compacting_sst_count += total_included_indices;
+        }
+
+        size_t compaction_executor_id = 0;
+        for(auto& t : compaction_tasks)
+        {
             const auto& executor = this->_compation_executor_pool[compaction_executor_id++ % this->_compation_executor_pool.size()];
-            executor->submit_io_task(make_compaction_sub_task(included_indices, partition_vec, wg));
+            executor->submit_io_task(std::move(t));
         }
 
         // Barrier waiting for this round of compaction sub-tasks to complete
@@ -598,6 +912,13 @@ namespace hedge::db
                 this->_logger.log("Compaction error: ", error.to_string());
 
             return hedge::error("Some errors occurred during compaction. Check the logs for details.");
+        }
+
+        {
+            // After compaction, we can safely decrease the count of pending compactions
+            std::lock_guard lk(this->_pending_compactions_mutex);
+            this->_pending_compacting_sst_count -= total_included_indices;
+            this->_pending_compactions_cv.notify_all();
         }
 
         // Finalize compaction: replace the database's sorted indices with the compacted ones
@@ -634,47 +955,78 @@ namespace hedge::db
 
         // this->_logger.log("Compaction job completed successfully");
 
-        return total_bytes_written.load();
+        return stats;
     }
 
-    std::future<expected<size_t>> database::compact_sorted_indices(bool ignore_size_ratio)
+    std::future<expected<database::compaction_stats>> database::compact_sorted_indices(bool compact_all)
     {
-        auto compaction_promise_ptr = std::make_shared<std::promise<hedge::expected<size_t>>>();
-        std::future<hedge::expected<size_t>> compaction_future = compaction_promise_ptr->get_future();
+        auto compaction_promise_ptr = std::make_shared<std::promise<hedge::expected<compaction_stats>>>();
+        std::future<hedge::expected<compaction_stats>> compaction_future = compaction_promise_ptr->get_future();
 
-        this->_compaction_worker.submit(
-            [db = this->shared_from_this(), promise = std::move(compaction_promise_ptr), ignore_size_ratio]()
-            {
-                db->_memtable.wait_for_flush().wait();
-
-                auto start_processing_t = std::chrono::high_resolution_clock::now();
-
-                auto maybe_bytes_written = db->_compaction_job(ignore_size_ratio);
-                if(!maybe_bytes_written)
-                    db->_logger.log("Compaction job failed: ", maybe_bytes_written.error().to_string());
-
-                auto t1 = std::chrono::high_resolution_clock::now();
-                auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - start_processing_t);
-
-                double throughput_mbs = maybe_bytes_written.value() / ((double)duration.count() / 1000000.0) / (1000.0 * 1000.0);
-
-                if(maybe_bytes_written.value() > 0)
+        if(compact_all)
+        {
+            // compact_all=true: synchronous — wait for flush, run compaction, block until done
+            this->_compaction_worker.submit(
+                [db = this->shared_from_this(), promise = std::move(compaction_promise_ptr)]()
                 {
-                    db->_logger.log("Total duration for compaction: ", (double)duration.count() / 1000.0, " ms",
-                                    ", MB written: ", maybe_bytes_written.value() / (1000.0 * 1000.0),
-                                    ", throughput: ", throughput_mbs, " MB/s");
+                    auto future = db->_memtable.wait_for_flush();
+                    future.wait();
 
-                    prof::get<"merge_mb_written">().add(maybe_bytes_written.value() / (1000.0 * 1000.0));
-                    prof::get<"merge_throughput_mbs">().add(throughput_mbs);
-                }
+                    auto start_processing_t = std::chrono::high_resolution_clock::now();
 
-                // todo: fix std::future_error No associated state if the future was already retrieved with wait_for()
-                promise->set_value(std::move(maybe_bytes_written));
-            });
+                    auto maybe_stats = db->_compaction_job_size_tiered(true);
+                    if(!maybe_stats)
+                        db->_logger.log("Compaction job failed: ", maybe_stats.error().to_string());
 
-        // this->_logger.log("Compaction job submitted to background worker.");
+                    auto t1 = std::chrono::high_resolution_clock::now();
+                    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - start_processing_t);
+
+                    auto& stats = maybe_stats.value();
+
+                    double write_throughput_mbs = stats.output_bytes / ((double)duration.count() / 1000000.0) / (1000.0 * 1000.0);
+
+                    if(stats.output_bytes > 0)
+                    {
+                        db->_logger.log("Total duration for compaction: ", (double)duration.count() / 1000.0, " ms",
+                                        ", MB written: ", stats.output_bytes / (1000.0 * 1000.0),
+                                        ", MB read: ", stats.input_bytes / (1000.0 * 1000.0),
+                                        ", throughput: ", write_throughput_mbs, " MB/s",
+                                        ", items merged: ", stats.items_merged,
+                                        ", items merged/s: ", (size_t)((double)stats.items_merged / ((double)duration.count() / 1000000.0)),
+                                        ", num input files: ", stats.num_inputs);
+
+                        prof::get<"merge_mb_written">().add(stats.output_bytes / (1000.0 * 1000.0));
+                        prof::get<"merge_throughput_mbs">().add(write_throughput_mbs);
+                    }
+
+                    promise->set_value(stats);
+                });
+        }
+        else
+        {
+            // compact_all=false: non-blocking — submit compaction job, set promise immediately
+            this->_compaction_worker.submit(
+                [db = this->shared_from_this(), promise = std::move(compaction_promise_ptr)]()
+                {
+                    auto maybe_stats = db->_compaction_job_size_tiered(false);
+                    if(!maybe_stats)
+                        db->_logger.log("Compaction job failed: ", maybe_stats.error().to_string());
+
+                    promise->set_value(maybe_stats);
+                });
+        }
 
         return compaction_future;
+    }
+
+    void database::wait_for_compactions_to_finish()
+    {
+        this->_memtable.wait_for_flush().wait();
+        this->_compaction_worker.wait_for_all_jobs();
+        // Wait for all in-flight self-completing tasks on executor pool
+        std::unique_lock lk(this->_pending_compactions_mutex);
+        this->_pending_compactions_cv.wait(lk, [this]()
+                                           { return this->_pending_compacting_sst_count == 0; });
     }
 
     [[nodiscard]] double database::read_amplification_factor()

@@ -28,12 +28,13 @@ namespace hedge::db
         {
         }
 
-        hedge::status write_item(const merge_entry_t& kv,
+        hedge::status write_item(std::span<const uint8_t> key,
+                                 std::span<const uint8_t> value,
                                  page_aligned_buffer<key_t>& merged_meta_index,
                                  page_aligned_buffer<uint8_t>& merged_meta_index_bytes)
         {
             auto s = this->_block_writer.push(
-                kv.key, kv.value,
+                key, value,
                 [&merged_meta_index, &merged_meta_index_bytes](const auto& last_pushed_key)
                 {
                     index_ops::append_meta_index_key(merged_meta_index_bytes, last_pushed_key);
@@ -122,9 +123,13 @@ namespace hedge::db
                 [[maybe_unused]] const auto* src_end = this->_buf.data() + ((cur_page + 1) * PAGE_SIZE_IN_BYTES);
                 assert(src_end <= this->_buf.end());
 
-                auto& page = page_guards[cur_page];
-                auto* dst = page.data + page.idx;
-                std::memcpy(dst, src_begin, PAGE_SIZE_IN_BYTES);
+                auto& maybe_page = page_guards[cur_page];
+                if(maybe_page.has_value())
+                {
+                    auto& page = maybe_page.value();
+                    auto* dst = page.data + page.idx;
+                    std::memcpy(dst, src_begin, PAGE_SIZE_IN_BYTES);
+                }
             }
 
             prof::get<"merge_cache_bulk_write_us">().stop();

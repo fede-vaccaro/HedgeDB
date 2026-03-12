@@ -71,13 +71,21 @@ static hedge::key_t make_key(uint64_t)
 // Coroutine task — one per insert
 // ---------------------------------------------------------------------------
 
-static const uint8_t DUMMY_VALUE[100]{};
+static const std::vector<uint8_t> DUMMY_VALUE = []()
+{
+    std::vector<uint8_t> dummy(100);
+    thread_local std::mt19937_64 rng{std::random_device{}()};
+    std::uniform_int_distribution<uint8_t> dist;
+    for(auto& byte : dummy)
+        byte = dist(rng);
+    return dummy;
+}();
 
-hedge::async::task<void> make_put_task(hedge::db::memtable* mt, size_t i,
-                                       hedge::async::wait_group* wg)
+hedge::async::task<void>
+make_put_task(hedge::db::memtable* mt, size_t i, hedge::async::wait_group* wg)
 {
     mt->put(make_key(i),
-            std::span<const uint8_t>(DUMMY_VALUE, sizeof(DUMMY_VALUE)),
+            DUMMY_VALUE,
             hedge::value_type::IN_PLACE_VALUE);
     wg->decr();
     co_return;
@@ -96,7 +104,7 @@ int main()
     hedge::async::executor_pool::init_static_pool(N_EXECUTORS, QUEUE_DEPTH);
 
     hedge::db::memtable_config cfg;
-    cfg.memory_budget_cap = 32UL * 1024 * 1024; // 512 MB — no flush at 500K keys
+    cfg.memory_budget_cap = 64UL * 1024 * 1024;
     cfg.auto_compaction = false;
     cfg.use_odirect = true;
     cfg.num_writer_threads = N_EXECUTORS; // avoid contention on rw_sync writers
@@ -104,12 +112,12 @@ int main()
 
     static std::atomic_size_t flush_epoch{0};
 
-    std::filesystem::remove_all("./indices");
+    std::filesystem::remove_all("/tmp/indices_test");
 
     hedge::db::memtable mt(
         cfg,
         /*num_partition_exponent=*/4,
-        /*indices_path=*/"./indices",
+        /*indices_path=*/"/tmp/indices_test",
         &flush_epoch,
         /*push_new_indices=*/[](std::vector<hedge::db::sst>) {},
         /*trigger_compaction_callback=*/[] {},
@@ -132,12 +140,13 @@ int main()
 
     double elapsed_s = std::chrono::duration<double>(t1 - t0).count();
     double throughput = N / elapsed_s;
-    double bandwidth_mb = (throughput * (sizeof(DUMMY_VALUE))) / (1000.0 * 1000.0);
+    double bandwidth_mb = (throughput * (DUMMY_VALUE.size() + sizeof(hedge::key_t))) / (1000.0 * 1000.0);
 
     std::cout << std::fixed << std::setprecision(2);
     std::cout << "Inserted " << N << " keys via executor in " << elapsed_s * 1000.0 << " ms\n";
     std::cout << "Throughput: " << static_cast<size_t>(throughput) << " items/s\n";
     std::cout << "Bandwidth:  " << bandwidth_mb << " MB/s\n";
+    std::cout << "Backpressure count: " << hedge::db::memtable::BACKPRESSURE.load() << "\n";
 
     mt.wait_for_flush().wait();
 }

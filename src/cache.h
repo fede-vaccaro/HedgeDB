@@ -76,9 +76,9 @@ namespace hedge::db
     {
         friend class PageCacheTest;
 
-        std::shared_mutex _m{};
-        // async::rw_spinlock _m{};
-        std::atomic_size_t _clock_hand{};
+        alignas(64) std::shared_mutex _m{};
+        // alignas(64) async::rw_spinlock _m{};
+        alignas(64) std::atomic_size_t _clock_hand{};
         size_t _max_page_capacity{};
 
         struct alignas(64) _metadata
@@ -188,14 +188,14 @@ namespace hedge::db
             }
         };
 
-        write_page_guard get_write_slot(page_tag page);
+        std::optional<write_page_guard> get_write_slot(page_tag page);
         std::optional<write_page_guard> try_get_write_slot(page_tag page);
 
         std::optional<awaitable_page_guard> lookup(page_tag page, bool hint_evict = false);
         std::optional<awaitable_page_guard> try_lookup(page_tag page, bool hint_evict = false);
 
     private:
-        size_t _find_frame();
+        std::optional<size_t> _find_frame();
     };
 
     class sharded_page_cache
@@ -218,7 +218,7 @@ namespace hedge::db
                 new(this->_caches.get() + i) page_cache(per_cache_bytes);
         }
 
-        page_cache::write_page_guard get_write_slot(page_tag page)
+        std::optional<page_cache::write_page_guard> get_write_slot(page_tag page)
         {
             size_t hash = std::hash<page_tag>{}(page) % this->_num_caches;
             return this->_caches.get()[hash].get_write_slot(page);
@@ -251,7 +251,7 @@ namespace hedge::db
             }
         }
 
-        std::vector<page_cache::write_page_guard> get_write_slots_range(uint32_t id, size_t start_page_index, size_t num_pages);
+        std::vector<std::optional<page_cache::write_page_guard>> get_write_slots_range(uint32_t id, size_t start_page_index, size_t num_pages);
         std::vector<std::optional<page_cache::awaitable_page_guard>> lookup_range(uint32_t id, size_t start_page_index, size_t num_pages, bool hint_evict);
     };
 

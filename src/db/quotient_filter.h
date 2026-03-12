@@ -1,6 +1,7 @@
 #pragma once
 
 #include <error.hpp>
+#include <span>
 
 #include "qf.h"
 
@@ -23,7 +24,7 @@ namespace hedge::db
 
         quotient_filter& operator=(quotient_filter&& other) noexcept
         {
-            this->~quotient_filter();
+            this->_free();
 
             this->_qf_impl = std::exchange(other._qf_impl, {});
 
@@ -37,10 +38,17 @@ namespace hedge::db
 
         bool insert(uint64_t hash);
 
-        bool may_contain(uint64_t hash);
+        bool may_contain(uint64_t hash) const;
 
         bool remove(uint64_t hash);
 
         void clear();
+
+        [[nodiscard]] std::span<const uint8_t> data_as_byte_span() const;
+
+        [[nodiscard]] std::span<const uint8_t> header_as_byte_span() const;
+
+    private:
+        void _free();
     };
 } // namespace hedge::db

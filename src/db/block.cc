@@ -350,12 +350,12 @@ namespace hedge::db
         size_t restart_count = *reinterpret_cast<const uint16_t*>(restart_count_ptr);
         const auto* offsets_base = restart_count_ptr - (restart_count * sizeof(uint16_t));
 
-        std::vector<uint16_t> offsets;
+        inline_vector<uint16_t> offsets;
         offsets.assign(reinterpret_cast<const uint16_t*>(offsets_base), reinterpret_cast<const uint16_t*>(restart_count_ptr));
 
         // Find the right Restart Point with binary search
 
-        std::vector<uint8_t> key_buffer; // TODO: std::vector should be backed from a stack allocated buffer
+        inline_vector<uint8_t> key_buffer; // TODO: std::vector should be backed from a stack allocated buffer
 
         auto offset_it = std::upper_bound( // NOLINT
             offsets.begin(),

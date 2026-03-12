@@ -103,7 +103,7 @@ namespace hedge::db
         /** @brief File extension used for value table files. */
         static constexpr std::string_view TABLE_FILE_EXTENSION = ".vt";
         /** @brief Maximum size in bytes for the data portion of the table (excluding EOF marker and info). Limited by uint32_t offset in value_ptr_t. */
-        static constexpr size_t TABLE_MAX_SIZE_BYTES = std::numeric_limits<uint32_t>::max();
+        static constexpr size_t TABLE_MAX_SIZE_BYTES = 256 * 1024 * 1024; // std::numeric_limits<uint32_t>::max();
         /** @brief Actual maximum file size including EOF marker and info struct. */
         static constexpr size_t TABLE_ACTUAL_MAX_SIZE = TABLE_MAX_SIZE_BYTES + sizeof(EOF_MARKER) + sizeof(value_table_info);
         /** @brief Maximum possible ID for a value table. */

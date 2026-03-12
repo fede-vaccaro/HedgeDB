@@ -7,6 +7,7 @@
 #include <ranges>
 #include <thread>
 
+#include "db/folly/concurrent_skip_list/micro_spin_lock.h"
 #include "index_ops.h"
 #include "memtable.h"
 #include "types.h"
@@ -20,13 +21,15 @@ namespace hedge::db
                        std::atomic_size_t* flush_epoch_ptr,
                        std::function<void(std::vector<sst>)> push_new_indices,
                        std::function<void()> trigger_compaction_callback,
-                       std::shared_ptr<db::sharded_page_cache> page_cache)
+                       std::shared_ptr<db::sharded_page_cache> page_cache,
+                       std::atomic_bool* compaction_backpressure)
         : _cfg(cfg),
           _num_partition_exponent(num_partition_exponent),
           _indices_path(std::move(indices_path)),
           _flush_epoch(flush_epoch_ptr),
           _push_new_indices(std::move(push_new_indices)),
           _trigger_compaction_callback(std::move(trigger_compaction_callback)),
+          _compaction_backpressure(compaction_backpressure),
           _cache(std::move(page_cache)),
           _logger("memtable")
     {
@@ -36,6 +39,34 @@ namespace hedge::db
         this->_flush_executor_pool.resize(this->_cfg.flush_io_workers);
         for(auto& ex : this->_flush_executor_pool)
             ex = async::executor_context::make_new(32);
+
+        this->_table_maker = std::thread(
+            [this]()
+            {
+                while(this->_running.load(std::memory_order::relaxed))
+                {
+                    auto curr = this->_pipelined_table.load(std::memory_order::relaxed);
+
+                    if(curr != nullptr)
+                        this->_pipelined_table.wait(curr, std::memory_order_relaxed);
+
+                    if(this->_running.load(std::memory_order::relaxed))
+                    {
+                        this->_pipelined_table.store(make_memtable(), std::memory_order_relaxed);
+                        this->_pipelined_table.notify_one();
+                    }
+                }
+            });
+    }
+
+    memtable::~memtable()
+    {
+        this->_running.store(false, std::memory_order::relaxed);
+        this->_pipelined_table.store(nullptr, std::memory_order::relaxed);
+        this->_pipelined_table.notify_one();
+
+        if(this->_table_maker.joinable())
+            this->_table_maker.join();
     }
 
     void memtable::put(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type)
@@ -46,18 +77,34 @@ namespace hedge::db
 
         static std::atomic_size_t THREADS{0};
         thread_local std::atomic_size_t THIS_THREAD_IDX = THREADS.fetch_add(1, std::memory_order::relaxed);
+        auto insert_attempts = 0;
+
         while(true)
         {
-            auto attempts = 0;
 
             // Using modulo to map the thread index to the number of available counters.
             // THIS_THREAD_IDX is a monotonic counter, so this handles the case where
             // the number of lifetime threads exceeds the number of writer slots.
             auto memtable = local_memtable_ref->acquire_writer(THIS_THREAD_IDX % this->_cfg.num_writer_threads);
 
-            if(!memtable) [[unlikely]] // The memtable has been freezen, load the new one and retry
+            if(!memtable) [[unlikely]] // The memtable has been frozen (from the flusher), try loading the new one
             {
-                local_memtable_ref = this->_table.load(std::memory_order::relaxed);
+                auto t = this->_table.load(std::memory_order::relaxed);
+                if(t == local_memtable_ref) // Backpressure
+                {
+
+                    if(insert_attempts++ < 4)
+                        folly::detail::asm_volatile_pause();
+                    else
+                    {
+                        BACKPRESSURE.fetch_add(1, std::memory_order::relaxed);
+                        this->_table.wait(t, std::memory_order::relaxed);
+                    }
+                    continue;
+                }
+
+                local_memtable_ref = t;
+                insert_attempts = 0;
                 continue;
             }
 
@@ -65,6 +112,7 @@ namespace hedge::db
             auto value_span = memtable->value_arena.allocate(value.size() + 1);
             // std::span<uint8_t> value_span(data_ptr, value.size() + 1);
             bool ok = !value_span.empty(); // nullptr means out of memory budget
+            // bool ok = data_ptr != nullptr;
 
             if(ok)
             {
@@ -78,15 +126,21 @@ namespace hedge::db
                 bool this_thread_flushed = this->_flush();
                 if(!this_thread_flushed)
                 {
-                    attempts++;
-                    if(attempts < 16)
-                        std::this_thread::yield();
-                    else
-                        this->_pipelined_table.wait(nullptr, std::memory_order::relaxed); // <-- backpressure here
+                    // std::this_thread::yield();
+                    // folly::detail::asm_volatile_pause();
                 }
                 continue;
             }
 
+            // Backpressure from compaction: yield to let compaction catch up
+            if(this->_compaction_backpressure &&
+               this->_compaction_backpressure->load(std::memory_order::relaxed)) [[unlikely]]
+            {
+                BACKPRESSURE.fetch_add(1, std::memory_order::relaxed);
+                std::this_thread::yield();
+            }
+
+            // OK
             return;
         }
     }
@@ -160,24 +214,28 @@ namespace hedge::db
 
     bool memtable::_flush()
     {
-        auto next_in_pipeline = this->_pipelined_table.load(std::memory_order::relaxed);
+        bool expected = false;
 
-        // CAS test
-        if(next_in_pipeline != nullptr &&
-           this->_pipelined_table.compare_exchange_strong(
-               next_in_pipeline,
-               nullptr,
-               std::memory_order::relaxed,
-               std::memory_order::relaxed))
+        // Only one thread can enter here
+        if(this->_flush_mutex.compare_exchange_strong(expected, true))
         {
             size_t curr_flush_epoch = this->_flush_epoch->fetch_add(1, std::memory_order::relaxed);
             rw_sync_table_ptr_t memtable_to_flush{};
 
-            { // Won the race, actually trigger flush
+            this->_table.load(std::memory_order::relaxed)->freeze_writes();
+            this->_pipelined_table.wait(nullptr, std::memory_order::relaxed);
+
+            {
                 std::unique_lock lk(this->_pending_flushes_mutex);
 
-                this->_table.load(std::memory_order::relaxed)->freeze_writes();
+                this->_pending_flushes_cv.wait(lk, [this]()
+                                               { return this->_pending_flushes.size() < MAX_PENDING_FLUSHES; });
+
+                rw_sync_table_ptr_t next_in_pipeline = this->_pipelined_table.exchange(nullptr);
+                this->_pipelined_table.notify_one(); // Notify the table_maker thread
+
                 memtable_to_flush = this->_table.exchange(next_in_pipeline, std::memory_order::relaxed);
+                this->_table.notify_all(); // Notify every thread waiting for the new memtable to
 
                 this->_pending_flushes.insert_or_assign(curr_flush_epoch, memtable_to_flush);
             }
@@ -188,27 +246,9 @@ namespace hedge::db
                 {
                     // this->_logger.log("Flushing mem index, epoch: ", curr_flush_epoch, " size: ", memtable_to_flush->ptr()->size());
                     auto t0 = std::chrono::high_resolution_clock::now();
-                    auto new_next = this->make_memtable();
-                    auto t_new_next = std::chrono::high_resolution_clock::now();
-                    [[maybe_unused]] auto duration_new_next = std::chrono::duration_cast<std::chrono::microseconds>(t_new_next - t0);
-                    // this->_logger.log("Created new memtable for flush e
-                    // poch ", curr_flush_epoch, " in ", (double)duration_new_next.count() / 1000.0, " ms");
-                    // Update pipelined
-                    // But skip if not needed
-                    std::shared_ptr<rw_sync_table_t> expected = nullptr;
-                    if(this->_pipelined_table.compare_exchange_strong(expected, new_next))
-                    {
-                        this->_pipelined_table.notify_all();
-                    }
-                    else
-                    {
-                        expected.reset();
-                    }
 
                     while(memtable_to_flush->any_active_writer()) // Wait until every writer is done with the object
                         std::this_thread::yield();
-
-                    auto pool = this->_flush_executor_pool;
 
                     auto partitioned_sorted_indices = index_ops::flush_mem_index2_parallel(
                         this->_indices_path,
@@ -226,13 +266,19 @@ namespace hedge::db
                     }
 
                     // Push the new indices to the DB, to make them visible as Sorted indices
+                    bool should_notify_flush = false;
+
                     {
                         std::unique_lock lk(this->_pending_flushes_mutex);
                         this->_push_new_indices(std::move(partitioned_sorted_indices.value()));
                         auto it = this->_pending_flushes.find(curr_flush_epoch);
                         assert(it->second == memtable_to_flush);
                         this->_pending_flushes.erase(it);
+                        should_notify_flush = this->_pending_flushes.size() <= MAX_PENDING_FLUSHES / 2;
                     }
+
+                    if(should_notify_flush)
+                        this->_pending_flushes_cv.notify_one();
 
                     if(this->_cfg.auto_compaction)
                         this->_trigger_compaction_callback();
@@ -243,6 +289,8 @@ namespace hedge::db
                     // this->_logger.log("Mem index flushed ", memtable_to_flush->ptr()->size(), " keys in ", (double)duration.count() / 1000.0, " ms", " throughput: ", throughput, " keys/s");
                 });
 
+            // Release mutex
+            this->_flush_mutex.store(false);
             return true;
         }
 

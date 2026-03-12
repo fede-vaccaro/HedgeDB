@@ -113,4 +113,8 @@ namespace hedge::db::third_party
      */
     uint64_t qfi_next(struct quotient_filter* qf, struct qf_iterator* i);
 
+    const uint8_t* data();
+
+    size_t qf_allocated_size(const struct quotient_filter* qf);
+
 } // namespace hedge::db::third_party

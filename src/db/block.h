@@ -43,6 +43,7 @@ Block format:
 #include <cstdint>
 #include <error.hpp>
 
+#include "stack_allocator.h"
 #include "types.h"
 
 namespace hedge::db
@@ -60,6 +61,23 @@ namespace hedge::db
         std::array<uint8_t, 6> _footer_bytes; // Padding
     };
 
+    template <typename T>
+        requires std::is_unsigned_v<T>
+    struct inline_vector : std::vector<T, stack_allocator<T, MAX_KEY_LEN * 2>>
+    {
+        inline_vector() : std::vector<T, stack_allocator<T, MAX_KEY_LEN * 2>>()
+        {
+            this->reserve(MAX_KEY_LEN * 2);
+        }
+
+        inline_vector(auto begin, auto end)
+        {
+            this->reserve(MAX_KEY_LEN * 2);
+            this->assign(begin, end);
+        }
+        
+    };
+
     class block_encoder
     {
         friend struct BlockTest;
@@ -70,8 +88,8 @@ namespace hedge::db
         // Builder state
         uint8_t* _base{};
         uint8_t* _head{};
-        std::vector<uint8_t> _last_key{}; // TODO: try std::pmr::vector
-        std::vector<uint16_t> _offsets{}; // TODO: try std::pmr::vector
+        inline_vector<uint8_t> _last_key{}; // TODO: try std::pmr::vector
+        inline_vector<uint16_t> _offsets{}; // TODO: try std::pmr::vector
         size_t _bytes_written{};
         uint32_t _kvs_count{};
         uint32_t _restart_keys_written{};
@@ -96,7 +114,7 @@ namespace hedge::db
             this->_commit();
         }
 
-        [[nodiscard]] const std::vector<uint8_t>& last_pushed_key() const
+        [[nodiscard]] std::span<const uint8_t> last_pushed_key() const
         {
             return this->_last_key;
         }
@@ -149,7 +167,7 @@ namespace hedge::db
         uint32_t _kvs_in_block_count{};
         uint32_t _restart_group_size{};
 
-        std::vector<uint8_t> _key{};
+        inline_vector<uint8_t> _key{};
         std::span<const uint8_t> _value_ref{};
 
     public:

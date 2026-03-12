@@ -27,6 +27,8 @@ namespace hedge::db
             std::optional<uint64_t> meta_index_entries{};
             std::optional<uint64_t> index_offset{};
             std::optional<uint64_t> meta_index_offset{};
+            std::optional<uint64_t> qf_offset{};
+            std::optional<uint64_t> qf_size{};
             std::optional<uint64_t> footer_offset{};
             std::optional<uint64_t> epoch{};
 
@@ -55,6 +57,8 @@ namespace hedge::db
                     .meta_index_entries = this->meta_index_entries.value(),
                     .index_offset = this->index_offset.value(),
                     .meta_index_offset = this->meta_index_offset.value(),
+                    .qf_offset = this->qf_offset.value_or(0),
+                    .qf_size = this->qf_size.value_or(0),
                     .footer_offset = this->footer_offset.value(),
                     .epoch = this->epoch.value()};
             }

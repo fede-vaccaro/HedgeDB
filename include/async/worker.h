@@ -31,6 +31,8 @@ namespace hedge::async
         void submit(std::function<void()> job);
         void shutdown();
 
+        void wait_for_all_jobs();
+
     private:
         void _run();
     };

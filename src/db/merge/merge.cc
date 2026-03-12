@@ -6,6 +6,7 @@
 #include "db/merge/merge_utils.h"
 #include "db/merge/rolling_buffer.h"
 #include "db/merge/write_buffer.h"
+#include "db/quotient_filter.h"
 #include "db/sst.h"
 #include "mailbox_impl.h"
 #include "types.h"
@@ -13,6 +14,23 @@
 
 namespace hedge::db
 {
+    static constexpr size_t QF_BITS_PER_KEY = 10;
+    static constexpr size_t QF_FLAG_BITS = 3;
+
+    static hedge::expected<quotient_filter> create_qf_for_key_count(size_t num_keys)
+    {
+        size_t slots = (num_keys * 4 + 2) / 3; // ceil(num_keys / 0.75)
+        uint32_t q = 0;
+        size_t s = 1;
+        while(s < slots)
+        {
+            s <<= 1;
+            q++;
+        }
+        uint32_t r = QF_BITS_PER_KEY;
+        return quotient_filter::make(q, r);
+    }
+
     async::task<hedge::expected<sst>> index_ops::k_way_merge_async2( // NOLINT(readability-function-cognitive-complexity)
         const merge_config& config,
         const std::vector<const sst*>& indices,
@@ -26,7 +44,7 @@ namespace hedge::db
             co_return hedge::error("All indices must have the same partition prefix for merging");
 
         // Step 0: Validate preconditions and init all the necessary structures --
-        size_t read_ahead_size = config.read_ahead_size;
+        size_t read_ahead_size = config.read_ahead_size / indices.size();
         if(!is_page_aligned(read_ahead_size))
             read_ahead_size = hedge::ceil_page_align(read_ahead_size);
 
@@ -42,7 +60,7 @@ namespace hedge::db
 
         // Extrapolate new index path
         auto [dir, file_name] = format_prefix(indices[0]->upper_bound());
-        auto new_path = config.base_path / dir / with_extension(file_name, std::format(".{}", config.new_index_id));
+        auto new_path = config.base_path / dir / with_extension(file_name, std::format(".{:06}", config.new_index_id));
 
         // estimated_size upper bound, will be truncated later
         size_t estimated_size = std::accumulate(
@@ -63,6 +81,12 @@ namespace hedge::db
                 return acc + idx->_footer.indexed_keys;
             });
         size_t max_new_meta_index_entries = hedge::ceil(max_new_index_keys, INDEX_PAGE_NUM_ENTRIES);
+
+        // Create quotient filter (slightly oversized due to dedup — acceptable)
+        auto maybe_qf = create_qf_for_key_count(max_new_index_keys);
+        std::optional<quotient_filter> qf;
+        if(maybe_qf)
+            qf = std::move(maybe_qf.value());
 
         auto fd_maybe = co_await fs::file::from_path_async(new_path,
                                                            fs::file::open_mode::write_new,
@@ -158,7 +182,7 @@ namespace hedge::db
         // Hot path: returns true if buffer is full and item was NOT written
         auto try_push_kv = [&] [[nodiscard]] (const merge_entry_t& kv) -> bool
         {
-            auto s = write_buffer.write_item(kv, merged_meta_index, merged_meta_index_bytes);
+            auto s = write_buffer.write_item(kv.key, kv.value, merged_meta_index, merged_meta_index_bytes);
             return (bool)s;
         };
 
@@ -243,6 +267,9 @@ namespace hedge::db
             std::ranges::pop_heap(key_heap, heap_item_t_comparator);
             auto [keyvalue, rbuf] = std::move(key_heap.back());
             key_heap.pop_back();
+            // auto it = std::ranges::min_element(key_heap, heap_item_t_comparator);
+            // auto [keyvalue, rbuf] = std::move(*it);
+            // key_heap.erase(it);
 
             dedup.push(std::move(keyvalue));
 
@@ -284,6 +311,9 @@ namespace hedge::db
                 // continue;
                 // }
 
+                if(qf.has_value())
+                    qf->insert(std::hash<key_t>{}(new_item.key));
+
                 if(!try_push_kv(new_item)) [[unlikely]]
                 {
                     auto s = co_await flush_and_retry(new_item);
@@ -324,6 +354,9 @@ namespace hedge::db
             // filtered_keys++;
             // continue;
             // }
+
+            if(qf.has_value())
+                qf->insert(std::hash<key_t>{}(new_item.key));
 
             if(!try_push_kv(new_item)) [[unlikely]]
             {
@@ -402,6 +435,45 @@ namespace hedge::db
             bytes_written += res.bytes_written;
         }
 
+        // Write quotient filter (header page + data pages)
+        if(qf.has_value())
+        {
+            fb.qf_offset = bytes_written;
+
+            // Write QF header (padded to one page)
+            auto header_span = qf->header_as_byte_span();
+            page_aligned_buffer<uint8_t> qf_header_buf(PAGE_SIZE_IN_BYTES);
+            std::memcpy(qf_header_buf.data(), header_span.data(), header_span.size());
+
+            auto qf_header_res = co_await executor->submit_request(async::write_request{
+                .fd = output_file.fd(),
+                .data = qf_header_buf.data(),
+                .size = PAGE_SIZE_IN_BYTES,
+                .offset = bytes_written});
+
+            if(qf_header_res.error_code != 0)
+                co_return hedge::error("Failed to write QF header: " + std::string(strerror(qf_header_res.error_code)));
+            bytes_written += qf_header_res.bytes_written;
+
+            // Write QF data (page-aligned)
+            auto data_span = qf->data_as_byte_span();
+            size_t data_write_size = hedge::ceil_page_align(data_span.size());
+            page_aligned_buffer<uint8_t> qf_data_buf(data_write_size);
+            std::memcpy(qf_data_buf.data(), data_span.data(), data_span.size());
+
+            auto qf_data_res = co_await executor->submit_request(async::write_request{
+                .fd = output_file.fd(),
+                .data = qf_data_buf.data(),
+                .size = data_write_size,
+                .offset = bytes_written});
+
+            if(qf_data_res.error_code != 0)
+                co_return hedge::error("Failed to write QF data: " + std::string(strerror(qf_data_res.error_code)));
+            bytes_written += qf_data_res.bytes_written;
+
+            fb.qf_size = bytes_written - *fb.qf_offset;
+        }
+
         fb.footer_offset = bytes_written;
 
         auto maybe_footer = fb.build();
@@ -453,6 +525,7 @@ namespace hedge::db
             std::move(merged_meta_index),
             footer,
             std::move(super_index),
+            std::move(qf),
         };
 
         co_return result;

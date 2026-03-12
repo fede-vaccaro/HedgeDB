@@ -142,8 +142,8 @@ namespace hedge::prof
     }
 
     constexpr static auto keys = std::array{
-        // std::string_view{"cache_hits"},
-        // std::string_view{"lookup"},
+        std::string_view{"cache_hits"},
+        std::string_view{"lookup"},
         // std::string_view{"get_slot"},
         // std::string_view{"find_in_page"},
         // std::string_view{"push_coro"},
@@ -170,7 +170,9 @@ namespace hedge::prof
         std::string_view("test_task"),
         std::string_view("submit_job"),
         std::string_view("rolling_buffer::pop_front"),
-    };
+        std::string_view("qf_false_positives"),
+        std::string_view("find_value_in_sst"),
+        };
 
     static constexpr fixed_set<std::string_view, keys.size()> _metrics_set = fixed_set(keys);
 

@@ -75,6 +75,13 @@ namespace hedge::async
             this->_worker.join();
     }
 
+    void worker::wait_for_all_jobs()
+    {
+        size_t c;
+        while((c = this->_job_count.load(std::memory_order::relaxed)) != 0)
+            this->_job_count.wait(c, std::memory_order::relaxed);
+    }
+
     void worker::_run()
     {
         while(true)
@@ -105,7 +112,10 @@ namespace hedge::async
             {
                 pop_front(fetched_tasks)();
 
-                this->_job_count.fetch_sub(1, std::memory_order::relaxed);
+                auto c = this->_job_count.fetch_sub(1, std::memory_order::relaxed) - 1;
+
+                if(c == 0)
+                    this->_job_count.notify_all();
             }
 
             while(this->_job_count.load(std::memory_order::relaxed) == 0 && this->_running)

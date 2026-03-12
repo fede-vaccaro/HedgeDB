@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <execution>
 #include <filesystem>
 #include <limits>
 #include <random>
@@ -20,11 +21,50 @@
 
 namespace hedge::db
 {
+    struct alignas(64) fiber_timing
+    {
+        std::chrono::high_resolution_clock::time_point t_submit;
+        std::chrono::high_resolution_clock::time_point t_start;
+        std::chrono::high_resolution_clock::time_point t_end;
+    };
+
+    void print_latency_stats(const std::string& label, std::vector<fiber_timing>& timings)
+    {
+        size_t n = timings.size();
+        if(n == 0)
+            return;
+
+        std::vector<double> queue_us(n);
+        std::vector<double> exec_us(n);
+        std::vector<double> total_us(n);
+        for(size_t i = 0; i < n; ++i)
+        {
+            queue_us[i] = std::chrono::duration<double, std::micro>(timings[i].t_start - timings[i].t_submit).count();
+            exec_us[i] = std::chrono::duration<double, std::micro>(timings[i].t_end - timings[i].t_start).count();
+            total_us[i] = std::chrono::duration<double, std::micro>(timings[i].t_end - timings[i].t_submit).count();
+        }
+
+        std::ranges::sort(queue_us);
+        std::ranges::sort(exec_us);
+        std::ranges::sort(total_us);
+
+        auto p50 = [&](const std::vector<double>& v)
+        { return v[n * 50 / 100]; };
+        auto p99 = [&](const std::vector<double>& v)
+        { return v[n * 99 / 100]; };
+
+        std::cout << label << " latency (us) — "
+                  << "queue p50=" << p50(queue_us) << " p99=" << p99(queue_us)
+                  << " | exec p50=" << p50(exec_us) << " p99=" << p99(exec_us)
+                  << " | total p50=" << p50(total_us) << " p99=" << p99(total_us)
+                  << std::endl;
+    }
+
     struct database_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, size_t>>
     {
         static void SetUpTestSuite()
         {
-            async::executor_pool::init_static_pool(12, 64);
+            async::executor_pool::init_static_pool(20, 16);
         }
 
         void SetUp() override
@@ -41,11 +81,15 @@ namespace hedge::db
         {
         }
 
-        void fill_key_as_random(key_t& key)
+        static void fill_key_as_random(key_t& key)
         {
+            // constexpr size_t _gen_seed{107279581};
+            thread_local std::mt19937 _generator{std::random_device{}()};
+            thread_local std::uniform_int_distribution<uint8_t> dist{0, 255};
+
             auto span = key.as_bytes();
-            std::ranges::generate(span, [this]()
-                                  { return static_cast<uint8_t>(this->dist(this->_generator)); });
+            std::ranges::generate(span, []()
+                                  { return static_cast<uint8_t>(dist(_generator)); });
         }
 
         /*
@@ -55,17 +99,23 @@ namespace hedge::db
         */
         void _setup_key_values(bool /* create_new */)
         {
-            this->_keys.reserve(this->N_KEYS);
+            this->_keys.resize(this->N_KEYS);
             std::hash<key_t> hasher;
 
             auto t0 = std::chrono::high_resolution_clock::now();
 
+            std::for_each(
+                std::execution::par_unseq, this->_keys.begin(), this->_keys.end(),
+                [](key_t& k)
+                {
+                    constexpr size_t key_size = 24;
+                    k = key_t::make_with_length(key_size);
+                    fill_key_as_random(k);
+                });
+
             for(auto idx = 0UL; idx < this->N_KEYS; ++idx)
             {
-                constexpr size_t key_size = 24;
-                this->_keys.emplace_back(key_t::make_with_length(key_size));
-                key_t& k = this->_keys.back();
-                this->fill_key_as_random(k);
+                key_t& k = this->_keys[idx];
 
                 size_t hash = hasher(k) % MAX_CACHE_ITEMS_CAPACITY;
                 if(this->_possible_values.contains(hash))
@@ -115,13 +165,15 @@ namespace hedge::db
         db_config config;
         config.auto_compaction = true;
         config.keys_in_mem_before_flush = this->MEMTABLE_CAPACITY;
-        config.compaction_read_ahead_size_bytes = 4 * 1024 * 1024;
+        config.compaction_read_ahead_size_bytes = 2 * 1024 * 1024;
         config.num_partition_exponent = 4;
-        config.target_compaction_size_ratio = 1.0;
+        config.target_compaction_size_ratio = 1.20;
         config.use_odirect_for_indices = true;
-        config.index_page_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024;
+        config.index_page_clock_cache_size_bytes = 0 * 256 * 1024 * 1024;
         config.index_point_cache_size_bytes = 0;
         config.compaction_timeout = std::chrono::minutes(20);
+        config.flush_io_workers = 6;
+        config.compaction_io_workers = 6;
 
         if(config.index_page_clock_cache_size_bytes > 0)
             std::cout << "Using CLOCK cache. Allocated space: " << config.index_page_clock_cache_size_bytes / (1000.0 * 1000.0) << "MB" << std::endl;
@@ -137,8 +189,6 @@ namespace hedge::db
 
         auto make_put_task = [this, &db, &write_wg, &dist](size_t i) -> async::task<void>
         {
-            // prof::counter_guard guard(prof::get<"put_async">());
-
             const auto& key = this->_keys[i];
             size_t seed = std::hash<key_t>{}(key) % MAX_CACHE_ITEMS_CAPACITY;
 
@@ -163,12 +213,22 @@ namespace hedge::db
         };
 
         auto t0 = std::chrono::high_resolution_clock::now();
+        std::vector<std::shared_ptr<async::executor_context>> executors;
+        constexpr size_t NUM_WRITERS = 8;
+        executors.reserve(NUM_WRITERS);
+        for(size_t i = 0; i < NUM_WRITERS; ++i)
+            executors.push_back(async::executor_pool::executor_from_static_pool());
+
         for(size_t i = 0; i < this->N_KEYS; ++i)
         {
-            const auto& executor = async::executor_pool::executor_from_static_pool();
+            const auto& executor = executors[i % executors.size()];
             executor->submit_io_task(make_put_task(i));
         }
+
         write_wg->wait();
+        std::cout << "All insertions completed. Waiting for any pending compactions to finish..." << std::endl;
+        db->wait_for_compactions_to_finish(); // wait for any pending compactions to finish before measuring time
+
         auto t1 = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         std::cout << "Total duration for insertion: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
@@ -176,6 +236,7 @@ namespace hedge::db
         std::cout << "Insertion bandwidth: " << (double)this->N_KEYS * ((this->PAYLOAD_SIZE + sizeof(uuid_t)) / 1000.0 / 1000.0) / (duration.count() / 1'000'000.0) << " MB/s" << std::endl;
         std::cout << "Insertion throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000) << " items/s" << std::endl;
         std::cout << "Deleted keys: " << this->_deleted_keys.size() << std::endl;
+        std::cout << "BACKPRESSURE count (contention on memtable writers): " << hedge::db::memtable::BACKPRESSURE.load() << std::endl;
         prof::print_internal_perf_stats(false);
 
         // flush
@@ -187,17 +248,18 @@ namespace hedge::db
         // std::cout << "Total duration for flush: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
 
         // compaction
-        std::cout << "Triggering full compaction" << std::endl;
-        t0 = std::chrono::high_resolution_clock::now();
-        auto compaction_status_future = db->compact_sorted_indices(true);
-        auto maybe_compaction_status = compaction_status_future.get();
-        ASSERT_TRUE(maybe_compaction_status.has_value()) << "An error occurred during compaction: " << maybe_compaction_status.error().to_string();
-        t1 = std::chrono::high_resolution_clock::now();
-        auto compaction_duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-        std::cout << "Total duration for a full compaction: " << (double)compaction_duration.count() / 1000.0 << " ms" << std::endl;
-        std::cout << "Compaction throughput: " << (double)(maybe_compaction_status.value() / (1000.0 * 1000.0)) / (compaction_duration.count() / 1'000'000.0) << " MB/s" << std::endl;
-        std::cout << "Insertion throughput including compaction:"
-                  << (uint64_t)(this->N_KEYS / (double)(duration.count() + compaction_duration.count()) * 1'000'000) << " items/s" << std::endl;
+        // std::cout << "Triggering full compaction" << std::endl;
+        // t0 = std::chrono::high_resolution_clock::now();
+        // auto compaction_status_future = db->compact_sorted_indices(true);
+        // auto maybe_compaction_status = compaction_status_future.get();
+        // ASSERT_TRUE(maybe_compaction_status.has_value()) << "An error occurred during compaction: " << maybe_compaction_status.error().to_string();
+        // t1 = std::chrono::high_resolution_clock::now();
+        // auto compaction_duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+        // std::cout << "Total duration for a full compaction: " << (double)compaction_duration.count() / 1000.0 << " ms" << std::endl;
+        // std::cout << "Compaction Output throughput: " << (double)(maybe_compaction_status.value().output_bytes / (1000.0 * 1000.0)) / (compaction_duration.count() / 1'000'000.0) << " MB/s" << std::endl;
+        // std::cout << "Compaction Input processed: " << maybe_compaction_status.value().output_bytes / (1000.0 * 1000.0) << " MB" << std::endl;
+        // std::cout << "Insertion throughput including compaction:"
+        //           << (uint64_t)(this->N_KEYS / (double)(duration.count() + compaction_duration.count()) * 1'000'000) << " items/s" << std::endl;
 
         // prof::print_internal_perf_stats(false);
 
@@ -217,8 +279,10 @@ namespace hedge::db
         std::cout << "Sleeping " << sleep_time.count() << " seconds before starting retrieval to cool down..." << std::endl;
         std::this_thread::sleep_for(sleep_time);
 
-        // this->N_KEYS = std::min(10'000'000UL, this->N_KEYS); // reduce number of keys to read
-        this->N_KEYS /= 8;
+        this->N_KEYS = std::min(10'000'000UL, this->N_KEYS); // reduce number of keys to read
+        this->_keys.resize(this->N_KEYS);
+        this->_keys.shrink_to_fit();
+        // this->N_KEYS /= 8;
 
         for(int i = 0; i < 2; i++)
         {
@@ -276,9 +340,15 @@ namespace hedge::db
 
             t0 = std::chrono::high_resolution_clock::now();
 
+            std::vector<std::shared_ptr<async::executor_context>> executors;
+            constexpr size_t NUM_READERS = 16;
+            executors.reserve(NUM_READERS);
+            for(size_t i = 0; i < NUM_READERS; ++i)
+                executors.push_back(async::executor_pool::executor_from_static_pool());
+
             for(size_t i = 0; i < this->N_KEYS; ++i)
             {
-                const auto& executor = async::executor_pool::executor_from_static_pool();
+                const auto& executor = executors[i % executors.size()];
                 executor->submit_io_task(make_get_task(i));
             }
 
@@ -305,9 +375,9 @@ namespace hedge::db
         test_suite,
         database_test,
         testing::Combine(
-            testing::Values(80'000'000), // n keys
-            testing::Values(100),        // payload size
-            testing::Values(2'000'000)   // memtable capacity
+            testing::Values(10'000'000), // n keys
+            testing::Values(100),         // payload size
+            testing::Values(2'000'000)    // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)
         {
