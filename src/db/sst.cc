@@ -1,10 +1,12 @@
 #include <cstdint>
 #include <cstring>
+#include <unistd.h>
 #include <utility>
 
 #include "db/block.h"
 #include "sst.h"
 #include "types.h"
+#include "utils.h"
 #include "xxh64.hpp"
 
 namespace hedge::db
@@ -13,6 +15,92 @@ namespace hedge::db
     sst::sst(fs::file fd, page_aligned_buffer<key_t> meta_index, sst_footer footer, std::optional<page_aligned_buffer<key_t>> super_index, std::optional<quotient_filter> qf)
         : fs::file(std::move(fd)), _meta_index(std::move(meta_index)), _super_index(std::move(super_index)), _qf(std::move(qf)), _footer(footer)
     {
+    }
+
+    hedge::expected<sst> sst::load(const std::filesystem::path& path, bool use_odirect)
+    {
+        auto maybe_fd = fs::file::from_path(path, fs::file::open_mode::read_only, use_odirect);
+        if(!maybe_fd)
+            return hedge::error("sst::load: failed to open file: " + maybe_fd.error().to_string());
+
+        auto fd = std::move(maybe_fd.value());
+
+        // Read footer from the last page
+        size_t footer_page_size = hedge::round_up(sizeof(sst_footer), PAGE_SIZE_IN_BYTES);
+        size_t footer_offset = fd.file_size() - footer_page_size;
+
+        page_aligned_buffer<uint8_t> footer_buf(footer_page_size);
+        int res = pread(fd.fd(), footer_buf.data(), footer_page_size, footer_offset);
+        if(res < 0 || static_cast<size_t>(res) != footer_page_size)
+            return hedge::error("sst::load: failed to read footer from " + path.string());
+
+        sst_footer footer{};
+        std::memcpy(&footer, footer_buf.data(), sizeof(footer));
+
+        if(std::strncmp(footer.header, "hedge_FOOTER", 12) != 0)
+            return hedge::error("sst::load: invalid footer magic in " + path.string());
+
+        // Read meta-index bytes
+        size_t meta_end = (footer.qf_size > 0) ? footer.qf_offset : footer.footer_offset;
+        size_t meta_size = meta_end - footer.meta_index_offset;
+
+        page_aligned_buffer<key_t> meta_index(footer.meta_index_entries);
+        if(meta_size > 0)
+        {
+            page_aligned_buffer<uint8_t> raw_meta(meta_size);
+            res = pread(fd.fd(), raw_meta.data(), meta_size, footer.meta_index_offset);
+            if(res < 0 || static_cast<size_t>(res) != meta_size)
+                return hedge::error("sst::load: failed to read meta-index from " + path.string());
+
+            size_t pos = 0;
+            for(size_t i = 0; i < footer.meta_index_entries; ++i)
+            {
+                meta_index[i] = hedge::read_key_unsafe(raw_meta.data() + pos);
+                pos += hedge::serialized_key_total_length(meta_index[i]);
+            }
+        }
+
+        // Load quotient filter if present
+        std::optional<quotient_filter> qf;
+        if(footer.qf_size > 0)
+        {
+            page_aligned_buffer<uint8_t> qf_header_buf(PAGE_SIZE_IN_BYTES);
+            res = pread(fd.fd(), qf_header_buf.data(), PAGE_SIZE_IN_BYTES, footer.qf_offset);
+            if(res < 0 || static_cast<size_t>(res) != PAGE_SIZE_IN_BYTES)
+                return hedge::error("sst::load: failed to read QF header from " + path.string());
+
+            size_t data_size = footer.qf_size - PAGE_SIZE_IN_BYTES;
+            size_t data_read_size = hedge::ceil_page_align(data_size);
+            page_aligned_buffer<uint8_t> qf_data_buf(data_read_size);
+            res = pread(fd.fd(), qf_data_buf.data(), data_read_size, footer.qf_offset + PAGE_SIZE_IN_BYTES);
+            if(res < 0 || static_cast<size_t>(res) != data_read_size)
+                return hedge::error("sst::load: failed to read QF data from " + path.string());
+
+            auto maybe_qf = quotient_filter::load(qf_header_buf.data(), qf_data_buf.data(), data_size);
+            if(!maybe_qf)
+                return hedge::error("sst::load: failed to load quotient filter: " + maybe_qf.error().to_string());
+
+            qf = std::move(maybe_qf.value());
+        }
+
+        // Build super index if meta-index is large enough
+        std::optional<page_aligned_buffer<key_t>> super_index;
+        constexpr size_t KEYS_PER_META_INDEX_PAGE = PAGE_SIZE_IN_BYTES / sizeof(key_t);
+        constexpr size_t SUPER_INDEX_THRESHOLD = 16;
+
+        if(meta_index.size() > KEYS_PER_META_INDEX_PAGE * SUPER_INDEX_THRESHOLD)
+        {
+            size_t super_index_size = hedge::ceil(meta_index.size(), KEYS_PER_META_INDEX_PAGE);
+            page_aligned_buffer<key_t> si(super_index_size);
+            for(size_t i = 0; i < super_index_size; ++i)
+            {
+                auto idx = std::min(((i + 1) * KEYS_PER_META_INDEX_PAGE) - 1, meta_index.size() - 1);
+                si[i] = meta_index[idx];
+            }
+            super_index = std::move(si);
+        }
+
+        return sst(std::move(fd), std::move(meta_index), footer, std::move(super_index), std::move(qf));
     }
 
     async::task<expected<value_t>> sst::lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache, std::optional<uint64_t> key_hash) const

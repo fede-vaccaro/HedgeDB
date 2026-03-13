@@ -42,6 +42,50 @@ namespace hedge::db
         }
     }
 
+    hedge::expected<std::unique_ptr<sst_manager>> sst_manager::load(const config& cfg,
+                                                                     std::shared_ptr<sharded_page_cache> page_cache)
+    {
+        auto mgr = std::make_unique<sst_manager>(cfg, page_cache);
+
+        if(!std::filesystem::exists(cfg.indices_path))
+            return mgr;
+
+        size_t max_epoch = 0;
+
+        for(const auto& entry : std::filesystem::recursive_directory_iterator(cfg.indices_path))
+        {
+            if(!entry.is_regular_file())
+                continue;
+
+            auto maybe_sst = sst::load(entry.path(), cfg.use_odirect_for_indices);
+            if(!maybe_sst)
+                return maybe_sst.error();
+
+            auto loaded = std::move(maybe_sst.value());
+            const size_t epoch = loaded.epoch();
+            const size_t partition_id = loaded.upper_bound();
+
+            auto it = mgr->_sorted_indices.find(static_cast<uint16_t>(partition_id));
+            if(it == mgr->_sorted_indices.end())
+                continue;
+
+            max_epoch = std::max(max_epoch, epoch);
+
+            auto& state = *it->second;
+            auto& l0 = state.levels[0];
+
+            auto sst_ptr = std::make_shared<sst>(std::move(loaded));
+            auto pos = std::ranges::lower_bound(l0, sst_ptr,
+                                                [](const sst_ptr_t& a, const sst_ptr_t& b)
+                                                { return a->epoch() < b->epoch(); });
+            l0.insert(pos, std::move(sst_ptr));
+        }
+
+        mgr->_flush_iteration.store(max_epoch + 1, std::memory_order::relaxed);
+
+        return mgr;
+    }
+
     void sst_manager::push_indices(std::vector<sst> new_indices)
     {
         for(auto& new_sorted_index : new_indices)

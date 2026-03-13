@@ -46,6 +46,9 @@ namespace hedge::db
         explicit sst_manager(const config& cfg,
                              std::shared_ptr<sharded_page_cache> page_cache);
 
+        static hedge::expected<std::unique_ptr<sst_manager>> load(const config& cfg,
+                                                                   std::shared_ptr<sharded_page_cache> page_cache);
+
         // Called by memtable flush callback
         void push_indices(std::vector<sst> new_indices);
 

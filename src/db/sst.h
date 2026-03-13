@@ -87,6 +87,8 @@ namespace hedge::db
         sst(const sst&) = delete;
         sst& operator=(const sst&) = delete;
 
+        [[nodiscard]] static hedge::expected<sst> load(const std::filesystem::path& path, bool use_odirect = false);
+
         [[nodiscard]] async::task<expected<value_t>> lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache, std::optional<uint64_t> key_hash = std::nullopt) const;
 
         [[nodiscard]] size_t upper_bound() const { return this->_footer.upper_bound; }

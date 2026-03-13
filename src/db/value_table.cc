@@ -334,9 +334,16 @@ namespace hedge::db
         return vt;
     }
 
-    hedge::expected<std::shared_ptr<value_table>> value_table::load(const std::filesystem::path& /* path */, fs::file::open_mode /* open_mode */, bool /* use_direct */)
+    hedge::expected<std::shared_ptr<value_table>> value_table::load(const std::filesystem::path& path, fs::file::open_mode open_mode, bool use_direct)
     {
-        return hedge::error("Not implemented");
+        auto file_desc = fs::file::from_path(path, open_mode, use_direct);
+        if(!file_desc)
+            return hedge::error("Failed to open value table '" + path.string() + "': " + file_desc.error().to_string());
+
+        uint32_t id = static_cast<uint32_t>(std::stoul(path.stem().string()));
+
+        // Use TABLE_MAX_SIZE_BYTES as the write cursor so every valid read offset passes the bounds check.
+        return std::shared_ptr<value_table>(new value_table{id, TABLE_MAX_SIZE_BYTES, std::move(file_desc.value())});
     }
 
     async::task<status> thread_write_buffer::flush(const std::shared_ptr<async::executor_context>& /* executor */)

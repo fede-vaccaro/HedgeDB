@@ -17,6 +17,10 @@ namespace hedge::db
     public:
         static hedge::expected<quotient_filter> make(uint32_t q, uint32_t r);
 
+        static hedge::expected<quotient_filter> load(const uint8_t* header_data,
+                                                     const uint8_t* table_data,
+                                                     size_t table_size);
+
         quotient_filter(quotient_filter&& other) noexcept
         {
             this->_qf_impl = std::exchange(other._qf_impl, {});

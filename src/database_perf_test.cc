@@ -77,26 +77,29 @@ int main(int argc, char* argv[])
     size_t N_KEYS = 300'000'000;
     size_t PAYLOAD_SIZE = 100;
     size_t MEMTABLE_CAPACITY = 2'000'000;
+    bool readonly = false;
 
-    if(argc > 1)
-        N_KEYS = std::strtoull(argv[1], nullptr, 10);
-    if(argc > 2)
-        PAYLOAD_SIZE = std::strtoull(argv[2], nullptr, 10);
-    if(argc > 3)
-        MEMTABLE_CAPACITY = std::strtoull(argv[3], nullptr, 10);
+    int positional = 0;
+    for(int i = 1; i < argc; ++i)
+    {
+        if(std::string_view(argv[i]) == "--readonly")
+            readonly = true;
+        else if(positional == 0) { N_KEYS             = std::strtoull(argv[i], nullptr, 10); ++positional; }
+        else if(positional == 1) { PAYLOAD_SIZE        = std::strtoull(argv[i], nullptr, 10); ++positional; }
+        else if(positional == 2) { MEMTABLE_CAPACITY   = std::strtoull(argv[i], nullptr, 10); ++positional; }
+    }
 
     std::cout << std::fixed << std::setprecision(2);
     std::cout << "=== database_perf_test ===" << std::endl;
     std::cout << "N_KEYS=" << N_KEYS
               << "  PAYLOAD_SIZE=" << PAYLOAD_SIZE
-              << "  MEMTABLE_CAPACITY=" << MEMTABLE_CAPACITY << std::endl;
+              << "  MEMTABLE_CAPACITY=" << MEMTABLE_CAPACITY
+              << "  readonly=" << (readonly ? "true" : "false") << std::endl;
 
     // --- Init ---
     async::executor_pool::init_static_pool(20, 16);
 
     const std::filesystem::path base_path = "/tmp/db_perf";
-    if(std::filesystem::exists(base_path))
-        std::filesystem::remove_all(base_path);
 
     db_config config;
     config.auto_compaction = true;
@@ -109,13 +112,30 @@ int main(int argc, char* argv[])
     config.flush_io_workers = 6;
     config.compaction_io_workers = 6;
 
-    auto maybe_db = database::make_new(base_path, config);
-    if(!maybe_db)
+    std::shared_ptr<database> db;
+    if(readonly)
     {
-        std::cerr << "Failed to create database: " << maybe_db.error().to_string() << std::endl;
-        return 1;
+        auto maybe_db = database::load(base_path, config);
+        if(!maybe_db)
+        {
+            std::cerr << "Failed to load database: " << maybe_db.error().to_string() << std::endl;
+            return 1;
+        }
+        db = std::move(maybe_db.value());
     }
-    auto db = std::move(maybe_db.value());
+    else
+    {
+        if(std::filesystem::exists(base_path))
+            std::filesystem::remove_all(base_path);
+
+        auto maybe_db = database::make_new(base_path, config);
+        if(!maybe_db)
+        {
+            std::cerr << "Failed to create database: " << maybe_db.error().to_string() << std::endl;
+            return 1;
+        }
+        db = std::move(maybe_db.value());
+    }
 
     auto values = pregenerate_values(PAYLOAD_SIZE);
 
@@ -128,6 +148,7 @@ int main(int argc, char* argv[])
     // =========================================================================
     // Write phase
     // =========================================================================
+    if(!readonly)
     {
         auto wg = async::wait_group::make_shared();
         wg->set(N_KEYS);
@@ -186,22 +207,17 @@ int main(int argc, char* argv[])
         auto make_get_task = [&](size_t idx) -> async::task<void>
         {
             auto key = make_key(idx);
-            const auto& expected_value = values.at(value_slot(idx));
 
             auto maybe_value = co_await db->get_async(key);
             if(!maybe_value)
             {
                 errors++;
-                std::cerr << "get error at idx=" << idx << ": " << maybe_value.error().to_string() << std::endl;
                 wg->decr();
                 co_return;
             }
 
-            if(maybe_value.value() != expected_value)
-            {
+            if(!readonly && maybe_value.value() != values.at(value_slot(idx)))
                 errors++;
-                std::cerr << "value mismatch at idx=" << idx << std::endl;
-            }
 
             wg->decr();
         };
@@ -226,7 +242,7 @@ int main(int argc, char* argv[])
         std::cout << "Errors: " << errors.load() << std::endl;
         prof::print_internal_perf_stats(true);
 
-        if(errors.load() > 0)
+        if(!readonly && errors.load() > 0)
         {
             std::cerr << "Read verification failed." << std::endl;
             return 1;

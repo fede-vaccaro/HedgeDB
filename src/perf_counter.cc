@@ -172,7 +172,8 @@ namespace hedge::prof
         std::string_view("rolling_buffer::pop_front"),
         std::string_view("qf_false_positives"),
         std::string_view("find_value_in_sst"),
-        };
+        std::string_view("sst_visited_per_lookup"),
+    };
 
     static constexpr fixed_set<std::string_view, keys.size()> _metrics_set = fixed_set(keys);
 

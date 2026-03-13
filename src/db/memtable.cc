@@ -159,6 +159,11 @@ namespace hedge::db
             pending_flushes = this->_pending_flushes;
         }
 
+        if (!pending_flushes.empty())
+        {
+            throw std::runtime_error("Pending flushes should be empty at this point, because every writer should be using the most up to date memtable. Found " + std::to_string(pending_flushes.size()) + " pending flushes.");
+        }
+
         // Check pending flushes starting from most recent
         for(auto& pending_flush : std::ranges::reverse_view(pending_flushes))
         {

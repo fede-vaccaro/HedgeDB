@@ -1,4 +1,6 @@
 
+#include <cstdlib>
+#include <cstring>
 #include <error.hpp>
 
 #include "qf.h"
@@ -40,6 +42,28 @@ namespace hedge::db
             third_party::qf_destroy(&this->_qf_impl);
             this->_qf_impl.qf_table = nullptr;
         }
+    }
+
+    hedge::expected<quotient_filter> quotient_filter::load(const uint8_t* header_data,
+                                                          const uint8_t* table_data,
+                                                          size_t table_size)
+    {
+        third_party::quotient_filter raw_qf{};
+        std::memcpy(&raw_qf, header_data, sizeof(raw_qf));
+
+        size_t actual_size = third_party::qf_allocated_size(&raw_qf);
+        if(actual_size != table_size)
+            return hedge::error("quotient_filter::load: table size mismatch");
+
+        raw_qf.qf_table = static_cast<uint64_t*>(std::malloc(actual_size));
+        if(raw_qf.qf_table == nullptr)
+            return hedge::error("quotient_filter::load: failed to allocate table memory");
+
+        std::memcpy(raw_qf.qf_table, table_data, actual_size);
+
+        quotient_filter qf{};
+        qf._qf_impl = raw_qf;
+        return qf;
     }
 
     hedge::expected<quotient_filter> quotient_filter::make(uint32_t q, uint32_t r)

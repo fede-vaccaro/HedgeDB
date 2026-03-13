@@ -32,6 +32,39 @@
 
 namespace hedge::db
 {
+    hedge::status database::_validate_config(const db_config& config)
+    {
+        if(config.num_partition_exponent > db_config::MAX_PARTITION_EXPONENT)
+            return hedge::error("num_partition_exponent must be <= " + std::to_string(db_config::MAX_PARTITION_EXPONENT));
+
+        if(config.keys_in_mem_before_flush < db_config::MIN_KEYS_IN_MEM_BEFORE_FLUSH)
+            return hedge::error("keys_in_mem_before_flush must be >= " + std::to_string(db_config::MIN_KEYS_IN_MEM_BEFORE_FLUSH));
+
+        return hedge::ok();
+    }
+
+    void database::_init_memtable(database& db, const db_config& config)
+    {
+        db._memtable.~memtable();
+        auto* memtable_mem = &db._memtable;
+        ::new(memtable_mem) memtable(
+            memtable_config{
+                .max_inserts_cap = config.keys_in_mem_before_flush,
+                .memory_budget_cap = 48 * 1024 * 1024,
+                .auto_compaction = config.auto_compaction,
+                .use_odirect = config.use_odirect_for_indices,
+                .num_writer_threads = async::executor_pool::static_pool().size(),
+                .flush_io_workers = config.flush_io_workers,
+            },
+            config.num_partition_exponent,
+            db._indices_path,
+            &db._sst_manager->flush_iteration(),
+            [&sst_mgr = *db._sst_manager](std::vector<sst> indices) { sst_mgr.push_indices(std::move(indices)); },
+            [&sst_mgr = *db._sst_manager]() { sst_mgr.trigger_compaction(false); },
+            db._page_cache,
+            &db._sst_manager->compaction_backpressure());
+    }
+
     expected<std::shared_ptr<database>> database::make_new(const std::filesystem::path& base_path, const db_config& config)
     {
         auto db = std::shared_ptr<database>(new database());
@@ -41,12 +74,8 @@ namespace hedge::db
         db->_values_path = base_path / "values";
         db->_config = config;
 
-        // Minimal config validation
-        if(config.num_partition_exponent > db_config::MAX_PARTITION_EXPONENT)
-            return hedge::error("num_partition_exponent must be <= " + std::to_string(db_config::MAX_PARTITION_EXPONENT));
-
-        if(config.keys_in_mem_before_flush < db_config::MIN_KEYS_IN_MEM_BEFORE_FLUSH)
-            return hedge::error("keys_in_mem_before_flush must be >= " + std::to_string(db_config::MIN_KEYS_IN_MEM_BEFORE_FLUSH));
+        if(auto status = _validate_config(config); !status)
+            return status.error();
 
         if(std::filesystem::exists(db->_base_path))
             return hedge::error("Database path already exists: " + db->_base_path.string());
@@ -61,9 +90,7 @@ namespace hedge::db
             db->_page_cache = std::make_shared<sharded_page_cache>(config.index_page_clock_cache_size_bytes, async::executor_pool::static_pool().size() * 4);
 
         // Init sst_manager
-        db->_sst_manager.~sst_manager();
-        auto* sst_mgr_mem = &db->_sst_manager;
-        ::new(sst_mgr_mem) sst_manager(
+        db->_sst_manager = std::make_unique<sst_manager>(
             sst_manager::config{
                 .num_partition_exponent = config.num_partition_exponent,
                 .max_num_levels = config.max_num_levels,
@@ -77,25 +104,8 @@ namespace hedge::db
             },
             db->_page_cache);
 
-        // Setup memindex
-        db->_memtable.~memtable();
-        auto* memtable_mem = &db->_memtable;
-        ::new(memtable_mem) memtable(
-            memtable_config{
-                .max_inserts_cap = config.keys_in_mem_before_flush,
-                .memory_budget_cap = 48 * 1024 * 1024, // default
-                .auto_compaction = config.auto_compaction,
-                .use_odirect = config.use_odirect_for_indices,
-                .num_writer_threads = async::executor_pool::static_pool().size(),
-                .flush_io_workers = config.flush_io_workers,
-            },
-            config.num_partition_exponent,
-            db->_indices_path,
-            &db->_sst_manager.flush_iteration(),
-            [&sst_mgr = db->_sst_manager](std::vector<sst> indices) { sst_mgr.push_indices(std::move(indices)); },
-            [&sst_mgr = db->_sst_manager]() { sst_mgr.trigger_compaction(false); },
-            db->_page_cache,
-            &db->_sst_manager.compaction_backpressure());
+        // Setup memtable
+        _init_memtable(*db, config);
 
         // Create first value table
         auto first_value_table = value_table::make_new(db->_values_path, 0);
@@ -133,9 +143,83 @@ namespace hedge::db
         return db;
     }
 
-    expected<std::shared_ptr<database>> database::load(const std::filesystem::path& /*base_path*/, const db::db_config& /*config*/)
+    expected<std::shared_ptr<database>> database::load(const std::filesystem::path& base_path, const db::db_config& config)
     {
-        return hedge::error("load not implemented");
+        auto db = std::shared_ptr<database>(new database());
+
+        db->_base_path = base_path;
+        db->_indices_path = base_path / "indices";
+        db->_values_path = base_path / "values";
+        db->_config = config;
+
+        if(auto status = _validate_config(config); !status)
+            return status.error();
+
+        if(!std::filesystem::exists(db->_base_path))
+            return hedge::error("Database path does not exist: " + db->_base_path.string());
+
+        // Init page cache
+        if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1)
+            db->_page_cache = std::make_shared<sharded_page_cache>(config.index_page_clock_cache_size_bytes, async::executor_pool::static_pool().size() * 4);
+
+        // Load sst_manager from indices directory
+        auto maybe_sst_mgr = sst_manager::load(
+            sst_manager::config{
+                .num_partition_exponent = config.num_partition_exponent,
+                .max_num_levels = config.max_num_levels,
+                .min_merge_width = config.min_merge_width,
+                .max_merge_width = config.max_merge_width,
+                .bucket_ratio = config.bucket_ratio,
+                .compaction_read_ahead_size_bytes = config.compaction_read_ahead_size_bytes,
+                .compaction_io_workers = config.compaction_io_workers,
+                .use_odirect_for_indices = config.use_odirect_for_indices,
+                .indices_path = db->_indices_path,
+            },
+            db->_page_cache);
+
+        if(!maybe_sst_mgr)
+            return maybe_sst_mgr.error();
+
+        db->_sst_manager = std::move(maybe_sst_mgr.value());
+
+        // Init empty memtable (needed for the read path; starts with no entries)
+        _init_memtable(*db, config);
+
+        // Load value tables from values directory
+        db->_value_tables.reserve(4096);
+
+        if(!std::filesystem::exists(db->_values_path))
+            return hedge::error("Values path does not exist: " + db->_values_path.string());
+
+        uint32_t max_id = 0;
+
+        for(const auto& entry : std::filesystem::directory_iterator(db->_values_path))
+        {
+            if(!entry.is_regular_file())
+                continue;
+            if(entry.path().extension() != value_table::TABLE_FILE_EXTENSION)
+                continue;
+
+            auto maybe_vt = value_table::load(entry.path(), fs::file::open_mode::read_only, false);
+            if(!maybe_vt)
+                return hedge::error("Failed to load value table: " + maybe_vt.error().to_string());
+
+            auto vt = std::move(maybe_vt.value());
+            uint32_t id = vt->id();
+            max_id = std::max(max_id, id);
+            db->_value_tables[id] = std::move(vt);
+        }
+
+        if(db->_value_tables.empty())
+            return hedge::error("No value tables found in: " + db->_values_path.string());
+
+        // Promote the highest-ID table to _current_value_table
+        auto it = db->_value_tables.find(max_id);
+        db->_current_value_table.store(std::move(it->second));
+        db->_value_tables.erase(it);
+        db->_last_table_id.store(max_id, std::memory_order::relaxed);
+
+        return db;
     }
 
     async::task<hedge::status> database::put_async(const key_t& key, const byte_buffer_t& value)
@@ -223,7 +307,7 @@ namespace hedge::db
 
         // Step 2: If not found in memtable, search sorted indices via sst_manager.
         size_t matching_partition_id = this->_find_matching_partition_for_key(key);
-        co_return co_await this->_sst_manager.lookup_async(key, matching_partition_id);
+        co_return co_await this->_sst_manager->lookup_async(key, matching_partition_id);
     }
 
     std::shared_ptr<value_table> database::_find_value_table_by_id(uint32_t id)
@@ -369,23 +453,23 @@ namespace hedge::db
             auto future = this->_memtable.wait_for_flush();
             future.wait();
         }
-        this->_sst_manager.trigger_compaction(compact_all);
+        this->_sst_manager->trigger_compaction(compact_all);
     }
 
     void database::wait_for_compactions_to_finish()
     {
         this->_memtable.wait_for_flush().wait();
-        this->_sst_manager.wait_for_compactions_to_finish();
+        this->_sst_manager->wait_for_compactions_to_finish();
     }
 
     [[nodiscard]] double database::read_amplification_factor()
     {
-        return this->_sst_manager.read_amplification_factor();
+        return this->_sst_manager->read_amplification_factor();
     }
 
     void database::print_tree_structure() const
     {
-        this->_sst_manager.print_tree_structure();
+        this->_sst_manager->print_tree_structure();
     }
 
     hedge::status database::flush()

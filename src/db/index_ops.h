@@ -75,7 +75,7 @@ namespace hedge::db
             buffer.resize(buf_size + key_span.size() + 1); // +1 for key size byte
 
             // Write key size
-            write_key_unsafe(buffer.data(), key_span);
+            write_key_unsafe(buffer.data() + buf_size, key_span);
         }
 
         static hedge::expected<sorted_index> load_sorted_index(const std::filesystem::path& path, bool use_direct, bool load_index = false);

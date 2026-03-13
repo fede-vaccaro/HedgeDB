@@ -111,7 +111,7 @@ namespace hedge::db
         memtable _memtable;
 
         // --- SST management and compaction ---
-        sst_manager _sst_manager;
+        std::unique_ptr<sst_manager> _sst_manager;
 
         // --- Background Workers ---
         async::worker _value_table_worker{}; ///< Worker thread for instantiating new value tables
@@ -230,6 +230,10 @@ namespace hedge::db
         async::task<expected<value_t>> _find_value(const key_t& key);
 
         std::shared_ptr<value_table> _find_value_table_by_id(uint32_t id);
+
+        // Shared initialization helpers used by both make_new and load.
+        static hedge::status _validate_config(const db_config& config);
+        static void _init_memtable(database& db, const db_config& config);
     };
 
 } // namespace hedge::db
