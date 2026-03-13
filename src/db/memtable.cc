@@ -132,14 +132,6 @@ namespace hedge::db
                 continue;
             }
 
-            // Backpressure from compaction: yield to let compaction catch up
-            if(this->_compaction_backpressure &&
-               this->_compaction_backpressure->load(std::memory_order::relaxed)) [[unlikely]]
-            {
-                BACKPRESSURE.fetch_add(1, std::memory_order::relaxed);
-                std::this_thread::yield();
-            }
-
             // OK
             return;
         }
@@ -279,6 +271,10 @@ namespace hedge::db
 
                     if(should_notify_flush)
                         this->_pending_flushes_cv.notify_one();
+
+                    bool under_pressure = this->_compaction_backpressure->load(std::memory_order::relaxed);
+                    if(under_pressure)
+                        this->_compaction_backpressure->wait(false, std::memory_order::relaxed);
 
                     if(this->_cfg.auto_compaction)
                         this->_trigger_compaction_callback();

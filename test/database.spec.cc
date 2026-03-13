@@ -167,7 +167,7 @@ namespace hedge::db
         config.keys_in_mem_before_flush = this->MEMTABLE_CAPACITY;
         config.compaction_read_ahead_size_bytes = 2 * 1024 * 1024;
         config.num_partition_exponent = 4;
-        config.target_compaction_size_ratio = 1.20;
+        config.bucket_ratio = 1.50;
         config.use_odirect_for_indices = true;
         config.index_page_clock_cache_size_bytes = 0 * 256 * 1024 * 1024;
         config.index_point_cache_size_bytes = 0;
@@ -239,6 +239,8 @@ namespace hedge::db
         std::cout << "BACKPRESSURE count (contention on memtable writers): " << hedge::db::memtable::BACKPRESSURE.load() << std::endl;
         prof::print_internal_perf_stats(false);
 
+        db->print_tree_structure();
+
         // flush
         // t0 = std::chrono::high_resolution_clock::now();
         // auto flush_status = db->flush();
@@ -248,19 +250,19 @@ namespace hedge::db
         // std::cout << "Total duration for flush: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
 
         // compaction
-        // std::cout << "Triggering full compaction" << std::endl;
+        // std::cout << "Triggering new compaction" << std::endl;
         // t0 = std::chrono::high_resolution_clock::now();
-        // auto compaction_status_future = db->compact_sorted_indices(true);
-        // auto maybe_compaction_status = compaction_status_future.get();
-        // ASSERT_TRUE(maybe_compaction_status.has_value()) << "An error occurred during compaction: " << maybe_compaction_status.error().to_string();
+        // (void)db->compact_sorted_indices(false);
+        // db->wait_for_compactions_to_finish();
         // t1 = std::chrono::high_resolution_clock::now();
         // auto compaction_duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-        // std::cout << "Total duration for a full compaction: " << (double)compaction_duration.count() / 1000.0 << " ms" << std::endl;
+        // std::cout << "Total duration for a compaction: " << (double)compaction_duration.count() / 1000.0 << " ms" << std::endl;
         // std::cout << "Compaction Output throughput: " << (double)(maybe_compaction_status.value().output_bytes / (1000.0 * 1000.0)) / (compaction_duration.count() / 1'000'000.0) << " MB/s" << std::endl;
         // std::cout << "Compaction Input processed: " << maybe_compaction_status.value().output_bytes / (1000.0 * 1000.0) << " MB" << std::endl;
         // std::cout << "Insertion throughput including compaction:"
-        //           << (uint64_t)(this->N_KEYS / (double)(duration.count() + compaction_duration.count()) * 1'000'000) << " items/s" << std::endl;
+        //   << (uint64_t)(this->N_KEYS / (double)(duration.count() + compaction_duration.count()) * 1'000'000) << " items/s" << std::endl;
 
+        // db->print_tree_structure();
         // prof::print_internal_perf_stats(false);
 
         // EXPECT_DOUBLE_EQ(db->read_amplification_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
@@ -375,9 +377,9 @@ namespace hedge::db
         test_suite,
         database_test,
         testing::Combine(
-            testing::Values(10'000'000), // n keys
-            testing::Values(100),         // payload size
-            testing::Values(2'000'000)    // memtable capacity
+            testing::Values(80'000'000), // n keys
+            testing::Values(100),        // payload size
+            testing::Values(2'000'000)   // memtable capacity
             ),
         [](const testing::TestParamInfo<database_test::ParamType>& info)
         {

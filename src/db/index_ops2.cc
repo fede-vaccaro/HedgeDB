@@ -16,6 +16,7 @@
 #include "sst.h"
 #include "types.h"
 #include "utils.h"
+#include "xxh64.hpp"
 
 namespace hedge::db
 {
@@ -294,7 +295,10 @@ namespace hedge::db
         {
             qf = std::move(maybe_qf.value());
             for(size_t i = 0; i < num_keys; ++i)
-                qf->insert(std::hash<key_t>{}(sorted_keys[i].key));
+            {
+                uint64_t hash = xxh64::hash((const char*)sorted_keys[i].key.data(), sorted_keys[i].key.size(), 0xDEADBEEF);
+                qf->insert(hash);
+            }
         }
 
         sorted_keys.free(); // Not needed anymore, release memory
@@ -547,7 +551,7 @@ namespace hedge::db
         for(auto it = begin; it != end; ++it)
         {
             if(qf.has_value())
-                qf->insert(std::hash<key_t>{}(it->key));
+                qf->insert(xxh64::hash((const char*)it->key.data(), it->key.size(), 0xDEADBEEF));
 
             auto s = write_buffer.write_item(it->key, it->value, meta_index, meta_index_bytes);
             if(!s)

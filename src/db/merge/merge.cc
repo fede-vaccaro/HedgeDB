@@ -11,6 +11,7 @@
 #include "mailbox_impl.h"
 #include "types.h"
 #include "utils.h"
+#include "xxh64.hpp"
 
 namespace hedge::db
 {
@@ -312,7 +313,7 @@ namespace hedge::db
                 // }
 
                 if(qf.has_value())
-                    qf->insert(std::hash<key_t>{}(new_item.key));
+                    qf->insert(xxh64::hash((const char*)new_item.key.data(), new_item.key.size(), 0xDEADBEEF));
 
                 if(!try_push_kv(new_item)) [[unlikely]]
                 {
@@ -356,7 +357,7 @@ namespace hedge::db
             // }
 
             if(qf.has_value())
-                qf->insert(std::hash<key_t>{}(new_item.key));
+                qf->insert(xxh64::hash((const char*)new_item.key.data(), new_item.key.size(), 0xDEADBEEF));
 
             if(!try_push_kv(new_item)) [[unlikely]]
             {

@@ -242,7 +242,7 @@ namespace hedge::db
         alignas(64) std::atomic<rw_sync_table_ptr_t> _pipelined_table;
 
         // Pending flushes
-        static constexpr size_t MAX_PENDING_FLUSHES = 8;
+        static constexpr size_t MAX_PENDING_FLUSHES = -1;
         alignas(64) mutable std::shared_mutex _pending_flushes_mutex;
         alignas(64) std::condition_variable_any _pending_flushes_cv;
         std::map<size_t, rw_sync_table_ptr_t> _pending_flushes;

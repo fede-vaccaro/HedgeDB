@@ -1,0 +1,164 @@
+#pragma once
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <filesystem>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <shared_mutex>
+#include <unordered_set>
+#include <vector>
+
+#include <error.hpp>
+#include <logger.h>
+
+#include "async/io_executor.h"
+#include "async/task.h"
+#include "async/worker.h"
+#include "cache.h"
+#include "sst.h"
+#include "types.h"
+#include "wait_group.h"
+
+namespace hedge::db
+{
+
+    class sst_manager
+    {
+    public:
+        struct config
+        {
+            size_t num_partition_exponent;
+            size_t max_num_levels;
+            size_t min_merge_width;
+            size_t max_merge_width;
+            double bucket_ratio;
+            size_t compaction_read_ahead_size_bytes;
+            size_t compaction_io_workers;
+            bool use_odirect_for_indices;
+            std::filesystem::path indices_path;
+        };
+
+        sst_manager() = default;
+
+        explicit sst_manager(const config& cfg,
+                             std::shared_ptr<sharded_page_cache> page_cache);
+
+        // Called by memtable flush callback
+        void push_indices(std::vector<sst> new_indices);
+
+        // SST lookup for the read path
+        async::task<expected<value_t>> lookup_async(const key_t& key, size_t matching_partition_id);
+
+        // Compaction control
+        void trigger_compaction(bool compact_all);
+        void wait_for_compactions_to_finish();
+
+        // Observability
+        [[nodiscard]] double read_amplification_factor();
+        void print_tree_structure() const;
+
+        // Backpressure flag (read by memtable/database)
+        std::atomic_bool& compaction_backpressure() { return _compaction_backpressure; }
+
+        // Flush iteration counter (shared with memtable for SST naming)
+        std::atomic_size_t& flush_iteration() { return _flush_iteration; }
+
+        struct compaction_stats
+        {
+            size_t input_bytes{0};
+            size_t output_bytes{0};
+            size_t num_inputs{0};
+            size_t items_merged{0};
+
+            compaction_stats& operator+=(const compaction_stats& other)
+            {
+                this->input_bytes += other.input_bytes;
+                this->output_bytes += other.output_bytes;
+                this->num_inputs += other.num_inputs;
+                this->items_merged += other.items_merged;
+                return *this;
+            }
+        };
+
+    private:
+        using sst_ptr_t = std::shared_ptr<hedge::db::sst>;
+        using level_t = std::vector<sst_ptr_t>;
+        using partition_t = std::vector<level_t>;
+
+        struct partition_state
+        {
+            alignas(64) mutable std::shared_mutex mutex;
+            partition_t levels;
+        };
+
+        using sorted_indices_map_t = std::map<uint16_t, std::unique_ptr<partition_state>>;
+        using partition_snapshot_map_t = std::map<uint16_t, partition_t>;
+
+        config _cfg{};
+
+        std::atomic_size_t _flush_iteration{0};
+        sorted_indices_map_t _sorted_indices;
+
+        std::vector<std::shared_ptr<async::executor_context>> _compation_executor_pool{};
+        size_t _executor_idx{0};
+        std::atomic_size_t _compaction_jobs_in_flight{0};
+
+        async::worker _compaction_worker{};
+
+        std::shared_ptr<sharded_page_cache> _page_cache;
+
+        std::mutex _pending_compactions_mutex;
+        size_t _pending_compacting_sst_count{0};
+        std::condition_variable _pending_compactions_cv;
+
+        alignas(64) std::atomic_bool _compaction_backpressure{false};
+
+        logger _logger{"sst_manager"};
+
+        struct compaction_output
+        {
+            struct compaction_args
+            {
+                std::vector<sst_ptr_t> inputs;
+                hedge::expected<sst_ptr_t> output;
+
+                size_t input_bytes{};
+                size_t output_bytes{};
+            };
+
+            std::mutex m;
+            std::vector<compaction_args> results;
+        };
+
+        async::task<> _make_compaction_task(compaction_output& output,
+                                            std::vector<sst_ptr_t> inputs,
+                                            std::shared_ptr<async::wait_group> wg);
+
+        async::task<> _make_self_completing_compaction_task(size_t level, std::vector<sst_ptr_t> inputs);
+
+        hedge::expected<compaction_stats> _compaction_job_size_tiered(bool compact_all);
+
+        static auto check_is_sorted_by_epoch(const std::vector<sst_ptr_t>& vec) -> bool
+        {
+            auto sorted = std::ranges::is_sorted(
+                vec,
+                [](const sst_ptr_t& lhs, const sst_ptr_t& rhs)
+                {
+                    return lhs->epoch() < rhs->epoch();
+                });
+            if(!sorted)
+            {
+                std::cout << "Indices not sorted by epoch:" << std::endl;
+                for(const auto& idx_ptr : vec)
+                {
+                    std::cout << " - Path: " << idx_ptr->path().string() << ", epoch: " << idx_ptr->epoch() << std::endl;
+                }
+            }
+            return sorted;
+        };
+    };
+
+} // namespace hedge::db

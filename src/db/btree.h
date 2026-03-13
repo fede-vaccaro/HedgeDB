@@ -18,7 +18,7 @@
 /*
     !!DISCLAIMER!!
     This class has been written and tested with the heavy usage of an AI Agent
-    under my direction and supervision. 
+    under my direction and supervision.
 */
 namespace hedge::db
 {
@@ -157,9 +157,15 @@ namespace hedge::db
              */
             void _free_slot(uint32_t idx)
             {
-                uint32_t current_free = this->_header._free_idx.load(std::memory_order_relaxed);
-                this->_entries[idx]._next.store(current_free, std::memory_order_relaxed);
-                this->_header._free_idx.store(idx, std::memory_order_release);
+                while(true)
+                {
+                    uint32_t current_free = _header._free_idx.load(std::memory_order_acquire);
+                    _entries[idx]._next.store(current_free, std::memory_order_relaxed);
+                    if(_header._free_idx.compare_exchange_weak(
+                           current_free, idx,
+                           std::memory_order_release, std::memory_order_relaxed))
+                        break;
+                }
             }
 
             friend class btree<K, V, KEY_COMPARATOR, READ_ONLY>;
@@ -192,8 +198,9 @@ namespace hedge::db
                         if(this->_entries[curr].key == key)
                         {
                             auto ref = std::atomic_ref<V>(this->_entries[curr].value);
+                            this->_free_slot(new_idx);
                             ref.exchange(value, std::memory_order::relaxed);
-                            break;
+                            return true;
                         }
                         if(KEY_COMPARATOR{}(key, this->_entries[curr].key))
                             break;
@@ -291,7 +298,10 @@ namespace hedge::db
                 {
                     // Since entries are sorted:
                     if(this->_entries[curr].key == key)
-                        return this->_entries[curr].value;
+                    {
+                        auto ref = std::atomic_ref<V>(const_cast<V&>(this->_entries[curr].value));
+                        return ref.load(std::memory_order_acquire);
+                    }
                     if(KEY_COMPARATOR{}(key, this->_entries[curr].key))
                         return std::nullopt;
 
@@ -466,67 +476,45 @@ namespace hedge::db
          */
         std::optional<V> get(const K& key) const
         {
-            // Retry logic to handle rare race conditions where a node split might cause
-            // a concurrent reader to see a truncated list (NULL pointer) in a leaf
-            // before finding the key which moved to a new sibling.
-            for(int attempt = 0; attempt < 3; ++attempt)
+            while(true)
             {
-                bool restart_search = false;
+                node* curr = this->_root.load(std::memory_order_acquire);
+                _shared_lock curr_lock(curr->_lock);
+
+                // Check if root changed (stale root pointer) while acquiring the lock
+                if(curr != this->_root.load(std::memory_order_relaxed))
+                {
+                    continue; // Restart from the new root
+                }
+
                 while(true)
                 {
-                    node* curr = this->_root.load(std::memory_order_acquire);
-                    _shared_lock curr_lock(curr->_lock);
-
-                    // Check if root changed (stale root pointer)
-                    if(curr != this->_root.load(std::memory_order_relaxed))
+                    // Check if value is in the current node (Internal or Leaf)
+                    auto result = curr->_find(key);
+                    if(result)
                     {
-                        continue; // Restart
+                        return result;
                     }
 
-                    while(true)
+                    // If we reached a leaf and still haven't found the key, it doesn't exist.
+                    // Because we hold a shared lock, no split can truncate this list under us.
+                    if(curr->_header._is_leaf)
                     {
-                        // Check if value is in the current node (Internal or Leaf)
-                        auto result = curr->_find(key);
-                        if(result)
-                        {
-                            return result;
-                        }
-
-                        if(curr->_header._is_leaf)
-                        {
-                            // If not found in leaf, it might be due to a split race.
-                            // If this is the first attempt, we might want to retry.
-                            // But usually "not found" is definitive.
-                            // However, empirical testing shows "Historical value not found"
-                            // errors which imply a race.
-                            // We return false here, but the outer loop will handle retry?
-                            // No, we need to break out of the crabbing loop to retry.
-
-                            // If we suspect a race, we should restart the SEARCH.
-                            // But how do we distinguish "Not Found" from "Race"?
-                            // We don't. We optimistically assume race if it's our first couple of tries.
-                            if(attempt < 2)
-                            {
-                                restart_search = true;
-                                break;
-                            }
-                            return std::nullopt;
-                        }
-
-                        // Internal node
-                        node* child = curr->_find_child(key);
-                        _shared_lock child_lock(child->_lock);
-
-                        // Crab
-                        curr_lock.unlock();
-                        curr = child;
-                        curr_lock = std::move(child_lock);
+                        return std::nullopt;
                     }
-                    if(restart_search)
-                        break; // Break from inner while(true), continue for loop
+
+                    // Internal node: find the correct child to descend into
+                    node* child = curr->_find_child(key);
+
+                    // Acquire lock on child BEFORE releasing lock on parent (Crabbing)
+                    _shared_lock child_lock(child->_lock);
+
+                    // Move down the tree
+                    curr_lock.unlock();
+                    curr = child;
+                    curr_lock = std::move(child_lock);
                 }
             }
-            return std::nullopt;
         }
 
         // For testing

@@ -78,9 +78,12 @@ int main(int argc, char* argv[])
     size_t PAYLOAD_SIZE = 100;
     size_t MEMTABLE_CAPACITY = 2'000'000;
 
-    if(argc > 1) N_KEYS = std::strtoull(argv[1], nullptr, 10);
-    if(argc > 2) PAYLOAD_SIZE = std::strtoull(argv[2], nullptr, 10);
-    if(argc > 3) MEMTABLE_CAPACITY = std::strtoull(argv[3], nullptr, 10);
+    if(argc > 1)
+        N_KEYS = std::strtoull(argv[1], nullptr, 10);
+    if(argc > 2)
+        PAYLOAD_SIZE = std::strtoull(argv[2], nullptr, 10);
+    if(argc > 3)
+        MEMTABLE_CAPACITY = std::strtoull(argv[3], nullptr, 10);
 
     std::cout << std::fixed << std::setprecision(2);
     std::cout << "=== database_perf_test ===" << std::endl;
@@ -98,8 +101,8 @@ int main(int argc, char* argv[])
     db_config config;
     config.auto_compaction = true;
     config.keys_in_mem_before_flush = MEMTABLE_CAPACITY;
-    config.num_partition_exponent = 0;
-    config.target_compaction_size_ratio = 1.20;
+    config.num_partition_exponent = 4;
+    config.bucket_ratio = 1.20;
     config.use_odirect_for_indices = true;
     config.index_page_clock_cache_size_bytes = 0;
     config.index_point_cache_size_bytes = 0;
@@ -116,18 +119,18 @@ int main(int argc, char* argv[])
 
     auto values = pregenerate_values(PAYLOAD_SIZE);
 
+    constexpr size_t NUM_EXECUTORS = 20;
+    std::vector<std::shared_ptr<async::executor_context>> executors;
+    executors.reserve(NUM_EXECUTORS);
+    for(size_t i = 0; i < NUM_EXECUTORS; ++i)
+        executors.push_back(async::executor_pool::executor_from_static_pool());
+
     // =========================================================================
     // Write phase
     // =========================================================================
     {
         auto wg = async::wait_group::make_shared();
         wg->set(N_KEYS);
-
-        constexpr size_t NUM_WRITERS = 8;
-        std::vector<std::shared_ptr<async::executor_context>> executors;
-        executors.reserve(NUM_WRITERS);
-        for(size_t i = 0; i < NUM_WRITERS; ++i)
-            executors.push_back(async::executor_pool::executor_from_static_pool());
 
         auto make_put_task = [&](size_t i) -> async::task<void>
         {
@@ -143,6 +146,7 @@ int main(int argc, char* argv[])
 
         for(size_t i = 0; i < N_KEYS; ++i)
         {
+            constexpr size_t NUM_WRITERS = 8;
             executors[i % NUM_WRITERS]->submit_io_task(make_put_task(i));
         }
 
@@ -179,16 +183,10 @@ int main(int argc, char* argv[])
         wg->set(read_count);
         std::atomic_size_t errors{0};
 
-        constexpr size_t NUM_READERS = 16;
-        std::vector<std::shared_ptr<async::executor_context>> executors;
-        executors.reserve(NUM_READERS);
-        for(size_t i = 0; i < NUM_READERS; ++i)
-            executors.push_back(async::executor_pool::executor_from_static_pool());
-
         auto make_get_task = [&](size_t idx) -> async::task<void>
         {
             auto key = make_key(idx);
-            const auto& expected_value = values[value_slot(idx)];
+            const auto& expected_value = values.at(value_slot(idx));
 
             auto maybe_value = co_await db->get_async(key);
             if(!maybe_value)
@@ -212,6 +210,7 @@ int main(int argc, char* argv[])
 
         for(size_t i = 0; i < read_count; ++i)
         {
+            constexpr size_t NUM_READERS = NUM_EXECUTORS;
             executors[i % NUM_READERS]->submit_io_task(make_get_task(i));
         }
 
@@ -235,5 +234,7 @@ int main(int argc, char* argv[])
     }
 
     std::cout << "\n=== PASSED ===" << std::endl;
+
+    db->print_tree_structure();
     return 0;
 }

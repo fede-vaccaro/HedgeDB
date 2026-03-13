@@ -20,6 +20,7 @@
 #include "cache.h"
 #include "memtable.h"
 #include "sst.h"
+#include "sst_manager.h"
 #include "types.h"
 #include "value_table.h"
 #include "wait_group.h"
@@ -45,8 +46,8 @@ namespace hedge::db
         size_t num_partition_exponent = 10;
         /// Ratio (rhs_size / lhs_size) threshold triggering compaction during a two-way merge. rhs is the smaller index.
         /// If the smaller index is less than this fraction of the larger one, the merge occurs.
-        /// Higher target_compaction_size_ratio means less frequent compactions (lower write amplification) but higher read amplification (more data read during compaction).
-        double target_compaction_size_ratio = 0.2;
+        /// Higher bucket_ratio means less frequent compactions (lower write amplification) but higher read amplification (more data read during compaction).
+        double bucket_ratio = 1.5;
         /// Amount of data read ahead from each sorted_index file during compaction merges.
         size_t compaction_read_ahead_size_bytes = 4 * 1024 * 1024;
         /// Maximum time to wait for a compaction job (currently for sub-tasks within the job) before timing out.
@@ -65,6 +66,12 @@ namespace hedge::db
         size_t compaction_io_workers = 4;
         /// Number of io_uring executor threads for parallel memtable flush
         size_t flush_io_workers = 4;
+
+        size_t max_num_levels = 40;
+
+        size_t min_merge_width = 4;
+
+        size_t max_merge_width = -1;
     };
 
     /**
@@ -83,19 +90,7 @@ namespace hedge::db
         // --- Configuration ---
         db_config _config; ///< Database configuration settings.
 
-        // --- Persisted State Representation ---
-        using sst_ptr_t = std::shared_ptr<hedge::db::sst>;
-
-        // Map from partition ID to vector of sst shared pointers.
-        // Each partition has multiple sst files:
-        // - within sst belonging to the same vector, the key ranges are overlapping
-        // - across different partitions, the key ranges are disjoint
-        using sorted_indices_map_t = std::map<uint16_t, std::vector<sst_ptr_t>>;
-
-        alignas(64) mutable std::shared_mutex _sorted_index_mutex; ///< Protects access to the `_sorted_indices` map.
-        std::atomic_size_t _flush_iteration{0};                    ///< Counter for naming flushed index files uniquely within partitions.
-        sorted_indices_map_t _sorted_indices;                      ///< In-memory map representing the LSM tree levels/files.
-
+        // --- Value tables ---
         alignas(64) mutable std::shared_mutex _value_tables_mutex{}; ///< Protects access to the `_value_tables` map.
         std::atomic_size_t _last_table_id{0};                        ///< Atomic ID counter for the next value_table file to be created.
         /// Map storing shared pointers to older, non-current value_table files, keyed by their ID.
@@ -115,15 +110,11 @@ namespace hedge::db
         // Memtable & flushes
         memtable _memtable;
 
+        // --- SST management and compaction ---
+        sst_manager _sst_manager;
+
         // --- Background Workers ---
-        // NOTE: _compation_executor_pool must be declared BEFORE _compaction_worker
-        // so that executors outlive the worker thread (C++ destroys members in reverse declaration order).
-        std::vector<std::shared_ptr<async::executor_context>> _compation_executor_pool{}; ///< Pool of executors managing background compactions
-
-        /// Worker thread dedicated to handling index compaction jobs.
-        async::worker _compaction_worker{}; ///< It just controls the flow for compaction, the actual I/O is done by the pool _compaction_executor
-
-        async::worker _value_table_worker{};                                              ///< Worker thread for instantiating new value tables
+        async::worker _value_table_worker{}; ///< Worker thread for instantiating new value tables
 
         // Index page cache
         std::shared_ptr<sharded_page_cache> _page_cache;
@@ -167,35 +158,9 @@ namespace hedge::db
          */
         async::task<hedge::status> remove_async(const key_t& key);
 
-        struct compaction_stats
-        {
-            size_t input_bytes{0};
-            size_t output_bytes{0};
-            size_t num_inputs{0};
-            size_t items_merged{0};
-
-            compaction_stats& operator+=(const compaction_stats& other)
-            {
-                this->input_bytes += other.input_bytes;
-                this->output_bytes += other.output_bytes;
-                this->num_inputs += other.num_inputs;
-                this->items_merged += other.items_merged;
-                return *this;
-            }
-        };
-        std::future<expected<compaction_stats>> compact_sorted_indices(bool ignore_size_ratio);
+        void trigger_compaction(bool ignore_size_ratio);
 
         void wait_for_compactions_to_finish();
-
-        using compaction_fn_t = std::function<hedge::expected<compaction_stats>(bool compact_all)>;
-
-        std::mutex _pending_compactions_mutex;
-        size_t _pending_compacting_sst_count{0};
-        std::condition_variable _pending_compactions_cv;
-
-        alignas(64) std::atomic_bool _compaction_backpressure{false};
-
-        hedge::expected<database::compaction_stats> _compaction_job_size_check(bool compact_all);
 
         /**
          * @brief Factory function to create a new database instance at the specified path.
@@ -228,6 +193,11 @@ namespace hedge::db
          */
         [[nodiscard]] double read_amplification_factor();
 
+        /**
+         * @brief Prints the LSM tree structure showing SST count and average file size per level per partition.
+         */
+        void print_tree_structure() const;
+
     private:
         /**
          * @brief Private default constructor. Use factory functions `make_new` or `load`.
@@ -250,28 +220,6 @@ namespace hedge::db
          */
         hedge::expected<std::shared_ptr<value_table>> _rotate_value_table(std::shared_ptr<value_table> rotating);
 
-        struct compaction_output
-        {
-            struct compaction_args
-            {
-                std::vector<sst_ptr_t> inputs;
-                hedge::expected<sst_ptr_t> output;
-
-                size_t input_bytes{};
-                size_t output_bytes{};
-            };
-
-            std::mutex m;
-            std::vector<compaction_args> results;
-        };
-
-        async::task<> _make_compaction_task(compaction_output& output,
-                                            std::vector<database::sst_ptr_t> inputs,
-                                            std::shared_ptr<async::wait_group> wg);
-
-        async::task<> _make_self_completing_compaction_task(std::vector<database::sst_ptr_t> inputs);
-
-        hedge::expected<compaction_stats> _compaction_job_size_tiered(bool compact_all);
         /**
          * @brief Internal helper to find the most recent `value_ptr_t` and the corresponding `value_table` for a key.
          * Searches memtable, then relevant sorted_indices. Handles deleted entries.
@@ -282,29 +230,6 @@ namespace hedge::db
         async::task<expected<value_t>> _find_value(const key_t& key);
 
         std::shared_ptr<value_table> _find_value_table_by_id(uint32_t id);
-
-        static std::function<void(std::vector<sst>)> make_push_indices_callback(const std::shared_ptr<database>& db);
-        static std::function<void()> make_compaction_callback(const std::shared_ptr<database>& db);
-
-        // Debug stuff
-        static auto check_is_sorted_by_epoch(const std::vector<sst_ptr_t>& vec) -> bool
-        {
-            auto sorted = std::ranges::is_sorted(
-                vec,
-                [](const sst_ptr_t& lhs, const sst_ptr_t& rhs)
-                {
-                    return lhs->epoch() < rhs->epoch();
-                });
-            if(!sorted)
-            {
-                std::cout << "Indices not sorted by epoch:" << std::endl;
-                for(const auto& idx_ptr : vec)
-                {
-                    std::cout << " - Path: " << idx_ptr->path().string() << ", epoch: " << idx_ptr->epoch() << std::endl;
-                }
-            }
-            return sorted;
-        };
     };
 
 } // namespace hedge::db

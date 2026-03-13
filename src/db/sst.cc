@@ -5,6 +5,8 @@
 #include "db/block.h"
 #include "sst.h"
 #include "types.h"
+#include "xxh64.hpp"
+
 namespace hedge::db
 {
 
@@ -15,14 +17,10 @@ namespace hedge::db
 
     async::task<expected<value_t>> sst::lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache, std::optional<uint64_t> key_hash) const
     {
-        if(this->_qf.has_value())
+        if(this->_qf.has_value() && key_hash.has_value() && !this->_qf->may_contain(key_hash.value()))
         {
-            uint64_t hash = key_hash.value_or(std::hash<key_t>{}(key));
-            if(!this->_qf->may_contain(hash))
-            {
-                prof::get<"qf_false_positives">().add(0);
-                co_return hedge::error("", errc::KEY_NOT_FOUND);
-            }
+            prof::get<"qf_false_positives">().add(0);
+            co_return hedge::error("", errc::KEY_NOT_FOUND);
         }
 
         auto maybe_page_id = this->_find_page_id(key);

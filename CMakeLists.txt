@@ -102,6 +102,8 @@ set(DB_SOURCES
     src/db/value_table.h
     src/db/database.cc
     src/db/database.h
+    src/db/sst_manager.h
+    src/db/sst_manager.cc
     src/cache.h
     src/cache.cc
 )
