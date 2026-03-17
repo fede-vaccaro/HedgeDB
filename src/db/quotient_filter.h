@@ -42,7 +42,31 @@ namespace hedge::db
 
         bool insert(uint64_t hash);
 
-        bool may_contain(uint64_t hash) const;
+        [[nodiscard]] bool may_contain(uint64_t hash) const
+        {
+            return third_party::qf_may_contain(const_cast<third_party::quotient_filter*>(&this->_qf_impl), hash);
+        }
+
+        void prefetch_slot(uint64_t hash) const
+        {
+            auto* qf_ptr = const_cast<third_party::quotient_filter*>(&this->_qf_impl);
+
+            auto hash_to_quotient = [](const third_party::quotient_filter* qf, uint64_t hash) -> uint64_t
+            {
+                uint64_t quotient = (hash >> qf->qf_rbits) & qf->qf_index_mask;
+                return quotient;
+            };
+
+            uint64_t fq = hash_to_quotient(qf_ptr, hash);
+
+            size_t bitpos = qf_ptr->qf_elem_bits * fq;
+            size_t tabpos = bitpos / 64;
+            const auto* prefetch_ptr = reinterpret_cast<const uint8_t*>(&qf_ptr->qf_table[tabpos]);
+            
+            __builtin_prefetch(prefetch_ptr, 0, 2);
+            __builtin_prefetch(prefetch_ptr + 64, 0, 2);
+
+        }
 
         bool remove(uint64_t hash);
 

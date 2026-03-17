@@ -95,6 +95,9 @@ namespace hedge::db
         {
             alignas(64) mutable std::shared_mutex mutex;
             partition_t levels;
+            std::atomic_size_t levels_seq_num{0};
+            fs::file state_file{};
+            std::mutex state_write_mutex{};
         };
 
         using sorted_indices_map_t = std::map<uint16_t, std::unique_ptr<partition_state>>;
@@ -140,7 +143,16 @@ namespace hedge::db
                                             std::vector<sst_ptr_t> inputs,
                                             std::shared_ptr<async::wait_group> wg);
 
-        async::task<> _make_self_completing_compaction_task(size_t level, std::vector<sst_ptr_t> inputs);
+        async::task<> _make_self_completing_compaction_task(size_t level, std::vector<sst_ptr_t> inputs, size_t merge_width);
+
+        static std::string _serialize_levels(const partition_t& levels);
+
+        static hedge::expected<partition_t> _deserialize_levels(std::string_view content,
+                                                                 const std::filesystem::path& dir_path,
+                                                                 size_t max_num_levels,
+                                                                 bool use_odirect);
+
+        async::task<> _persist_partition_state(uint16_t partition_id);
 
         hedge::expected<compaction_stats> _compaction_job_size_tiered(bool compact_all);
 

@@ -131,6 +131,38 @@ namespace hedge::async
         }
     };
 
+    struct read_response_fixed;
+    struct read_mailbox_fixed;
+
+    struct read_request_fixed
+    {
+        using response_t = read_response;
+        using mailbox_t = read_mailbox_fixed;
+
+        int32_t fd{-1};
+        uint8_t* data{nullptr};
+        size_t offset{0};
+        size_t size{0};
+        int32_t buf_index{-1}; // for registered buffers optimization
+    };
+
+    struct read_mailbox_fixed : mailbox_base<read_mailbox_fixed>
+    {
+        read_mailbox_fixed(read_request_fixed req)
+            : request(req) {}
+
+        read_request_fixed request;
+        read_response response;
+
+        void prepare_sqe(io_uring_sqe* sqe);
+        void handle_cqe(io_uring_cqe* cqe);
+
+        void* get_response()
+        {
+            return &response;
+        }
+    };
+
     struct unaligned_read_response;
     struct unaligned_read_mailbox;
 
@@ -548,6 +580,7 @@ namespace hedge::async
     using mailbox_impls =
         std::variant<
             read_mailbox,
+            read_mailbox_fixed,
             unaligned_read_mailbox,
             unaligned_readv_mailbox,
             write_mailbox,

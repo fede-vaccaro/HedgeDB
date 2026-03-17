@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <span>
 
@@ -15,11 +16,9 @@ namespace hedge
         explicit single_buffer_arena_allocator(size_t size)
             : _capacity(size),
               _offset(0),
-              _buffer(std::make_unique<uint8_t[]>(size))
+              _buffer(std::unique_ptr<uint8_t[], decltype(&std::free)>(static_cast<uint8_t*>(std::aligned_alloc(16, size)), &std::free))
         {
-            // Ensure the base buffer is at least 8-byte aligned.
-            // On most 64-bit systems, new[] returns 16-byte aligned memory.
-            assert(reinterpret_cast<uintptr_t>(this->_buffer.get()) % 8 == 0);
+            assert(reinterpret_cast<uintptr_t>(this->_buffer.get()) % 16 == 0);
         }
 
         single_buffer_arena_allocator(const single_buffer_arena_allocator&) = delete;
@@ -30,7 +29,7 @@ namespace hedge
 
         std::span<uint8_t> allocate(size_t bytes)
         {
-            constexpr size_t alignment = 8;
+            constexpr size_t alignment = 16;
             size_t aligned_bytes = (bytes + alignment - 1) & ~(alignment - 1);
 
             size_t current_offset = this->_offset.load(std::memory_order_relaxed);
@@ -66,6 +65,6 @@ namespace hedge
     private:
         size_t _capacity;
         std::atomic<size_t> _offset;
-        std::unique_ptr<uint8_t[]> _buffer;
+        std::unique_ptr<uint8_t[], decltype(&std::free)> _buffer;
     };
 } // namespace hedge

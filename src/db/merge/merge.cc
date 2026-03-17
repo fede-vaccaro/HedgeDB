@@ -90,32 +90,15 @@ namespace hedge::db
             qf = std::move(maybe_qf.value());
 
         auto fd_maybe = co_await fs::file::from_path_async(new_path,
-                                                           fs::file::open_mode::write_new,
+                                                           fs::file::open_mode::read_write_new,
                                                            async::this_thread_executor(),
-                                                           true,
+                                                           config.create_new_with_odirect,
                                                            estimated_size);
 
         if(!fd_maybe.has_value())
             co_return hedge::error("Failed to create file descriptor for merged index at " + new_path.string() + ": " + fd_maybe.error().to_string());
 
-        // std::cout << "Created file for merged index at " << new_path.string() << " with estimated size " << estimated_size << " bytes\n";
-
         auto output_file = std::move(fd_maybe.value());
-
-        auto maybe_read_file = co_await fs::file::from_path_async(
-            output_file.path(),
-            fs::file::open_mode::read_only,
-            async::this_thread_executor(),
-            config.create_new_with_odirect,
-            std::nullopt);
-
-        if(!maybe_read_file.has_value())
-            co_return hedge::error("Failed to open merged index file for reading: " + maybe_read_file.error().to_string());
-
-        auto read_file = std::move(maybe_read_file.value());
-
-        if(!read_file.has_direct_access())
-            posix_fadvise(read_file.fd(), 0, 0, POSIX_FADV_RANDOM);
 
         const size_t num_bufs = indices.size();
 
@@ -191,7 +174,7 @@ namespace hedge::db
         {
             auto write_response = co_await write_buffer.flush(
                 output_file.fd(),
-                read_file.id(),
+                output_file.id(),
                 bytes_written,
                 config.populate_cache_with_output ? cache : nullptr,
                 executor);
@@ -501,17 +484,15 @@ namespace hedge::db
         }
 
         // Truncate file to the actual written size
-        {
-            auto res = co_await async::this_thread_executor()->submit_request(async::ftruncate_request{
-                .fd = output_file.fd(),
-                .length = bytes_written,
-            });
+        auto res = co_await async::this_thread_executor()->submit_request(async::ftruncate_request{
+            .fd = output_file.fd(),
+            .length = bytes_written,
+        });
 
-            if(res.error_code != 0)
-                co_return hedge::error("Failed to truncate merged file to final size: " + std::string(strerror(res.error_code)));
-        }
+        if(res.error_code != 0)
+            co_return hedge::error("Failed to truncate merged file to final size: " + std::string(strerror(res.error_code)));
 
-        constexpr size_t REF_PAGE_SIZE = 4096;
+        constexpr size_t REF_PAGE_SIZE = PAGE_SIZE_IN_BYTES;
         constexpr size_t KEYS_PER_META_INDEX_PAGE = REF_PAGE_SIZE / sizeof(key_t);
 
         std::optional<page_aligned_buffer<key_t>> super_index;
@@ -521,8 +502,14 @@ namespace hedge::db
 
         merged_meta_index.shrink_to_fit();
 
+        if(config.fdatasync_output)
+            co_await executor->submit_request(async::fdatasync_request{.fd = output_file.fd()});
+
+        if(!output_file.has_direct_access())
+            posix_fadvise(output_file.fd(), 0, 0, POSIX_FADV_RANDOM);
+
         sst result{
-            std::move(read_file),
+            std::move(output_file),
             std::move(merged_meta_index),
             footer,
             std::move(super_index),

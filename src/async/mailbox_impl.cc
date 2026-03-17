@@ -23,6 +23,19 @@ namespace hedge::async
             this->response.bytes_read = cqe->res;
     }
 
+    void read_mailbox_fixed::prepare_sqe(io_uring_sqe* sqe)
+    {
+        io_uring_prep_read_fixed(sqe, this->request.fd, this->request.data, this->request.size, this->request.offset, this->request.buf_index);
+    }
+
+    void read_mailbox_fixed::handle_cqe(io_uring_cqe* cqe)
+    {
+        if(cqe->res < 0)
+            this->response.error_code = cqe->res;
+        else
+            this->response.bytes_read = cqe->res;
+    }
+
     void unaligned_read_mailbox::prepare_sqe(io_uring_sqe* sqe)
     {
         this->response = {

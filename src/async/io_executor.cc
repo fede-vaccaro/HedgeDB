@@ -23,6 +23,7 @@
 #include "perf_counter.h"
 #include "spinlock.h"
 #include "task.h"
+#include "types.h"
 
 using namespace std::string_literals;
 
@@ -49,17 +50,21 @@ namespace hedge::async
 
     executor_context::executor_context(uint32_t queue_depth) : _queue_depth(queue_depth), _max_buffered_requests(queue_depth * 4)
     {
-        int ret = io_uring_queue_init(this->_queue_depth, &this->_ring, 0);
-
-        if(ret < 0)
-            throw std::runtime_error("error with io_uring_queue_init: "s + strerror(-ret));
-
-        this->_in_flight_requests.reserve(this->_queue_depth * 32);
-        this->_in_progress_tasks.reserve(this->_queue_depth * 2);
-
         this->_worker = std::thread(
             [this]()
             {
+                int ret = io_uring_queue_init(this->_queue_depth, &this->_ring,
+                                              IORING_SETUP_SINGLE_ISSUER |
+                                                  IORING_SETUP_COOP_TASKRUN |
+                                                  IORING_SETUP_DEFER_TASKRUN |
+                                                  IORING_SETUP_TASKRUN_FLAG);
+
+                if(ret < 0)
+                    throw std::runtime_error("error with io_uring_queue_init: "s + strerror(-ret));
+
+                this->_in_flight_requests.reserve(this->_queue_depth * 32);
+                this->_in_progress_tasks.reserve(this->_queue_depth * 2);
+
                 this->_event_loop();
             });
 
@@ -75,10 +80,10 @@ namespace hedge::async
 
     void executor_context::_submit_sqe()
     {
-        auto sq_ready = static_cast<int32_t>(io_uring_sq_ready(&this->_ring));
+        auto cq_ready = static_cast<int32_t>(io_uring_cq_ready(&this->_ring));
         auto in_flight = static_cast<int32_t>(this->_in_flight_requests.size());
 
-        auto potential_cqe_ready = sq_ready + in_flight;
+        auto potential_cqe_ready = cq_ready + in_flight;
         auto cqe_space_margin = (static_cast<int32_t>(this->_queue_depth) * 2) - potential_cqe_ready;
 
         if(cqe_space_margin <= 0) // avoid cqe overflow risk
@@ -100,6 +105,9 @@ namespace hedge::async
             io_uring_sqe* sqe = io_uring_get_sqe(&this->_ring);
 
             uint64_t this_req_id = this->_current_request_id++;
+
+            // if(this->_current_request_id % 100000 == 0)
+            //     std::cout << "Current in flight requests: " << this->_in_flight_requests.size() << "\n";
 
             io_uring_sqe_set_data64(sqe, this_req_id);
 
@@ -131,16 +139,66 @@ namespace hedge::async
         }
     }
 
-    void executor_context::_wait_for_cqe()
+    void executor_context::_wait_and_submit(bool wait_for_cqe)
     {
-        if(this->_in_flight_requests.empty())
+        auto cq_ready = static_cast<int32_t>(io_uring_cq_ready(&this->_ring));
+        auto in_flight = static_cast<int32_t>(this->_in_flight_requests.size());
+
+        auto potential_cqe_ready = cq_ready + in_flight;
+        auto cqe_space_margin = (static_cast<int32_t>(this->_queue_depth) * 2) - potential_cqe_ready;
+
+        size_t submitted_sqe_count = 0;
+
+        if(cqe_space_margin > 0) // avoid cqe overflow risk
+        {
+            auto sq_space_left = io_uring_sq_space_left(&this->_ring);
+            auto sq_to_submit = std::min(static_cast<int32_t>(sq_space_left), cqe_space_margin);
+
+            thread_local std::vector<std::unique_ptr<mailbox>> requests;
+            requests.clear();
+
+            pop_n(requests, this->_waiting_for_io_queue, sq_to_submit);
+
+            submitted_sqe_count = requests.size();
+
+            // if(requests.empty())
+            //     return;
+
+            for(auto& mailbox : requests)
+            {
+                io_uring_sqe* sqe = io_uring_get_sqe(&this->_ring);
+
+                uint64_t this_req_id = this->_current_request_id++;
+
+                io_uring_sqe_set_data64(sqe, this_req_id);
+
+                mailbox->prepare_sqe(sqe);
+
+                this->_in_flight_requests.emplace(this_req_id, std::move(mailbox));
+            }
+        }
+
+        thread_local int counter = 0;
+        if(++counter % 10001 == 0)
+        {
+            // std::cout << "ready_cqe: " << cq_ready << ", in_flight: " << this->_in_flight_requests.size() << "\n";
+        }
+
+        // const uint32_t desired_wait_for_batch = this->_queue_depth / 8;
+        const uint32_t ready_soon = this->_in_flight_requests.size();
+        // const uint32_t wait_for = wait_for_cqe ? std::min(desired_wait_for_batch, ready_soon) : 0;
+
+        const uint32_t wait_for = wait_for_cqe ? std::min(1U, ready_soon) : 0; // wait for at least one cqe to be ready, to reduce latency
+
+        if(submitted_sqe_count == 0 && wait_for == 0)
             return;
 
-        io_uring_cqe* cqe;
-        auto ret = io_uring_wait_cqe(&this->_ring, &cqe);
+        auto ret = io_uring_submit_and_wait(&this->_ring, wait_for);
 
         if(ret < 0)
-            throw std::runtime_error("io_uring_wait_cqe: "s + strerror(-ret));
+            throw std::runtime_error("io_uring_submit_and_wait: "s + strerror(-ret));
+
+        io_uring_cqe* cqe;
 
         uint32_t head{};
         uint32_t cqe_count{};
@@ -158,6 +216,7 @@ namespace hedge::async
 
             mailbox->handle_cqe(cqe);
 
+            // TODO: this is unfair as we should process them in request_id order
             this->_io_ready_queue.emplace_back(std::move(mailbox));
             this->_in_flight_requests.erase(it);
 
@@ -181,8 +240,8 @@ namespace hedge::async
             else
                 mailbox->resume();
 
-            if(io_uring_cq_ready(&this->_ring) > 0)
-                break;
+            // if(io_uring_cq_ready(&this->_ring) > 0)
+            //     break;
         }
 
         while(!requeued.empty())
@@ -269,7 +328,7 @@ namespace hedge::async
         while(true)
         {
             {
-                // prof::counter_guard g(prof::get<"executor_pop_tasks">());
+                prof::counter_guard g(prof::get<"executor_pop_tasks">());
 
                 if(this->_in_progress_tasks.size() < this->_queue_depth)
                 {
@@ -303,24 +362,26 @@ namespace hedge::async
                 }
             }
 
-            this->_submit_sqe();
-
-            while(!new_tasks.empty())
             {
-                auto task = std::move(new_tasks.front());
-                new_tasks.pop_front();
+                while(!new_tasks.empty())
+                {
+                    auto task = std::move(new_tasks.front());
+                    new_tasks.pop_front();
 
-                auto handle = task.handle();
-                auto [_, ok] = this->_in_progress_tasks.insert({handle, std::move(task)});
-                assert(ok);
-                assert(handle != nullptr);
+                    auto handle = task.handle();
+                    auto [_, ok] = this->_in_progress_tasks.insert({handle, std::move(task)});
+                    assert(ok);
+                    assert(handle != nullptr);
 
-                handle.resume();
+                    handle.resume();
+                }
             }
+
+            this->_wait_and_submit(true);
 
             this->_do_work();
 
-            this->_wait_for_cqe();
+            this->_wait_and_submit(true);
 
             this->_gc_tasks();
 
@@ -339,7 +400,7 @@ namespace hedge::async
 
     void executor_context::_gc_tasks()
     {
-        // prof::counter_guard guard(prof::get<"gc_coros">()); TODO: there is some fiasco on destruction
+        prof::get<"gc_coros">().start();
 
         thread_local std::vector<decltype(this->_in_progress_tasks)::iterator> to_remove;
         to_remove.clear();
@@ -352,6 +413,8 @@ namespace hedge::async
 
         for(const auto& it : to_remove)
             this->_in_progress_tasks.erase(it);
+
+        prof::get<"gc_coros">().stop();
     }
 
     void executor_context::register_fd(int32_t fd)
@@ -414,6 +477,22 @@ namespace hedge::async
     const std::shared_ptr<executor_context>& executor_context::this_thread_executor()
     {
         return executor_context::_this_thread_executor;
+    }
+
+    void executor_context::register_page_buffers(const std::vector<uint8_t*>& buffers)
+    {
+        this->_registered_page_buffers.resize(buffers.size());
+        size_t c = 0;
+        for(auto& io_vec : this->_registered_page_buffers)
+        {
+            io_vec.iov_base = buffers[c];
+            io_vec.iov_len = PAGE_SIZE_IN_BYTES;
+            c++;
+        }
+
+        auto res = io_uring_register_buffers(&this->_ring, this->_registered_page_buffers.data(), buffers.size());
+        if(res < 0)
+            throw std::runtime_error("io_uring_register_buffers failed: " + std::string(strerror(-res)));
     }
 
     executor_pool::executor_pool(size_t pool_size, uint32_t queue_depth)

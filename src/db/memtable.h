@@ -116,12 +116,13 @@ namespace hedge::db
         bool use_odirect = true;
         size_t num_writer_threads = 256; // (quite) safe upper bound
         size_t flush_io_workers = 4;
+        bool fdatasync_output = false;
     };
 
     struct memtable_entry
     {
         key_t key;
-        mutable std::span<const uint8_t> value;
+        alignas(std::atomic_ref<std::span<const uint8_t>>::required_alignment) mutable std::span<const uint8_t> value;
 
         memtable_entry() = default;
         memtable_entry(key_t k, std::span<const uint8_t> v) : key(k), value(v) {}
@@ -173,7 +174,7 @@ namespace hedge::db
                 {
                     // Key exists, update value
                     // value in memtable_entry is mutable
-                    res.first->value = value;
+                    std::atomic_ref(res.first->value).store(value, std::memory_order_release);
                 }
                 return true;
             }
@@ -189,7 +190,9 @@ namespace hedge::db
             auto it = acc.find(memtable_entry(key, {}));
             if(it != acc.end())
             {
-                return it->value;
+                auto value = std::atomic_ref<std::span<const uint8_t>>(it->value);
+                // auto constexpr ra = std::atomic_ref<std::span<const uint8_t>>::required_alignment;
+                return value.load(std::memory_order_acquire);
             }
             return std::nullopt;
         }
@@ -202,9 +205,9 @@ namespace hedge::db
     struct memtable_with_arena_t : memtable_impl3_t
     {
         // std::vector<std::unique_ptr<hedge::db::arena_allocator<uint8_t, false>>> value_arenas; // one per writer thread, not shared between threads
-        single_buffer_arena_allocator value_arena;                                             // single arena for values, shared between threads with atomic allocation
+        single_buffer_arena_allocator value_arena; // single arena for values, shared between threads with atomic allocation
 
-        memtable_with_arena_t(size_t memtable_memory_budget, size_t n_threads, size_t value_memory_budget)
+        memtable_with_arena_t(size_t memtable_memory_budget, size_t /*n_threads*/, size_t value_memory_budget)
             : memtable_impl3_t(memtable_memory_budget), value_arena(value_memory_budget)
         {
         }
@@ -243,6 +246,7 @@ namespace hedge::db
 
         // Pending flushes
         static constexpr size_t MAX_PENDING_FLUSHES = 8;
+        alignas(64) std::atomic_size_t _table_switch_epoch;
         alignas(64) mutable std::shared_mutex _pending_flushes_mutex;
         alignas(64) std::condition_variable_any _pending_flushes_cv;
         std::map<size_t, rw_sync_table_ptr_t> _pending_flushes;

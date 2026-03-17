@@ -15,10 +15,32 @@
 #include <unistd.h>
 
 /*
-To enable access to counters:
-
+- To enable access to counters:
 sudo sh -c 'echo 1 >/proc/sys/kernel/perf_event_paranoid'
 sudo sh -c 'echo 0 >/proc/sys/kernel/kptr_restrict'
+
+- Disable turbo boost (0 for re-enabling): 
+echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo
+
+- Max perf percent:
+cat /sys/devices/system/cpu/intel_pstate/max_perf_pct
+
+- Max scaling freq
+cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+Set @ 71%
+echo 71 | sudo tee /sys/devices/system/cpu/intel_pstate/max_perf_pct
+
+- How to profile:
+perf record -g --call-graph dwarf -F 1999 -p $(pgrep -f "database_perf_test")
+
+- How to profile specific metrics (use $ perf list)
+perf stat -e dTLB-load-misses -p $(pgrep -f "database_perf_test")
+
+
+perf report
+
+performance plan:
+sudo cpupower frequency-set -g performance
 */
 
 namespace hedge::prof

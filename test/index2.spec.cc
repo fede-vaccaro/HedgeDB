@@ -446,6 +446,77 @@ TEST_P(sst_test, test_flush_and_lookup_variable_keys)
     ASSERT_EQ(found_count.load(), this->_keys.size());
 }
 
+TEST_P(sst_test, test_load_from_disk)
+{
+    std::shared_ptr<hedge::db::sharded_page_cache> cache = nullptr;
+    if(this->USE_CACHE)
+    {
+        constexpr auto CACHE_MAX_SIZE = 64 * 1024 * 1024;
+        cache = std::make_shared<hedge::db::sharded_page_cache>(CACHE_MAX_SIZE, 1);
+    }
+
+    auto memtable = hedge::db::memtable_impl3_t{1024 * 1024 * 128};
+
+    for(size_t j = 0; j < this->N_KEYS; ++j)
+    {
+        this->_keys.emplace_back(generate_key(16));
+        auto buffer = generate_value(arena, j, this->VALUE_TYPE);
+        memtable.insert(this->_keys.back(), buffer);
+    }
+
+    auto result = hedge::db::index_ops::flush_mem_index2(
+        this->_base_path,
+        &memtable,
+        this->NUM_PARTITION_EXPONENT,
+        0,
+        cache,
+        false);
+
+    ASSERT_TRUE(result.has_value()) << "Flush failed: " << result.error().to_string();
+
+    // Collect paths and destroy original SSTs
+    std::vector<std::filesystem::path> paths;
+    std::map<uint16_t, std::filesystem::path> sst_path_map;
+    for(const auto& sst : result.value())
+        sst_path_map[sst.upper_bound()] = sst.path();
+    result.value().clear();
+
+    // Reload each SST from disk
+    std::map<uint16_t, hedge::db::sst> loaded_ssts;
+    for(const auto& [ub, p] : sst_path_map)
+    {
+        auto maybe_loaded = hedge::db::sst::load(p);
+        ASSERT_TRUE(maybe_loaded.has_value()) << "sst::load failed for " << p << ": " << maybe_loaded.error().to_string();
+        loaded_ssts.emplace(ub, std::move(maybe_loaded.value()));
+    }
+
+    // Lookup all keys in loaded SSTs
+    auto query_wg = hedge::async::wait_group::make_shared();
+    query_wg->set(this->_keys.size());
+    std::atomic<size_t> found_count{0};
+
+    size_t partition_key_prefix_range = (1 << 16) / (1 << this->NUM_PARTITION_EXPONENT);
+
+    for(size_t j = 0; j < this->_keys.size(); ++j)
+    {
+        const auto& key = this->_keys[j];
+        size_t partition_id = hedge::find_partition_prefix_for_key(key, partition_key_prefix_range);
+        auto it = loaded_ssts.find(partition_id);
+        if(it != loaded_ssts.end())
+        {
+            this->_executor->submit_io_task(lookup_task_factory(j, key, it->second, query_wg, *this, found_count, cache));
+        }
+        else
+        {
+            query_wg->decr();
+        }
+    }
+
+    query_wg->wait();
+
+    ASSERT_EQ(found_count.load(), this->_keys.size());
+}
+
 TEST_P(sst_test, test_flush_succeeds)
 {
     auto memtable = hedge::db::memtable_impl3_t{1024 * 1024 * 128};

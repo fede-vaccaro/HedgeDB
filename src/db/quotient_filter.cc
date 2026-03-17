@@ -20,11 +20,6 @@ namespace hedge::db
         return third_party::qf_insert(&this->_qf_impl, hash);
     }
 
-    bool quotient_filter::may_contain(uint64_t hash) const
-    {
-        return third_party::qf_may_contain(const_cast<third_party::quotient_filter*>(&this->_qf_impl), hash);
-    }
-
     bool quotient_filter::remove(uint64_t hash)
     {
         return third_party::qf_remove(&this->_qf_impl, hash);

@@ -3,10 +3,12 @@
 #include <atomic>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <future>
 #include <liburing.h>
 #include <liburing/io_uring.h>
+#include <limits>
 #include <memory>
 #include <thread>
 #include <tsl/robin_map.h>
@@ -183,6 +185,14 @@ namespace hedge::async
 
         static const std::shared_ptr<executor_context>& this_thread_executor();
 
+        uint32_t queue_depth() const
+        {
+            return this->_queue_depth;
+        }
+
+        void register_page_buffers(const std::vector<uint8_t*>& buffers);
+        std::vector<iovec> _registered_page_buffers;
+
     private:
         explicit executor_context(uint32_t queue_depth); // use executor_context::make_new instead
 
@@ -190,7 +200,7 @@ namespace hedge::async
 
         void _submit_sqe();
         void _do_work();
-        void _wait_for_cqe();
+        void _wait_and_submit(bool wait_for_cqe);
         void _event_loop();
         void _gc_tasks();
 

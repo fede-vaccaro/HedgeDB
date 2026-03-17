@@ -158,7 +158,7 @@ namespace hedge::db
          */
         async::task<hedge::status> remove_async(const key_t& key);
 
-        void trigger_compaction(bool ignore_size_ratio);
+        void trigger_compaction(bool compact_all);
 
         void wait_for_compactions_to_finish();
 

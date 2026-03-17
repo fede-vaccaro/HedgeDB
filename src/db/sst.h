@@ -89,6 +89,16 @@ namespace hedge::db
 
         [[nodiscard]] static hedge::expected<sst> load(const std::filesystem::path& path, bool use_odirect = false);
 
+        void prefetch_filter_slot(uint64_t key_hash)
+        {
+            if(!this->_qf.has_value()) [[unlikely]]
+                return;
+
+            this->_qf->prefetch_slot(key_hash);
+        }
+
+        [[nodiscard]] bool probe_filter(uint64_t key_hash) const;
+
         [[nodiscard]] async::task<expected<value_t>> lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache, std::optional<uint64_t> key_hash = std::nullopt) const;
 
         [[nodiscard]] size_t upper_bound() const { return this->_footer.upper_bound; }
@@ -115,7 +125,7 @@ namespace hedge::db
         void set_compaction_state(compaction_progress_state new_state)
         {
             auto curr_state = this->_compaction_state;
-            
+
             if(curr_state == compaction_progress_state::COMPACTION_ERROR)
                 return;
 
@@ -146,7 +156,7 @@ namespace hedge::db
 
         [[nodiscard]] std::optional<size_t> _find_page_id(const key_t& key) const;
 
-        [[nodiscard]] async::task<hedge::status> _load_page_async(size_t offset, uint8_t* data_ptr) const;
+        [[nodiscard]] async::task<hedge::status> _load_page_async(size_t offset, uint8_t* data_ptr, int32_t buf_index) const;
     };
 
 } // namespace hedge::db

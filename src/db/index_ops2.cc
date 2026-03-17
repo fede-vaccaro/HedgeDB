@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <error.hpp>
+#include <fcntl.h>
 #include <mutex>
+#include <sys/mman.h>
 
 #include "async/wait_group.h"
 #include "db/block.h"
@@ -496,7 +498,8 @@ namespace hedge::db
         size_t upper_bound,
         size_t epoch,
         std::shared_ptr<db::sharded_page_cache> cache,
-        bool use_odirect)
+        bool use_odirect,
+        bool fdatasync_output)
     {
         constexpr size_t WRITE_BUF_SIZE = PAGE_SIZE_IN_BYTES * 256;
 
@@ -680,7 +683,17 @@ namespace hedge::db
         if(meta_index.size() > KEYS_PER_META_INDEX_PAGE * index_ops::SUPER_INDEX_ENABLED_THRESHOLD)
             super_index = index_ops::create_super_index<key_t, REF_PAGE_SIZE>(meta_index);
 
-        co_return sst(std::move(file), std::move(meta_index), footer, std::move(super_index), std::move(qf));
+        if(!use_odirect)
+            posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM);
+
+        if(fdatasync_output)
+            co_await executor->submit_request(async::fdatasync_request{.fd = fd});
+
+        co_return sst(std::move(file),
+                      std::move(meta_index),
+                      footer,
+                      std::nullopt, //  std::move(super_index),
+                      std::move(qf));
     }
 
     static async::task<void> flush_partition_task(
@@ -709,7 +722,8 @@ namespace hedge::db
             partition_id,
             flush_iteration,
             std::move(cache),
-            use_odirect);
+            use_odirect,
+            false);
 
         {
             std::lock_guard lk(*results_mutex);

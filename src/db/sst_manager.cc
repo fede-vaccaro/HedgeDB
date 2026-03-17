@@ -2,17 +2,20 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <numeric>
 #include <random>
 #include <ranges>
 #include <shared_mutex>
+#include <unistd.h>
 #include <unordered_set>
 
 #include <error.hpp>
 
 #include "async/wait_group.h"
+#include "fs/fs.hpp"
 #include "index_ops.h"
 #include "io_executor.h"
 #include "perf_counter.h"
@@ -43,7 +46,7 @@ namespace hedge::db
     }
 
     hedge::expected<std::unique_ptr<sst_manager>> sst_manager::load(const config& cfg,
-                                                                     std::shared_ptr<sharded_page_cache> page_cache)
+                                                                    std::shared_ptr<sharded_page_cache> page_cache)
     {
         auto mgr = std::make_unique<sst_manager>(cfg, page_cache);
 
@@ -52,33 +55,70 @@ namespace hedge::db
 
         size_t max_epoch = 0;
 
-        for(const auto& entry : std::filesystem::recursive_directory_iterator(cfg.indices_path))
+        for(auto& [partition_id, state_ptr] : mgr->_sorted_indices)
         {
-            if(!entry.is_regular_file())
+            auto& state = *state_ptr;
+            auto [dir_prefix, file_prefix] = format_prefix(partition_id);
+            auto dir_path = cfg.indices_path / dir_prefix;
+
+            if(!std::filesystem::exists(dir_path))
                 continue;
 
-            auto maybe_sst = sst::load(entry.path(), cfg.use_odirect_for_indices);
-            if(!maybe_sst)
-                return maybe_sst.error();
+            auto state_path = dir_path / with_extension(file_prefix, ".tiers");
+            const bool state_file_existed = std::filesystem::exists(state_path);
 
-            auto loaded = std::move(maybe_sst.value());
-            const size_t epoch = loaded.epoch();
-            const size_t partition_id = loaded.upper_bound();
+            {
+                const auto mode = state_file_existed ? fs::file::open_mode::read_write
+                                                     : fs::file::open_mode::read_write_new;
+                auto maybe_file = fs::file::from_path(state_path, mode, false, PAGE_SIZE_IN_BYTES);
+                if(maybe_file)
+                    state.state_file = std::move(maybe_file.value());
+            }
 
-            auto it = mgr->_sorted_indices.find(static_cast<uint16_t>(partition_id));
-            if(it == mgr->_sorted_indices.end())
-                continue;
+            bool loaded_from_state = false;
 
-            max_epoch = std::max(max_epoch, epoch);
+            if(state_file_existed && state.state_file.fd() != -1)
+            {
+                std::string buf(PAGE_SIZE_IN_BYTES, '\0');
+                ssize_t n = ::pread(state.state_file.fd(), buf.data(), PAGE_SIZE_IN_BYTES, 0);
+                if(n > 0)
+                {
+                    auto maybe_levels = _deserialize_levels(buf, dir_path, cfg.max_num_levels, cfg.use_odirect_for_indices);
+                    if(maybe_levels)
+                    {
+                        state.levels = std::move(maybe_levels.value());
+                        for(const auto& level : state.levels)
+                            for(const auto& sst_ptr : level)
+                                max_epoch = std::max(max_epoch, sst_ptr->epoch());
+                        loaded_from_state = true;
+                    }
+                }
+            }
 
-            auto& state = *it->second;
-            auto& l0 = state.levels[0];
+            if(!loaded_from_state)
+            {
+                for(const auto& entry : std::filesystem::directory_iterator(dir_path))
+                {
+                    if(!entry.is_regular_file())
+                        continue;
+                    if(entry.path().extension() == ".tiers")
+                        continue;
 
-            auto sst_ptr = std::make_shared<sst>(std::move(loaded));
-            auto pos = std::ranges::lower_bound(l0, sst_ptr,
-                                                [](const sst_ptr_t& a, const sst_ptr_t& b)
-                                                { return a->epoch() < b->epoch(); });
-            l0.insert(pos, std::move(sst_ptr));
+                    auto maybe_sst = sst::load(entry.path(), cfg.use_odirect_for_indices);
+                    if(!maybe_sst)
+                        return maybe_sst.error();
+
+                    auto loaded = std::move(maybe_sst.value());
+                    max_epoch = std::max(max_epoch, loaded.epoch());
+
+                    auto& l0 = state.levels[0];
+                    auto sst_ptr = std::make_shared<sst>(std::move(loaded));
+                    auto pos = std::ranges::lower_bound(l0, sst_ptr,
+                                                        [](const sst_ptr_t& a, const sst_ptr_t& b)
+                                                        { return a->epoch() < b->epoch(); });
+                    l0.insert(pos, std::move(sst_ptr));
+                }
+            }
         }
 
         mgr->_flush_iteration.store(max_epoch + 1, std::memory_order::relaxed);
@@ -103,6 +143,7 @@ namespace hedge::db
             auto& l0 = state.levels[0];
 
             l0.emplace_back(std::move(sorted_index_ptr));
+            state.levels_seq_num.fetch_add(1, std::memory_order::release);
 
             assert(check_is_sorted_by_epoch(l0) && "Sorted indices vector is not sorted by epoch after memtable flush");
         }
@@ -131,11 +172,34 @@ namespace hedge::db
         std::optional<value_t> value_opt;
         size_t ssts_visited = 0;
 
-        for(const auto& level : partition)
+        // std::array<std::array<uint8_t, 64>, 64> probe_result_matrix;
+
+        // for(const auto& [level_id, level] : partition | std::views::enumerate)
+        // {
+        //     for(const auto& sst_ptr : std::views::reverse(level))
+        //         sst_ptr->prefetch_filter_slot(key_hash);
+        // }
+
+        // for(const auto& [level_id, level] : partition | std::views::enumerate)
+        // {
+        //     for(const auto& [sst_index, sst_ptr] : level | std::views::enumerate)
+        //     {
+        //         probe_result_matrix[level_id][sst_index] = sst_ptr->probe_filter(key_hash) ? 1 : 0;
+        //     }
+        // }
+
+        for(const auto& [level_idx, level] : partition | std::views::enumerate)
         {
-            for(const auto& sst_ptr : std::views::reverse(level))
+            for(const auto& [sst_index, sst_ptr] : level | std::views::enumerate | std::views::reverse)
             {
                 ++ssts_visited;
+
+                if(!sst_ptr->probe_filter(key_hash))
+                    continue;
+
+                // if(probe_result_matrix[level_idx][sst_index] == 0)
+                //     continue;
+
                 auto maybe_value_ptr = co_await sst_ptr->lookup_async(key, this->_page_cache, key_hash);
                 if(!maybe_value_ptr.has_value() && maybe_value_ptr.error().code() != errc::KEY_NOT_FOUND)
                     co_return hedge::error(std::format("An error occurred while reading index at path {}: {}", sst_ptr->path().string(), maybe_value_ptr.error().to_string()));
@@ -151,6 +215,7 @@ namespace hedge::db
                     break;
                 }
             }
+
             if(value_opt.has_value())
                 break;
         }
@@ -213,7 +278,7 @@ namespace hedge::db
         wg->decr();
     }
 
-    async::task<> sst_manager::_make_self_completing_compaction_task(size_t level, std::vector<sst_ptr_t> inputs)
+    async::task<> sst_manager::_make_self_completing_compaction_task(size_t level, std::vector<sst_ptr_t> inputs, size_t input_min_merge_width)
     {
         auto merge_config = hedge::db::index_ops::merge_config{
             .read_ahead_size = this->_cfg.compaction_read_ahead_size_bytes,
@@ -267,19 +332,22 @@ namespace hedge::db
                 { return sum + ptr->file_size(); });
             bucket_avg_size /= inputs.size();
 
-            const size_t next_level_idx = std::min(level + ((output_ptr->file_size() / bucket_avg_size) / this->_cfg.min_merge_width), this->_cfg.max_num_levels - 1);
+            const size_t next_level_idx = std::min(level + ((output_ptr->file_size() / bucket_avg_size) / input_min_merge_width), this->_cfg.max_num_levels - 1);
 
             auto& target_level = state.levels[next_level_idx];
             auto pos = std::ranges::lower_bound(target_level, output_ptr,
                                                 [](const sst_ptr_t& a, const sst_ptr_t& b)
                                                 { return a->epoch() < b->epoch(); });
             target_level.insert(pos, std::move(output_ptr));
+            state.levels_seq_num.fetch_add(1, std::memory_order::release);
 
-            if(target_level.size() > this->_cfg.min_merge_width)
-            {
-                lk.unlock();
+            const bool needs_compaction = target_level.size() > input_min_merge_width;
+            lk.unlock();
+
+            if(needs_compaction)
                 this->trigger_compaction(false);
-            }
+
+            co_await _persist_partition_state(partition_prefix);
         }
         else
         {
@@ -307,8 +375,145 @@ namespace hedge::db
         }
     }
 
-    hedge::expected<sst_manager::compaction_stats> sst_manager::_compaction_job_size_tiered(bool /*compact_all*/)
+    std::string sst_manager::_serialize_levels(const partition_t& levels)
     {
+        std::string result;
+        for(const auto& level : levels)
+        {
+            bool first = true;
+            for(const auto& sst_ptr : level)
+            {
+                if(!first)
+                    result += ';';
+                result += sst_ptr->path().filename().string();
+                first = false;
+            }
+            result += '\n';
+        }
+        result.resize(PAGE_SIZE_IN_BYTES, '\0');
+        return result;
+    }
+
+    static std::vector<std::string_view> split_by(std::string_view s, char delim)
+    {
+        std::vector<std::string_view> parts;
+        size_t pos = 0;
+        while(pos <= s.size())
+        {
+            size_t next = s.find(delim, pos);
+            if(next == std::string_view::npos)
+            {
+                parts.emplace_back(s.substr(pos));
+                break;
+            }
+            parts.emplace_back(s.substr(pos, next - pos));
+            pos = next + 1;
+        }
+        return parts;
+    }
+
+    hedge::expected<sst_manager::partition_t> sst_manager::_deserialize_levels(std::string_view content,
+                                                                               const std::filesystem::path& dir_path,
+                                                                               size_t max_num_levels,
+                                                                               bool use_odirect)
+    {
+        partition_t result(max_num_levels);
+        size_t level_idx = 0;
+        size_t pos = 0;
+
+        while(level_idx < max_num_levels && pos < content.size())
+        {
+            size_t nl = content.find('\n', pos);
+            if(nl == std::string_view::npos)
+                break;
+
+            std::string_view line = content.substr(pos, nl - pos);
+            pos = nl + 1;
+
+            if(!line.empty())
+            {
+                auto& level = result[level_idx];
+                for(auto fname : split_by(line, ';'))
+                {
+                    if(fname.empty())
+                        continue;
+                    auto sst_path = dir_path / std::string(fname);
+                    auto maybe_sst = sst::load(sst_path, use_odirect);
+                    if(!maybe_sst)
+                        return maybe_sst.error();
+                    level.emplace_back(std::make_shared<sst>(std::move(maybe_sst.value())));
+                }
+            }
+
+            ++level_idx;
+        }
+
+        return result;
+    }
+
+    async::task<> sst_manager::_persist_partition_state(uint16_t partition_id)
+    {
+        auto it = this->_sorted_indices.find(partition_id);
+        if(it == this->_sorted_indices.end())
+            co_return;
+
+        auto& state = *it->second;
+
+        // Lazily open state file (under unique_lock to prevent double-open)
+        {
+            std::unique_lock lk(state.mutex);
+            if(state.state_file.fd() == -1)
+            {
+                auto [dir_prefix, file_prefix] = format_prefix(partition_id);
+                auto state_path = this->_cfg.indices_path / dir_prefix / with_extension(file_prefix, ".tiers");
+
+                const bool exists = std::filesystem::exists(state_path);
+                const auto mode = exists ? fs::file::open_mode::read_write
+                                         : fs::file::open_mode::read_write_new;
+                auto maybe_file = fs::file::from_path(state_path, mode, false, PAGE_SIZE_IN_BYTES);
+                if(!maybe_file)
+                {
+                    this->_logger.log("Failed to open partition state file: ", maybe_file.error().to_string());
+                    co_return;
+                }
+                state.state_file = std::move(maybe_file.value());
+            }
+        }
+
+        // Optimistic snapshot: record generation, then serialize outside any lock
+        partition_t snapshot;
+        size_t snap_gen;
+        {
+            std::shared_lock lk(state.mutex);
+            snapshot = state.levels;
+            snap_gen = state.levels_seq_num.load(std::memory_order::acquire);
+        }
+
+        auto buf = _serialize_levels(snapshot);
+
+        {
+            std::lock_guard wlk(state.state_write_mutex);
+
+            // If levels changed since snapshot, re-serialize the current state
+            if(state.levels_seq_num.load(std::memory_order::acquire) != snap_gen)
+            {
+                std::shared_lock lk(state.mutex);
+                snapshot = state.levels;
+                buf = _serialize_levels(snapshot);
+            }
+
+            if(::pwrite(state.state_file.fd(), buf.data(), PAGE_SIZE_IN_BYTES, 0) < 0)
+                this->_logger.log("pwrite failed for partition state file: ", strerror(errno));
+        }
+
+        co_await async::this_thread_executor()->submit_request(async::fdatasync_request{.fd = state.state_file.fd()});
+    }
+
+    hedge::expected<sst_manager::compaction_stats> sst_manager::_compaction_job_size_tiered(bool compact_all)
+    {
+        const size_t min_merge_width = compact_all ? 2 : this->_cfg.min_merge_width;
+        const size_t max_merge_width = compact_all ? std::numeric_limits<size_t>::max() : this->_cfg.max_merge_width;
+
         compaction_stats stats{};
         partition_snapshot_map_t index_snapshot;
 
@@ -317,7 +522,6 @@ namespace hedge::db
             std::shared_lock lk(state_ptr->mutex);
             index_snapshot.emplace(partition_id, state_ptr->levels);
         }
-
         {
             // 1. Compute buckets of SSTs to be merged (size-tiered)
             using buckets_t = std::multimap<size_t, std::vector<sst_ptr_t>>; // The key value represents the bucket for a level
@@ -337,11 +541,11 @@ namespace hedge::db
 
                 for(const auto& [level_id, level] : std::views::enumerate(partition))
                 {
-                    if(level.size() < this->_cfg.min_merge_width)
+                    if(level.size() < min_merge_width)
                         continue;
 
                     std::vector<sst_ptr_t> candidates;
-                    candidates.reserve(this->_cfg.min_merge_width);
+                    candidates.reserve(min_merge_width);
 
                     auto it = level.begin();
                     while(it != level.end() && !(*it)->pickable_for_compaction())
@@ -361,7 +565,7 @@ namespace hedge::db
                         const bool pickable_for_compaction = (*it)->pickable_for_compaction();
 
                         // Form candidate set
-                        if(pickable_for_compaction && (file_size <= new_avg * this->_cfg.bucket_ratio) && (candidates.size() < this->_cfg.max_merge_width))
+                        if(pickable_for_compaction && (file_size <= new_avg * this->_cfg.bucket_ratio) && (candidates.size() < max_merge_width))
                         {
                             candidates.emplace_back(*it);
                             sizes_sum += file_size;
@@ -371,7 +575,7 @@ namespace hedge::db
                         }
 
                         // Try emitting candidate set
-                        if(candidates.size() >= this->_cfg.min_merge_width)
+                        if(candidates.size() >= min_merge_width)
                         {
                             for(auto& c : candidates)
                                 c->set_compaction_state(compaction_progress_state::IN_COMPACTION);
@@ -429,7 +633,7 @@ namespace hedge::db
                         }
 
                         // Submit self-completing task
-                        auto task = this->_make_self_completing_compaction_task(level, std::move(it->second));
+                        auto task = this->_make_self_completing_compaction_task(level, std::move(it->second), min_merge_width);
                         tasks.emplace_back(std::move(task));
                     }
 
@@ -455,59 +659,23 @@ namespace hedge::db
 
     void sst_manager::trigger_compaction(bool compact_all)
     {
-        if(compact_all)
-        {
-            // compact_all=true: synchronous — wait for flush, run compaction, block until done
-            this->_compaction_worker.submit(
-                [this]()
-                {
-                    auto start_processing_t = std::chrono::high_resolution_clock::now();
 
-                    auto maybe_stats = this->_compaction_job_size_tiered(true);
-                    if(!maybe_stats)
-                        this->_logger.log("Compaction job failed: ", maybe_stats.error().to_string());
+        constexpr size_t max_in_flight_compaction_triggers = 16;
 
-                    auto t1 = std::chrono::high_resolution_clock::now();
-                    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - start_processing_t);
+        if(!compact_all && this->_compaction_jobs_in_flight.load(std::memory_order::relaxed) >= max_in_flight_compaction_triggers)
+            return;
 
-                    auto& stats = maybe_stats.value();
+        this->_compaction_jobs_in_flight.fetch_add(1, std::memory_order::relaxed);
 
-                    double write_throughput_mbs = stats.output_bytes / ((double)duration.count() / 1000000.0) / (1000.0 * 1000.0);
-
-                    if(stats.output_bytes > 0)
-                    {
-                        this->_logger.log("Total duration for compaction: ", (double)duration.count() / 1000.0, " ms",
-                                          ", MB written: ", stats.output_bytes / (1000.0 * 1000.0),
-                                          ", MB read: ", stats.input_bytes / (1000.0 * 1000.0),
-                                          ", throughput: ", write_throughput_mbs, " MB/s",
-                                          ", items merged: ", stats.items_merged,
-                                          ", items merged/s: ", (size_t)((double)stats.items_merged / ((double)duration.count() / 1000000.0)),
-                                          ", num input files: ", stats.num_inputs);
-
-                        prof::get<"merge_mb_written">().add(stats.output_bytes / (1000.0 * 1000.0));
-                        prof::get<"merge_throughput_mbs">().add(write_throughput_mbs);
-                    }
-                });
-        }
-        else
-        {
-            constexpr size_t max_in_flight_compaction_triggers = 16;
-
-            if(this->_compaction_jobs_in_flight.load(std::memory_order::relaxed) >= max_in_flight_compaction_triggers)
-                return;
-
-            this->_compaction_jobs_in_flight.fetch_add(1, std::memory_order::relaxed);
-
-            // compact_all=false: non-blocking — submit compaction job, set promise immediately
-            this->_compaction_worker.submit(
-                [this]()
-                {
-                    auto maybe_stats = this->_compaction_job_size_tiered(false);
-                    if(!maybe_stats)
-                        this->_logger.log("Compaction job failed: ", maybe_stats.error().to_string());
-                    this->_compaction_jobs_in_flight.fetch_sub(1, std::memory_order::relaxed);
-                });
-        }
+        // compact_all=false: non-blocking — submit compaction job, set promise immediately
+        this->_compaction_worker.submit(
+            [this, compact_all]()
+            {
+                auto maybe_stats = this->_compaction_job_size_tiered(compact_all);
+                if(!maybe_stats)
+                    this->_logger.log("Compaction job failed: ", maybe_stats.error().to_string());
+                this->_compaction_jobs_in_flight.fetch_sub(1, std::memory_order::relaxed);
+            });
     }
 
     void sst_manager::wait_for_compactions_to_finish()

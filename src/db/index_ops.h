@@ -140,6 +140,7 @@ namespace hedge::db
             bool create_new_with_odirect{false};   ///< If `true`, opens the output file with O_DIRECT flag for direct I/O access.
             bool populate_cache_with_output{true}; ///< If `true`, tries to fill the cache with the resulting sorted index
             bool try_reading_from_cache{false};    ///< If `true`, attempts to read input index pages from the shared page cache before issuing disk reads.
+            bool fdatasync_output{false};           ///< If `true`, issues an fdatasync on the output file descriptor before completing the merge, to ensure durability of the merged index on disk before it becomes visible to the rest of the system.
         };
 
         static async::task<hedge::expected<sorted_index>> k_way_merge_async(

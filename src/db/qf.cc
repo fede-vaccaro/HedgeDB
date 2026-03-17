@@ -34,7 +34,7 @@ namespace hedge::db::third_party
         qf->qf_rmask = LOW_MASK(r);
         qf->qf_elem_mask = LOW_MASK(qf->qf_elem_bits);
         qf->qf_entries = 0;
-        qf->qf_max_size = 1 << q;
+        qf->qf_max_size = 1ULL << q;
 
         const size_t table_size_bytes = hedge::ceil_page_align(qf_table_size(q, r));
         void* mem = std::aligned_alloc(PAGE_SIZE_IN_BYTES, table_size_bytes);
@@ -480,7 +480,7 @@ namespace hedge::db::third_party
 
     size_t qf_table_size(uint32_t q, uint32_t r)
     {
-        size_t bits = (1 << q) * (r + 3);
+        size_t bits = (1ULL << q) * (r + 3);
         size_t bytes = bits / 8;
         return (bits % 8) ? (bytes + 1) : bytes;
     }

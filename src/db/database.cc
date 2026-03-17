@@ -59,8 +59,10 @@ namespace hedge::db
             config.num_partition_exponent,
             db._indices_path,
             &db._sst_manager->flush_iteration(),
-            [&sst_mgr = *db._sst_manager](std::vector<sst> indices) { sst_mgr.push_indices(std::move(indices)); },
-            [&sst_mgr = *db._sst_manager]() { sst_mgr.trigger_compaction(false); },
+            [&sst_mgr = *db._sst_manager](std::vector<sst> indices)
+            { sst_mgr.push_indices(std::move(indices)); },
+            [&sst_mgr = *db._sst_manager]()
+            { sst_mgr.trigger_compaction(false); },
             db._page_cache,
             &db._sst_manager->compaction_backpressure());
     }
@@ -447,12 +449,6 @@ namespace hedge::db
 
     void database::trigger_compaction(bool compact_all)
     {
-        if(compact_all)
-        {
-            // Wait for memtable flush before triggering compaction
-            auto future = this->_memtable.wait_for_flush();
-            future.wait();
-        }
         this->_sst_manager->trigger_compaction(compact_all);
     }
 

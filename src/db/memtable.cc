@@ -139,7 +139,13 @@ namespace hedge::db
 
     std::optional<value_t> memtable::get(const key_t& key) const
     {
-        const auto local_memtable_ref = this->_table.load(std::memory_order_relaxed);
+        thread_local size_t table_switch_epoch = this->_table_switch_epoch.load(std::memory_order_acquire);
+        thread_local auto local_memtable_ref = this->_table.load(std::memory_order_relaxed);
+
+        if(auto curr_epoch = this->_table_switch_epoch.load(std::memory_order::acquire); table_switch_epoch > curr_epoch)
+        {
+            local_memtable_ref = this->_table.load(std::memory_order::relaxed);
+        }
 
         auto v = local_memtable_ref->ptr()->get(key);
 
@@ -151,7 +157,7 @@ namespace hedge::db
 
             return std::move(value.value());
         }
-        // Check pending flushes
+        // // Check pending flushes
         decltype(this->_pending_flushes) pending_flushes;
 
         {
@@ -159,7 +165,7 @@ namespace hedge::db
             pending_flushes = this->_pending_flushes;
         }
 
-        if (!pending_flushes.empty())
+        if(!pending_flushes.empty())
         {
             throw std::runtime_error("Pending flushes should be empty at this point, because every writer should be using the most up to date memtable. Found " + std::to_string(pending_flushes.size()) + " pending flushes.");
         }
@@ -233,9 +239,11 @@ namespace hedge::db
 
                 memtable_to_flush = this->_table.exchange(next_in_pipeline, std::memory_order::relaxed);
                 this->_table.notify_all(); // Notify every thread waiting for the new memtable to
-
                 this->_pending_flushes.insert_or_assign(curr_flush_epoch, memtable_to_flush);
             }
+
+            // Publish new memtable to readers
+            this->_table_switch_epoch.fetch_add(1, std::memory_order::release);
 
             // Launch flush job
             this->_flusher.submit(
@@ -277,7 +285,7 @@ namespace hedge::db
                     if(should_notify_flush)
                         this->_pending_flushes_cv.notify_one();
 
-                    bool under_pressure = this->_compaction_backpressure->load(std::memory_order::relaxed);
+                    bool under_pressure = this->_compaction_backpressure && this->_compaction_backpressure->load(std::memory_order::relaxed);
                     if(under_pressure)
                         this->_compaction_backpressure->wait(false, std::memory_order::relaxed);
 

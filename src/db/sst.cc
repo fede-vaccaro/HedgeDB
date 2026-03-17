@@ -1,9 +1,14 @@
 #include <cstdint>
 #include <cstring>
+#include <stack>
+#include <stdexcept>
 #include <unistd.h>
 #include <utility>
 
 #include "db/block.h"
+#include "io_executor.h"
+#include "mailbox_impl.h"
+#include "perf_counter.h"
 #include "sst.h"
 #include "types.h"
 #include "utils.h"
@@ -11,6 +16,62 @@
 
 namespace hedge::db
 {
+
+    struct tagged_buffer
+    {
+        buffer_t buf;
+        int32_t idx;
+    };
+
+    class read_buffer_pool
+    {
+    private:
+        using buffers_t = std::vector<tagged_buffer>;
+
+        std::stack<tagged_buffer, buffers_t> _buffers;
+
+    public:
+        read_buffer_pool()
+        {
+            const auto queue_depth = async::this_thread_executor()->queue_depth();
+            const size_t n = queue_depth * 2;
+
+            buffers_t buffer_vec;
+            buffer_vec.reserve(n);
+
+            std::vector<uint8_t*> buffer_ptrs;
+            buffer_ptrs.reserve(n);
+
+            for(size_t i = 0; i < n; ++i)
+            {
+                auto* buf_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, PAGE_SIZE_IN_BYTES));
+                if(buf_ptr == nullptr)
+                    throw std::runtime_error("Bould not allocate buffer");
+
+                buffer_vec.emplace_back(buffer_t(buf_ptr, std::free), static_cast<int32_t>(i));
+                buffer_ptrs.emplace_back(buf_ptr);
+            }
+
+            this->_buffers = std::stack<tagged_buffer, buffers_t>(std::move(buffer_vec));
+            async::this_thread_executor()->register_page_buffers(buffer_ptrs);
+        }
+
+        std::optional<tagged_buffer> try_pop()
+        {
+            if(this->_buffers.empty())
+                return std::nullopt;
+
+            auto b = std::move(this->_buffers.top());
+            this->_buffers.pop();
+
+            return std::optional{std::move(b)};
+        }
+
+        void push(tagged_buffer&& b)
+        {
+            this->_buffers.push(std::move(b));
+        }
+    };
 
     sst::sst(fs::file fd, page_aligned_buffer<key_t> meta_index, sst_footer footer, std::optional<page_aligned_buffer<key_t>> super_index, std::optional<quotient_filter> qf)
         : fs::file(std::move(fd)), _meta_index(std::move(meta_index)), _super_index(std::move(super_index)), _qf(std::move(qf)), _footer(footer)
@@ -100,16 +161,78 @@ namespace hedge::db
             super_index = std::move(si);
         }
 
-        return sst(std::move(fd), std::move(meta_index), footer, std::move(super_index), std::move(qf));
+        return sst(
+            std::move(fd),
+            std::move(meta_index),
+            footer,
+            std::move(super_index),
+            std::move(qf));
     }
 
-    async::task<expected<value_t>> sst::lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache, std::optional<uint64_t> key_hash) const
+    [[nodiscard]] bool sst::probe_filter(uint64_t key_hash) const
     {
-        if(this->_qf.has_value() && key_hash.has_value() && !this->_qf->may_contain(key_hash.value()))
+        if(!this->_qf.has_value()) [[unlikely]]
+            return false;
+
+        return this->_qf->may_contain(key_hash);
+    }
+
+    async::task<hedge::status> sst::_load_page_async(size_t offset, uint8_t* data_ptr, int32_t buf_index) const
+    {
+        auto response = buf_index != -1
+                            ? co_await async::this_thread_executor()->submit_request(
+                                  async::read_request_fixed{
+                                      .fd = this->fd(),
+                                      .data = data_ptr,
+                                      .offset = offset,
+                                      .size = PAGE_SIZE_IN_BYTES,
+                                      .buf_index = buf_index,
+                                  })
+                            : co_await async::this_thread_executor()->submit_request(
+                                  async::read_request{
+                                      .fd = this->fd(),
+                                      .data = data_ptr,
+                                      .offset = offset,
+                                      .size = PAGE_SIZE_IN_BYTES,
+                                  });
+
+        if(response.error_code != 0)
         {
-            prof::get<"qf_false_positives">().add(0);
-            co_return hedge::error("", errc::KEY_NOT_FOUND);
+            auto err_msg = std::format(
+                "An error occurred while reading page at offset {} from file {}:  {} (buf idx {})",
+                offset,
+                this->path().string(),
+                strerror(-response.error_code),
+                buf_index);
+            co_return hedge::error(err_msg);
         }
+
+        if(response.bytes_read != PAGE_SIZE_IN_BYTES)
+        {
+            auto err_msg = std::format(
+                "Read {} bytes instead of {} from file {} at offset {}",
+                response.bytes_read,
+                PAGE_SIZE_IN_BYTES,
+                this->path().string(),
+                offset);
+            co_return hedge::error(err_msg);
+        }
+
+        co_return hedge::ok();
+    }
+
+    async::task<expected<value_t>> sst::lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache, std::optional<uint64_t> /*key_hash*/) const
+    {
+        // prof::counter_guard guard(prof::get<"qf_lookups">());
+
+        // if(this->_qf.has_value() && key_hash.has_value() && !this->_qf->may_contain(key_hash.value()))
+        // {
+        //     // prof::get<"qf_false_positives">().add(0);
+        //     co_return hedge::error(std::string{}, errc::KEY_NOT_FOUND);
+        // }
+        // guard._counter->stop();
+
+        // co_return hedge::error("", errc::KEY_NOT_FOUND);
 
         auto maybe_page_id = this->_find_page_id(key);
         if(!maybe_page_id)
@@ -125,7 +248,10 @@ namespace hedge::db
 
         auto page_tag = to_page_tag(this->id(), page_start_offset);
 
-        std::unique_ptr<uint8_t, decltype(&std::free)> data(nullptr, std::free); // might be needed for holding a temporary memory allocation
+        tagged_buffer tbuf{
+            .buf = buffer_t{nullptr, std::free},
+            .idx = -1};
+
         uint8_t* page_ptr = nullptr;
         bool should_read_from_fs = (cache == nullptr);
 
@@ -175,26 +301,46 @@ namespace hedge::db
             }
         }
 
+        thread_local read_buffer_pool bufs = read_buffer_pool{};
+
         if(should_read_from_fs)
         {
             if(!opt_page_guard.has_value() && !opt_write_guard.has_value())
             {
-                auto* page_mem_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, PAGE_SIZE_IN_BYTES));
-                if(page_mem_ptr == nullptr)
-                {
-                    auto err_msg = std::format(
-                        "Failed to allocate memory for loading page at offset {} from file {}",
-                        page_start_offset,
-                        this->path().string());
-                    co_return hedge::error(err_msg);
-                }
 
-                data = std::unique_ptr<uint8_t, decltype(&std::free)>(page_mem_ptr, std::free);
-                page_ptr = page_mem_ptr;
+                auto buf_from_pool = bufs.try_pop();
+                // std::optional<tagged_buffer> buf_from_pool = std::nullopt; // --- IGNORE ---
+                if(buf_from_pool.has_value())
+                {
+                    tbuf = std::move(buf_from_pool.value());
+                    page_ptr = tbuf.buf.get();
+                }
+                else
+                {
+                    // throw std::runtime_error("not enough buffers for read");
+                    auto* page_mem_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, PAGE_SIZE_IN_BYTES));
+                    if(page_mem_ptr == nullptr)
+                    {
+                        auto err_msg = std::format(
+                            "Failed to allocate memory for loading page at offset {} from file {}",
+                            page_start_offset,
+                            this->path().string());
+                        co_return hedge::error(err_msg);
+                    }
+
+                    tbuf = tagged_buffer{
+                        .buf = buffer_t(page_mem_ptr, std::free),
+                        .idx = -1};
+                    page_ptr = page_mem_ptr;
+                }
             }
 
             assert(page_ptr != nullptr);
-            auto status = co_await this->_load_page_async(page_start_offset, page_ptr);
+            auto status = co_await this->_load_page_async(page_start_offset, page_ptr, tbuf.idx);
+
+            if(tbuf.buf != nullptr && tbuf.idx != -1)
+                bufs.push(std::move(tbuf));
+
             if(!status)
                 co_return status.error();
         }
@@ -204,8 +350,8 @@ namespace hedge::db
         hedge::expected<value_t> res = sst::_find_in_page(key, page_ptr);
         prof::get<"find_in_page">().stop(should_read_from_fs);
 
-        if(this->_qf.has_value() && !res.has_value())
-            prof::get<"qf_false_positives">().add(1);
+        // if(this->_qf.has_value() && !res.has_value())
+        //     prof::get<"qf_false_positives">().add(1);
 
         co_return res;
     }
@@ -222,7 +368,7 @@ namespace hedge::db
         auto value = reader.find(key);
 
         if(value.empty())
-            return hedge::error("", errc::KEY_NOT_FOUND);
+            return hedge::error(std::string{}, errc::KEY_NOT_FOUND);
 
         auto value_result = value_from_span(value);
         if(!value_result)
@@ -276,12 +422,12 @@ namespace hedge::db
             //     return std::distance(&(*this->_meta_index.begin()), base);
             // }
 
-            // const auto* prefetch_ptr = reinterpret_cast<const uint8_t*>(meta_index_range_begin);
-            // const auto* prefetch_end_ptr = reinterpret_cast<const uint8_t*>(meta_index_range_end);
+            const auto* prefetch_ptr = reinterpret_cast<const uint8_t*>(meta_index_range_begin);
+            const auto* prefetch_end_ptr = reinterpret_cast<const uint8_t*>(meta_index_range_end);
 
             // // Prefetch meta index page entries
-            // for(const uint8_t* ptr = prefetch_ptr; ptr < prefetch_end_ptr; ptr += 64)
-            //     __builtin_prefetch(ptr, 0, 1);
+            for(const uint8_t* ptr = prefetch_ptr; ptr < prefetch_end_ptr; ptr += 64)
+                __builtin_prefetch(ptr);
         }
 
         // Perform the binary search on the meta-index.
@@ -306,39 +452,6 @@ namespace hedge::db
         // std::cout << "Meta index entry found for key: " << to_hex_string(key) << " with page max id: " << to_hex_string(*it) << " page id: " << page_id << std::endl;
 
         return page_id;
-    }
-
-    async::task<hedge::status> sst::_load_page_async(size_t offset, uint8_t* data_ptr) const
-    {
-        auto response = co_await async::this_thread_executor()->submit_request(
-            async::read_request{
-                .fd = this->fd(),
-                .data = data_ptr,
-                .offset = offset,
-                .size = PAGE_SIZE_IN_BYTES});
-
-        if(response.error_code != 0)
-        {
-            auto err_msg = std::format(
-                "An error occurred while reading page at offset {} from file {}:  {}",
-                offset,
-                this->path().string(),
-                strerror(-response.error_code));
-            co_return hedge::error(err_msg);
-        }
-
-        if(response.bytes_read != PAGE_SIZE_IN_BYTES)
-        {
-            auto err_msg = std::format(
-                "Read {} bytes instead of {} from file {} at offset {}",
-                response.bytes_read,
-                PAGE_SIZE_IN_BYTES,
-                this->path().string(),
-                offset);
-            co_return hedge::error(err_msg);
-        }
-
-        co_return hedge::ok();
     }
 
 } // namespace hedge::db

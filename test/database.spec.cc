@@ -249,23 +249,7 @@ namespace hedge::db
         // duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
         // std::cout << "Total duration for flush: " << (double)duration.count() / 1000.0 << " ms" << std::endl;
 
-        // compaction
-        // std::cout << "Triggering new compaction" << std::endl;
-        // t0 = std::chrono::high_resolution_clock::now();
-        // (void)db->compact_sorted_indices(false);
-        // db->wait_for_compactions_to_finish();
-        // t1 = std::chrono::high_resolution_clock::now();
-        // auto compaction_duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-        // std::cout << "Total duration for a compaction: " << (double)compaction_duration.count() / 1000.0 << " ms" << std::endl;
-        // std::cout << "Compaction Output throughput: " << (double)(maybe_compaction_status.value().output_bytes / (1000.0 * 1000.0)) / (compaction_duration.count() / 1'000'000.0) << " MB/s" << std::endl;
-        // std::cout << "Compaction Input processed: " << maybe_compaction_status.value().output_bytes / (1000.0 * 1000.0) << " MB" << std::endl;
-        // std::cout << "Insertion throughput including compaction:"
-        //   << (uint64_t)(this->N_KEYS / (double)(duration.count() + compaction_duration.count()) * 1'000'000) << " items/s" << std::endl;
-
-        // db->print_tree_structure();
-        // prof::print_internal_perf_stats(false);
-
-        // EXPECT_DOUBLE_EQ(db->read_amplification_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
+    // EXPECT_DOUBLE_EQ(db->read_amplification_factor(), 1.0) << "Read amplification should be 1.0 after compaction";
 
         // shuffle keys before reading
         auto begin = this->_keys.begin();
