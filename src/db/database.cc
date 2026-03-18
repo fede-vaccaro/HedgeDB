@@ -3,28 +3,19 @@
 #include <chrono>
 #include <cmath>
 #include <future>
-#include <limits>
 #include <memory>
 #include <mutex>
-#include <numeric>
-#include <random>
-#include <ranges>
 #include <shared_mutex>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 
 #include <error.hpp>
 #include <variant>
 
-#include "async/wait_group.h"
 #include "cache.h"
 #include "database.h"
 #include "db/memtable.h"
-#include "index_ops.h"
 #include "io_executor.h"
-#include "perf_counter.h"
 #include "sst.h"
 #include "types.h"
 #include "utils.h"
@@ -217,7 +208,7 @@ namespace hedge::db
 
         // Promote the highest-ID table to _current_value_table
         auto it = db->_value_tables.find(max_id);
-        db->_current_value_table.store(std::move(it->second));
+        db->_current_value_table.store(it->second);
         db->_value_tables.erase(it);
         db->_last_table_id.store(max_id, std::memory_order::relaxed);
 
@@ -230,8 +221,7 @@ namespace hedge::db
 
         if(value.size() < 512) [[likely]]
         {
-            this->_memtable.put(key, value, hedge::value_type::IN_PLACE_VALUE);
-            co_return hedge::ok();
+            co_return this->_memtable.put(key, value, hedge::value_type::IN_PLACE_VALUE);
         }
 
         // --- Try writing value to buffer first ---

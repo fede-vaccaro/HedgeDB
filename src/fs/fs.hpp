@@ -44,8 +44,10 @@ namespace hedge::fs
             undefined = -1,
             read_only = O_RDONLY,
             write_new = O_WRONLY | O_CREAT | O_TRUNC,
+            write_append_new = O_WRONLY | O_CREAT | O_TRUNC | O_APPEND,
             read_write = O_RDWR,
             read_write_new = O_RDWR | O_CREAT | O_TRUNC,
+            read_write_append = O_RDWR | O_APPEND,
         };
 
     private:
@@ -102,7 +104,7 @@ namespace hedge::fs
             if(!exists && mode == open_mode::read_only)
                 return hedge::error("File does not exist: " + path.string());
 
-            if(exists && (mode == open_mode::write_new || mode == open_mode::read_write_new))
+            if(exists && (mode == open_mode::write_new || mode == open_mode::read_write_new || mode == open_mode::read_write_append))
                 return hedge::error("File already exists: " + path.string());
 
             // Open the file;
@@ -130,11 +132,14 @@ namespace hedge::fs
                         break;
                     case open_mode::read_write:
                     case open_mode::read_only:
+                    {
                         if(file_size != expected_size.value())
                             return hedge::error("Invalid file size! " + std::to_string(file_size) + " != " + std::to_string(expected_size.value()));
                         break;
+                    }
                     case open_mode::write_new:
                     case open_mode::read_write_new:
+                    {
                         auto res = fallocate(fd, 0, 0, expected_size.value());
                         if(res == -1)
                         {
@@ -145,6 +150,11 @@ namespace hedge::fs
                             return hedge::error("Failed to allocate space for file: " + err);
                         }
                         file_size = expected_size.value();
+                        break;
+                    }
+                    case open_mode::write_append_new:
+                        break;
+                    case open_mode::read_write_append:
                         break;
                 };
             }
@@ -170,7 +180,7 @@ namespace hedge::fs
             if(!stats.exists && mode == open_mode::read_only)
                 co_return hedge::error("File does not exist: " + path.string());
 
-            if(stats.exists && (mode == open_mode::write_new || mode == open_mode::read_write_new))
+            if(stats.exists && (mode == open_mode::write_new || mode == open_mode::read_write_new || mode == open_mode::read_write_append))
                 co_return hedge::error("File already exists: " + path.string());
 
             // Open the file;
@@ -198,11 +208,14 @@ namespace hedge::fs
                         break;
                     case open_mode::read_write:
                     case open_mode::read_only:
+                    {
                         if(file_size != expected_size.value())
                             co_return hedge::error("File size different than expected: " + std::to_string(file_size) + " != " + std::to_string(expected_size.value()));
                         break;
+                    }
                     case open_mode::write_new:
                     case open_mode::read_write_new:
+                    {
                         auto res = co_await executor->submit_request(async::fallocate_request{
                             .fd = fd,
                             .mode = 0,
@@ -226,6 +239,10 @@ namespace hedge::fs
 
                             co_return hedge::error("Failed to allocate space for file: " + err);
                         }
+                        break;
+                    }
+                    case open_mode::write_append_new:
+                    case open_mode::read_write_append:
                         break;
                 };
             }

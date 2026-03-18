@@ -97,7 +97,7 @@ make_put_task(hedge::db::memtable* mt, size_t i, hedge::async::wait_group* wg)
 
 int main()
 {
-    constexpr size_t N = 80'000'000;
+    constexpr size_t N = 50'000'000;
     constexpr size_t N_EXECUTORS = 8;
     constexpr uint32_t QUEUE_DEPTH = 64;
 
@@ -108,11 +108,12 @@ int main()
     cfg.auto_compaction = false;
     cfg.use_odirect = true;
     cfg.num_writer_threads = N_EXECUTORS; // avoid contention on rw_sync writers
-    cfg.flush_io_workers = 6;
+    cfg.flush_io_workers = 4;
 
     static std::atomic_size_t flush_epoch{0};
 
     std::filesystem::remove_all("/tmp/indices_test");
+    std::filesystem::create_directories("/tmp/indices_test");
 
     hedge::db::memtable mt(
         cfg,

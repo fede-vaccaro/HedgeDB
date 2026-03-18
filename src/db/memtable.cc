@@ -1,5 +1,7 @@
 #include <atomic>
+#include <bits/types/struct_iovec.h>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <emmintrin.h>
 #include <future>
@@ -8,12 +10,45 @@
 #include <thread>
 
 #include "db/folly/concurrent_skip_list/micro_spin_lock.h"
+#include "error.hpp"
+#include "fs/fs.hpp"
 #include "index_ops.h"
 #include "memtable.h"
 #include "types.h"
 
 namespace hedge::db
 {
+
+    std::pair<bool, uint32_t> memtable_impl3_t::insert(const key_t& key, std::span<const uint8_t> value)
+    {
+        try
+        {
+            auto res = this->_accessor.insert(memtable_entry(key, value));
+            if(!res.second)
+            {
+                // Key exists, update value
+                // value in memtable_entry is mutable
+                std::atomic_ref(res.first->value).store(value, std::memory_order_release);
+            }
+            return {true, std::atomic_ref<uint32_t>(this->seq_nr).fetch_add(1, std::memory_order::relaxed)};
+        }
+        catch(const std::bad_alloc&)
+        {
+            return {false, 0};
+        }
+    }
+
+    std::optional<std::span<const uint8_t>> memtable_impl3_t::get(const key_t& key) const
+    {
+        Accessor acc(const_cast<memtable_impl3_t*>(this));
+        auto it = acc.find(memtable_entry(key, {}));
+        if(it != acc.end())
+        {
+            auto value = std::atomic_ref<std::span<const uint8_t>>(it->value);
+            return value.load(std::memory_order_acquire);
+        }
+        return std::nullopt;
+    }
 
     memtable::memtable(const memtable_config& cfg,
                        size_t num_partition_exponent,
@@ -69,7 +104,47 @@ namespace hedge::db
             this->_table_maker.join();
     }
 
-    void memtable::put(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type)
+    hedge::status memtable::_append_to_wal(int32_t fd, uint32_t seq_nr, const key_t& key, std::span<const uint8_t> value)
+    {
+        uint8_t key_size = key.size();
+        uint16_t value_size = value.size();
+
+        static_assert(sizeof(seq_nr) == sizeof(uint32_t));
+
+        std::array<iovec, 5> wal_entry{
+            iovec{
+                .iov_base = &seq_nr,
+                .iov_len = sizeof(uint32_t)},
+            iovec{
+                .iov_base = &key_size,
+                .iov_len = sizeof(uint8_t),
+            },
+            iovec{
+                .iov_base = const_cast<uint8_t*>(key.data()),
+                .iov_len = key_size,
+            },
+            iovec{
+                .iov_base = &value_size,
+                .iov_len = sizeof(uint16_t),
+            },
+            iovec{
+                .iov_base = const_cast<uint8_t*>(value.data()),
+                .iov_len = value.size(),
+            }};
+
+        const size_t expected_bytes = sizeof(uint32_t) + sizeof(uint8_t) + key_size + sizeof(uint16_t) + value.size();
+
+        int32_t res = pwritev64v2(fd, wal_entry.data(), wal_entry.size(), 0, 0);
+        if(res < 0)
+            return hedge::error("could not write into wal: " + std::string(strerror(-errno)));
+
+        if(static_cast<size_t>(res) != expected_bytes)
+            return hedge::error("partial write into wal: " + std::to_string(res) + " != " + std::to_string(expected_bytes));
+
+        return hedge::ok();
+    }
+
+    hedge::status memtable::put(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type)
     {
         // Loading from an atomic shared every time is slow AF
         // Basically a thread-local cache
@@ -108,17 +183,19 @@ namespace hedge::db
                 continue;
             }
 
-            // auto* data_ptr = memtable->value_arenas[THIS_THREAD_IDX % this->_cfg.num_writer_threads]->allocate_many(value.size() + 1);
-            auto value_span = memtable->value_arena.allocate(value.size() + 1);
-            // std::span<uint8_t> value_span(data_ptr, value.size() + 1);
-            bool ok = !value_span.empty(); // nullptr means out of memory budget
-            // bool ok = data_ptr != nullptr;
+            // auto value_span = memtable->value_arena.allocate(value.size() + 1);
+            constexpr size_t alignment = std::atomic_ref<std::span<const uint8_t>>::required_alignment;
+            auto* value_ptr = memtable->value_arenas[THIS_THREAD_IDX % this->_cfg.num_writer_threads]->allocate_many(value.size() + 1, alignment);
+            // bool ok = !value_span.empty(); // nullptr means out of memory budget
+            bool ok = value_ptr != nullptr; // nullptr means out of memory budget
+            std::span<uint8_t> value_span(value_ptr, value.size() + 1);
+            uint32_t seq_nr;
 
             if(ok)
             {
                 value_span[0] = static_cast<uint8_t>(value_type);
                 std::memcpy(value_span.data() + 1, value.data(), value.size());
-                ok = memtable->insert(key, value_span); // returns false if memtable run out of memory (budget)
+                std::tie(ok, seq_nr) = memtable->insert(key, value_span); // returns false if memtable run out of memory (budget)
             }
 
             if(!ok) [[unlikely]]
@@ -133,7 +210,10 @@ namespace hedge::db
             }
 
             // OK
-            return;
+            if(!this->_cfg.use_wal)
+                return hedge::ok();
+
+            return this->_append_to_wal(memtable->per_thread_wals[THIS_THREAD_IDX].fd(), seq_nr, key, value_span);
         }
     }
 
@@ -273,11 +353,14 @@ namespace hedge::db
                     // Push the new indices to the DB, to make them visible as Sorted indices
                     bool should_notify_flush = false;
 
+                    std::vector<fs::file> wals;
+
                     {
                         std::unique_lock lk(this->_pending_flushes_mutex);
                         this->_push_new_indices(std::move(partitioned_sorted_indices.value()));
                         auto it = this->_pending_flushes.find(curr_flush_epoch);
                         assert(it->second == memtable_to_flush);
+                        wals = std::move(it->second->ptr()->per_thread_wals);
                         this->_pending_flushes.erase(it);
                         should_notify_flush = this->_pending_flushes.size() <= MAX_PENDING_FLUSHES / 2;
                     }
@@ -291,6 +374,10 @@ namespace hedge::db
 
                     if(this->_cfg.auto_compaction)
                         this->_trigger_compaction_callback();
+
+                    std::ranges::for_each(wals, [](fs::file& wal)
+                                          { wal.set_delete_on_obj_destruction(true); });
+                    wals.clear();
 
                     auto t1 = std::chrono::high_resolution_clock::now();
                     [[maybe_unused]] auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);

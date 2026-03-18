@@ -77,16 +77,16 @@ namespace hedge::db
          * @param n_items Number of items to allocate.
          * @return Pointer to allocated memory, or nullptr if budget exceeded or allocation failed.
          */
-        T* allocate_many(size_t n_items)
+        T* allocate_many(size_t n_items, size_t alignment)
         {
             if constexpr(THREAD_SAFE)
             {
                 std::lock_guard lk(this->_mutex);
-                return this->_allocate_many_impl(n_items);
+                return this->_allocate_many_impl(hedge::round_up(n_items, alignment));
             }
             else
             {
-                return this->_allocate_many_impl(n_items);
+                return this->_allocate_many_impl(hedge::round_up(n_items, alignment));
             }
         }
 
