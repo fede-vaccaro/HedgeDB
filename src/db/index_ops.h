@@ -3,6 +3,7 @@
 #include <cstdlib>
 
 #include "async/io_executor.h"
+#include "async/worker.h"
 #include "cache.h"
 #include "key.h"
 #include "memtable.h"
@@ -104,12 +105,15 @@ namespace hedge::db
                                                                           const std::shared_ptr<db::sharded_page_cache>& cache,
                                                                           bool use_odirect = false);
 
-        static hedge::expected<std::vector<sst>> flush_mem_index2(const std::filesystem::path& base_path,
-                                                                  memtable_impl3_t* index,
-                                                                  size_t num_partition_exponent,
-                                                                  size_t flush_iteration,
-                                                                  const std::shared_ptr<db::sharded_page_cache>& cache,
-                                                                  bool use_odirect = false);
+        static hedge::expected<std::vector<sst>> flush_mem_index2(
+            const std::filesystem::path& base_path,
+            memtable_impl3_t* index,
+            size_t num_partition_exponent,
+            size_t flush_iteration,
+            const std::shared_ptr<db::sharded_page_cache>& cache,
+            bool use_odirect,
+            const std::vector<std::unique_ptr<async::worker>>& worker_pool,
+            bool fdatasync_ssts);
 
         struct partition_range
         {
@@ -127,7 +131,8 @@ namespace hedge::db
             size_t flush_iteration,
             const std::shared_ptr<db::sharded_page_cache>& cache,
             bool use_odirect,
-            const std::vector<std::shared_ptr<async::executor_context>>& executor_pool);
+            const std::vector<std::shared_ptr<async::executor_context>>& executor_pool,
+            bool fdatasync_ssts);
 
         struct merge_config
         {
@@ -140,7 +145,7 @@ namespace hedge::db
             bool create_new_with_odirect{false};   ///< If `true`, opens the output file with O_DIRECT flag for direct I/O access.
             bool populate_cache_with_output{true}; ///< If `true`, tries to fill the cache with the resulting sorted index
             bool try_reading_from_cache{false};    ///< If `true`, attempts to read input index pages from the shared page cache before issuing disk reads.
-            bool fdatasync_output{false};           ///< If `true`, issues an fdatasync on the output file descriptor before completing the merge, to ensure durability of the merged index on disk before it becomes visible to the rest of the system.
+            bool fdatasync_output{true};          ///< If `true`, issues an fdatasync on the output file descriptor before completing the merge, to ensure durability of the merged index on disk before it becomes visible to the rest of the system.
         };
 
         static async::task<hedge::expected<sorted_index>> k_way_merge_async(

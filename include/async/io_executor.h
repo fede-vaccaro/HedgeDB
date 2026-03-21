@@ -69,6 +69,12 @@ namespace hedge::async
         6. mailbox.handle_cqe() → populate response
         7. mailbox.resume() → coroutine continues
     */
+    struct executor_config
+    {
+        int32_t loops_before_sleeping = 0;
+        int32_t loops_before_yielding = 0;
+    };
+
     class executor_pool;
 
     class executor_context : public std::enable_shared_from_this<executor_context>
@@ -78,8 +84,8 @@ namespace hedge::async
         size_t _queue_depth;
         size_t _max_buffered_requests;
 
-        static constexpr int32_t SLEEP_TRIGGER_LOOPS = 128;
-        static constexpr int32_t YIELD_TRIGGER_LOOPS = 64;
+        int32_t _loops_before_sleeping{0};
+        int32_t _loops_before_yielding{0};
 
         int32_t _count_before_sleep{0};
 
@@ -181,9 +187,12 @@ namespace hedge::async
 
         void register_fd(int32_t fd);
 
-        static std::shared_ptr<executor_context> make_new(uint32_t queue_depth);
-
+        static std::shared_ptr<executor_context> make_new(uint32_t queue_depth, executor_config config = {});
         static const std::shared_ptr<executor_context>& this_thread_executor();
+        void set_core_affinity(int32_t tid);
+        void set_core_affinity(std::pair<int32_t, int32_t> cpu_range);
+        void set_thread_name(std::string name);
+        std::string _thread_name;
 
         uint32_t queue_depth() const
         {
@@ -216,10 +225,10 @@ namespace hedge::async
     class executor_pool
     {
         std::vector<std::shared_ptr<executor_context>> _executors;
-        std::atomic_size_t _next_executor{0};
+        alignas(64) std::atomic_size_t _next_executor{0};
 
         executor_pool(size_t pool_size, uint32_t queue_depth);
-        const std::shared_ptr<executor_context>& get_executor();
+        const std::shared_ptr<executor_context>& get_executor_round_robin();
 
         static std::unique_ptr<executor_pool> _static_pool;
 
@@ -229,6 +238,8 @@ namespace hedge::async
             return this->_executors.size();
         }
 
+        std::vector<std::shared_ptr<executor_context>> executors();
+        std::shared_ptr<executor_context> get_executor(size_t idx);
         static executor_pool& static_pool();
         static void init_static_pool(size_t pool_size, size_t queue_depth);
         static const std::shared_ptr<executor_context>& executor_from_static_pool();

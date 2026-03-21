@@ -23,6 +23,7 @@ namespace hedge::async
 
         std::deque<job_t> _job_queue;
         async::mpsc_queue<job_t, 32> _fast_job_queue;
+        std::string _name;
 
     public:
         worker();

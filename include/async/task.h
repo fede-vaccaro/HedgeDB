@@ -1,10 +1,11 @@
 #pragma once
 
 #include <array>
-#include <atomic>
 #include <cassert>
 #include <coroutine>
 #include <cstdint>
+#include <exception>
+#include <iostream>
 #include <utility>
 
 /*
@@ -59,7 +60,16 @@ namespace hedge::async
 
         void unhandled_exception()
         {
-            throw;
+            std::exception_ptr ex_ptr = std::current_exception();
+            try
+            {
+                std::rethrow_exception(ex_ptr);
+            }
+            catch(std::exception& ex)
+            {
+                std::cerr << "Exception thrown: " << ex.what() << std::endl;
+                throw ex;
+            }
         }
     };
 

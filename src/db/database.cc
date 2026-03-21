@@ -41,20 +41,22 @@ namespace hedge::db
         ::new(memtable_mem) memtable(
             memtable_config{
                 .max_inserts_cap = config.keys_in_mem_before_flush,
-                .memory_budget_cap = 48 * 1024 * 1024,
+                .memory_budget_cap = 64 * 1024 * 1024,
                 .auto_compaction = config.auto_compaction,
                 .use_odirect = config.use_odirect_for_indices,
                 .num_writer_threads = async::executor_pool::static_pool().size(),
                 .flush_io_workers = config.flush_io_workers,
+                .use_wal = !config.disable_wal,
             },
             config.num_partition_exponent,
             db._indices_path,
             &db._sst_manager->flush_iteration(),
-            [&sst_mgr = *db._sst_manager](std::vector<sst> indices)
-            { sst_mgr.push_indices(std::move(indices)); },
+            [&sst_mgr = *db._sst_manager](std::vector<sst> indices, std::span<std::shared_ptr<async::executor_context>> executors)
+            { sst_mgr.push_indices(std::move(indices), executors); },
             [&sst_mgr = *db._sst_manager]()
             { sst_mgr.trigger_compaction(false); },
             db._page_cache,
+            // &db);
             &db._sst_manager->compaction_backpressure());
     }
 
@@ -178,6 +180,14 @@ namespace hedge::db
         // Init empty memtable (needed for the read path; starts with no entries)
         _init_memtable(*db, config);
 
+        // Replay WAL files from any prior crash
+        if(!config.disable_wal)
+        {
+            auto wal_status = db->_memtable.replay_wal();
+            if(!wal_status)
+                return hedge::error("WAL replay failed: " + wal_status.error().to_string());
+        }
+
         // Load value tables from values directory
         db->_value_tables.reserve(4096);
 
@@ -215,13 +225,21 @@ namespace hedge::db
         return db;
     }
 
+    // hedge::status database::put(const key_t& key, const byte_buffer_t& value)
+    // {
+    //     if(value.size() < 512) [[likely]]
+    //         return this->_memtable.put(key, value, hedge::value_type::IN_PLACE_VALUE);
+
+    //     return hedge::error("Synchronous put is not supported for values larger than 512 bytes");
+    // }
+
     async::task<hedge::status> database::put_async(const key_t& key, const byte_buffer_t& value)
     {
         // prof::counter_guard guard(prof::get<"put_async">());
 
         if(value.size() < 512) [[likely]]
         {
-            co_return this->_memtable.put(key, value, hedge::value_type::IN_PLACE_VALUE);
+            co_return co_await this->_memtable.put_async(key, value, hedge::value_type::IN_PLACE_VALUE);
         }
 
         // --- Try writing value to buffer first ---
@@ -280,7 +298,7 @@ namespace hedge::db
         }
 
         // --- Update Memtable ---
-        this->_memtable.put(key, maybe_write.value(), hedge::value_type::VALUE_PTR);
+        this->_memtable.put_async(key, maybe_write.value(), hedge::value_type::VALUE_PTR);
 
         co_return hedge::ok();
     }

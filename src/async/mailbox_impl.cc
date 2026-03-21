@@ -1,6 +1,8 @@
+#include <bits/types/struct_iovec.h>
 #include <cstdint>
 #include <liburing.h>
 #include <liburing/io_uring.h>
+#include <linux/fs.h>
 #include <stdexcept>
 #include <stdlib.h>
 
@@ -181,6 +183,31 @@ namespace hedge::async
 
     void yield_mailbox::handle_cqe(io_uring_cqe* /* cqe */)
     {
+    }
+
+    void sleep_mailbox::prepare_sqe(io_uring_sqe* sqe)
+    {
+        _ts.tv_sec = request.nanoseconds / 1'000'000'000;
+        _ts.tv_nsec = request.nanoseconds % 1'000'000'000;
+        io_uring_prep_timeout(sqe, &_ts, -1, 0);
+    }
+
+    void sleep_mailbox::handle_cqe(io_uring_cqe* cqe)
+    {
+        // -ETIME is the normal completion for a timeout
+        if (cqe->res < 0 && cqe->res != -ETIME)
+            response.error_code = cqe->res;
+    }
+
+    void unlink_mailbox::prepare_sqe(io_uring_sqe* sqe)
+    {
+        io_uring_prep_unlinkat(sqe, AT_FDCWD, this->request.path.c_str(), this->request.flags);
+    }
+
+    void unlink_mailbox::handle_cqe(io_uring_cqe* cqe)
+    {
+        if(cqe->res < 0)
+            this->response.error_code = cqe->res;
     }
 
 } // namespace hedge::async

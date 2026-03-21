@@ -59,7 +59,6 @@ namespace hedge::fs
         std::filesystem::path _path;
         open_mode _mode{open_mode::undefined};
         bool _use_direct{false};
-        std::atomic_bool _deletion_triggered{false};
 
     public:
         [[nodiscard]] size_t id() const
@@ -90,11 +89,6 @@ namespace hedge::fs
         [[nodiscard]] bool has_direct_access() const
         {
             return this->_use_direct;
-        }
-
-        void set_delete_on_obj_destruction(bool val)
-        {
-            this->_deletion_triggered.store(val);
         }
 
         static hedge::expected<file> from_path(const std::filesystem::path& path, open_mode mode, bool use_direct = false, std::optional<size_t> expected_size = std::nullopt)
@@ -266,8 +260,7 @@ namespace hedge::fs
                                       _file_size(std::exchange(other._file_size, 0)),
                                       _path(std::move(other._path)),
                                       _mode(std::exchange(other._mode, open_mode::undefined)),
-                                      _use_direct(std::exchange(other._use_direct, false)),
-                                      _deletion_triggered(other._deletion_triggered.exchange(false))
+                                      _use_direct(std::exchange(other._use_direct, false))
         {
         }
 
@@ -282,7 +275,6 @@ namespace hedge::fs
             this->_path = std::move(other._path);
             this->_mode = std::exchange(other._mode, open_mode::undefined);
             this->_use_direct = std::exchange(other._use_direct, false);
-            this->_deletion_triggered = other._deletion_triggered.exchange(false);
 
             return *this;
         };
@@ -295,11 +287,7 @@ namespace hedge::fs
             if(this->_fd < 0)
                 return;
 
-            // TODO: syscalls should be directed through io_uring/async executor
             close(this->_fd);
-
-            if(this->_deletion_triggered.load())
-                std::filesystem::remove(this->_path);
         }
     };
 

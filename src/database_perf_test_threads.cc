@@ -1,9 +1,9 @@
-// Standalone benchmark: full database write + read path (no gtest).
+// Standalone benchmark: full database write + read path.
 //
-// Uses xxh64 for deterministic key generation from record indices,
-// enabling reproducible readback verification.
+// Write phase: N std::threads, thread t calls db->put() for keys where (i % N_THREADS == t).
+// Read phase:  async like database_perf_test — wait_group + submit_io_task across executors.
 //
-// Usage: ./database_perf_test [N_KEYS] [PAYLOAD_SIZE] [MEMTABLE_CAPACITY]
+// Usage: ./database_perf_test_threads [N_KEYS] [PAYLOAD_SIZE] [MEMTABLE_CAPACITY]
 
 #include <algorithm>
 #include <atomic>
@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <iostream>
 #include <random>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #include <xxh64.hpp>
@@ -24,7 +25,6 @@
 #include "async/task.h"
 #include "async/wait_group.h"
 #include "db/database.h"
-#include "db/memtable.h"
 #include "perf_counter.h"
 
 namespace hedge::db
@@ -109,7 +109,7 @@ int main(int argc, char* argv[])
     }
 
     std::cout << std::fixed << std::setprecision(2);
-    std::cout << "=== database_perf_test ===" << std::endl;
+    std::cout << "=== database_perf_test_threads ===" << std::endl;
     std::cout << "N_KEYS=" << N_KEYS
               << "  PAYLOAD_SIZE=" << PAYLOAD_SIZE
               << "  MEMTABLE_CAPACITY=" << MEMTABLE_CAPACITY
@@ -118,9 +118,13 @@ int main(int argc, char* argv[])
               << std::endl;
 
     // --- Init ---
-    async::executor_pool::init_static_pool(12, 64);
+    constexpr size_t NUM_WRITERS = 8;
+    constexpr size_t NUM_READERS = 12;
+    constexpr size_t POOL_SIZE = std::max(NUM_WRITERS, NUM_READERS);
 
-    const std::filesystem::path base_path = "/tmp/db_perf";
+    async::executor_pool::init_static_pool(POOL_SIZE, 64);
+
+    const std::filesystem::path base_path = "/tmp/db_perf_threads";
 
     db_config config;
     config.auto_compaction = true;
@@ -161,36 +165,35 @@ int main(int argc, char* argv[])
     }
 
     auto values = pregenerate_values(PAYLOAD_SIZE);
+    auto executors = async::executor_pool::static_pool().executors();
 
     // =========================================================================
     // Write phase
     // =========================================================================
     if(!readonly)
     {
-        auto wg = async::wait_group::make_shared();
-        wg->set(N_KEYS);
-
-        auto make_put_task = [&](size_t i) -> async::task<void>
-        {
-            auto key = make_key(i);
-            const auto& value = values[value_slot(i)];
-            auto status = co_await db->put_async(key, value);
-            if(!status)
-                std::cerr << "put error at i=" << i << ": " << status.error().to_string() << std::endl;
-            wg->decr();
-        };
-
-        constexpr size_t NUM_WRITERS = 8;
-        std::vector<std::shared_ptr<async::executor_context>> writers = async::executor_pool::static_pool().executors();
-        writers.resize(NUM_WRITERS);
-
         auto t0 = clk::now();
 
-        for(size_t i = 0; i < N_KEYS; ++i)
+        std::vector<std::thread> writers;
+        writers.reserve(NUM_WRITERS);
+
+        for(size_t tid = 0; tid < NUM_WRITERS; ++tid)
         {
-            writers[i % NUM_WRITERS]->submit_io_task(make_put_task(i));
+            writers.emplace_back([&, tid]()
+            {
+                for(size_t i = tid; i < N_KEYS; i += NUM_WRITERS)
+                {
+                    auto key = make_key(i);
+                    const auto& value = values[value_slot(i)];
+                    auto status = db->put(key, value);
+                    if(!status)
+                        std::cerr << "put error at i=" << i << ": " << status.error().to_string() << std::endl;
+                }
+            });
         }
-        wg->wait();
+
+        for(auto& t : writers)
+            t.join();
 
         auto t0_finish_writing = clk::now();
 
@@ -199,18 +202,18 @@ int main(int argc, char* argv[])
         std::cout << "Duration: " << elapsed_finish_writing_s * 1000.0 << " ms" << std::endl;
         std::cout << "Write throughput: " << static_cast<uint64_t>(N_KEYS / elapsed_finish_writing_s) << " items/s" << std::endl;
         std::cout << "Bandwidth: " << (N_KEYS * (PAYLOAD_SIZE + KEY_SIZE) / 1e6) / elapsed_finish_writing_s << " MB/s" << std::endl;
-        std::cout << "BACKPRESSURE: " << memtable::BACKPRESSURE << std::endl;
-        std::cout << "Waiting for pending compactions..." << std::endl;
-        db->wait_for_compactions_to_finish();
 
-        auto t1 = clk::now();
-        double elapsed_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
-        std::cout << "\n--- Write phase (w/compaction) ---" << std::endl;
-        double elapsed_s = elapsed_us / 1'000'000.0;
-        std::cout << "Duration: " << elapsed_us / 1000.0 << " ms" << std::endl;
-        std::cout << "Throughput: " << static_cast<uint64_t>(N_KEYS / elapsed_s) << " items/s" << std::endl;
-        std::cout << "Bandwidth: " << (N_KEYS * (PAYLOAD_SIZE + KEY_SIZE) / 1e6) / elapsed_s << " MB/s" << std::endl;
-        prof::print_internal_perf_stats(false);
+        // std::cout << "Waiting for pending compactions..." << std::endl;
+        // db->wait_for_compactions_to_finish();
+
+        // auto t1 = clk::now();
+        // double elapsed_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+        // std::cout << "\n--- Write phase (w/compaction) ---" << std::endl;
+        // double elapsed_s = elapsed_us / 1'000'000.0;
+        // std::cout << "Duration: " << elapsed_us / 1000.0 << " ms" << std::endl;
+        // std::cout << "Throughput: " << static_cast<uint64_t>(N_KEYS / elapsed_s) << " items/s" << std::endl;
+        // std::cout << "Bandwidth: " << (N_KEYS * (PAYLOAD_SIZE + KEY_SIZE) / 1e6) / elapsed_s << " MB/s" << std::endl;
+        // prof::print_internal_perf_stats(false);
     }
 
     if(compact_all)
@@ -219,18 +222,15 @@ int main(int argc, char* argv[])
         db->wait_for_compactions_to_finish();
     }
 
-    // instantiate the executors for the read phase before the write phase completes, to overlap executor startup with compactions
-
     // =========================================================================
     // Read phase (cold + warm)
     // =========================================================================
     {
         std::cout << "\nWaiting before starting read phase..." << std::endl;
-        // std::this_thread::sleep_for(std::chrono::seconds(60)); // give some time for the system to settle after the write phase and compactions
     }
 
-    // size_t read_count = std::min(N_KEYS, size_t{10'000'000});
-    size_t read_count = N_KEYS;
+    size_t read_count = std::min(N_KEYS, size_t{10'000'000});
+    // size_t read_count = N_KEYS;
 
     for(int pass = 0; pass < 2; ++pass)
     {
@@ -244,7 +244,6 @@ int main(int argc, char* argv[])
         auto make_get_task = [&](size_t idx) -> async::task<void>
         {
             auto key = make_key(idx);
-
             auto maybe_value = co_await db->get_async(key);
             if(!maybe_value)
             {
@@ -252,24 +251,18 @@ int main(int argc, char* argv[])
                 wg->decr();
                 co_return;
             }
-
             if(!readonly && maybe_value.value() != values.at(value_slot(idx)))
                 errors++;
-
             wg->decr();
         };
 
-        constexpr size_t NUM_READERS = 12;
-        std::vector<std::shared_ptr<async::executor_context>> readers = async::executor_pool::static_pool().executors();
-        readers.resize(NUM_READERS);
-
         auto t0 = clk::now();
+
         for(size_t i = 0; i < read_count; ++i)
-        {
-            readers[i % NUM_READERS]->submit_io_task(make_get_task(i));
-        }
+            executors[i % NUM_READERS]->submit_io_task(make_get_task(i));
 
         wg->wait();
+
         auto t1 = clk::now();
 
         double elapsed_us = std::chrono::duration<double, std::micro>(t1 - t0).count();

@@ -263,6 +263,7 @@ namespace hedge::async
         write_mailbox(write_request req)
             : request(req) {}
 
+        iovec iov;
         write_request request;
         write_response response;
 
@@ -530,6 +531,43 @@ namespace hedge::async
         }
     };
 
+    struct sleep_request;
+    struct sleep_response;
+    struct sleep_mailbox;
+
+    struct sleep_request
+    {
+        using response_t = sleep_response;
+        using mailbox_t = sleep_mailbox;
+
+        uint64_t nanoseconds{0};
+    };
+
+    struct sleep_response
+    {
+        int32_t error_code{0};
+    };
+
+    struct sleep_mailbox : mailbox_base<sleep_mailbox>
+    {
+        sleep_mailbox(sleep_request req)
+            : request(req) {}
+
+        sleep_request request;
+        sleep_response response;
+
+        void prepare_sqe(io_uring_sqe* sqe);
+        void handle_cqe(io_uring_cqe* cqe);
+
+        void* get_response()
+        {
+            return &response;
+        }
+
+    private:
+        __kernel_timespec _ts{};
+    };
+
     struct yield_request;
     struct yield_response;
     struct yield_mailbox;
@@ -550,6 +588,41 @@ namespace hedge::async
         yield_response response{};
 
         yield_mailbox(yield_request) {}
+
+        void prepare_sqe(io_uring_sqe* sqe);
+        void handle_cqe(io_uring_cqe* cqe);
+
+        void* get_response()
+        {
+            return &response;
+        }
+    };
+
+    struct unlink_request;
+    struct unlink_response;
+    struct unlink_mailbox;
+
+    struct unlink_request
+    {
+        using response_t = unlink_response;
+        using mailbox_t = unlink_mailbox;
+
+        std::string path;
+        int32_t flags{0};
+    };
+
+    struct unlink_response
+    {
+        int32_t error_code{};
+    };
+
+    struct unlink_mailbox : mailbox_base<unlink_mailbox>
+    {
+        unlink_mailbox(unlink_request req)
+            : request(std::move(req)) {}
+
+        unlink_request request;
+        unlink_response response;
 
         void prepare_sqe(io_uring_sqe* sqe);
         void handle_cqe(io_uring_cqe* cqe);
@@ -592,6 +665,8 @@ namespace hedge::async
             fdatasync_mailbox,
             yield_mailbox,
             continuation_mailbox,
-            ftruncate_mailbox>;
+            ftruncate_mailbox,
+            sleep_mailbox,
+            unlink_mailbox>;
 
 } // namespace hedge::async

@@ -3,9 +3,11 @@
 #include <atomic>
 #include <cassert>
 #include <future>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -32,8 +34,8 @@ namespace hedge::db
         size_t num_writer_threads = 256; // (quite) safe upper bound
         size_t flush_io_workers = 4;
         bool use_wal = true;
-        bool use_fsync = false;
-        bool fdatasync_output_sst = false;
+        /* bool use_fsync = false; // NOT IMPLEMENTED */
+        bool fdatasync_flushed_sst = true;
     };
 
     struct memtable_arena_holder
@@ -67,6 +69,7 @@ namespace hedge::db
     // The arena is dedicated for storing values in mem
     struct memtable_with_arena_t : memtable_impl3_t
     {
+        alignas(64) std::atomic_size_t bytes_written{0};
         std::vector<std::unique_ptr<hedge::db::arena_allocator<uint8_t, false>>> value_arenas; // one per writer thread, not shared between threads
         // single_buffer_arena_allocator value_arena; // single arena for values, shared between threads with atomic allocation
         std::vector<hedge::fs::file> per_thread_wals;
@@ -82,7 +85,7 @@ namespace hedge::db
             value_arenas.reserve(n_threads);
             for(auto i = 0UL; i < n_threads; ++i)
             {
-                value_arenas.emplace_back(std::make_unique<hedge::db::arena_allocator<uint8_t, false>>(value_memory_budget / n_threads));
+                value_arenas.emplace_back(std::make_unique<hedge::db::arena_allocator<uint8_t, false>>(value_memory_budget));
             }
 
             if(!use_wal)
@@ -119,7 +122,7 @@ namespace hedge::db
 
         // DB state & callbacks
         std::atomic_size_t* _flush_epoch{};
-        std::function<void(std::vector<sst>)> _push_new_indices;
+        std::function<void(std::vector<sst>, std::span<std::shared_ptr<async::executor_context>>)> _push_new_indices;
         std::function<void()> _trigger_compaction_callback;
         std::atomic_bool* _compaction_backpressure{};
 
@@ -132,6 +135,7 @@ namespace hedge::db
 
         alignas(64) std::atomic<rw_sync_table_ptr_t> _table;
         alignas(64) std::atomic_bool _flush_mutex;
+        alignas(64) std::atomic_size_t _wal_epoch{0};
         alignas(64) std::atomic<rw_sync_table_ptr_t> _pipelined_table;
 
         // Pending flushes
@@ -145,6 +149,7 @@ namespace hedge::db
         std::thread _table_maker;
         std::atomic_bool _running{true};
         std::vector<std::shared_ptr<async::executor_context>> _flush_executor_pool;
+        std::vector<std::unique_ptr<async::worker>> _flush_worker_pool;
         logger _logger;
 
     public:
@@ -156,12 +161,14 @@ namespace hedge::db
                  size_t num_partition_exponent,
                  std::filesystem::path indices_path,
                  std::atomic_size_t* flush_epoch_ptr,
-                 std::function<void(std::vector<sst>)> push_new_indices,
+                 std::function<void(std::vector<sst>, std::span<std::shared_ptr<async::executor_context>>)> push_new_indices,
                  std::function<void()> compaction_callback,
                  std::shared_ptr<db::sharded_page_cache> page_cache,
                  std::atomic_bool* compaction_backpressure = nullptr);
 
         ~memtable();
+
+        async::task<hedge::status> put_async(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type);
 
         hedge::status put(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type);
 
@@ -169,13 +176,15 @@ namespace hedge::db
 
         std::future<void> wait_for_flush();
 
+        hedge::status replay_wal();
+
         [[nodiscard]] auto make_memtable() const
         {
             return std::make_shared<rw_sync_table_t>(
                 this->_cfg.num_writer_threads,
                 this->_indices_path,
                 this->_cfg.use_wal,
-                this->_flush_epoch->fetch_add(1, std::memory_order::relaxed),
+                const_cast<std::atomic_size_t*>(&this->_wal_epoch)->fetch_add(1, std::memory_order::relaxed),
                 this->_cfg.memory_budget_cap * 2,
                 this->_cfg.num_writer_threads,
                 this->_cfg.memory_budget_cap);
@@ -184,7 +193,7 @@ namespace hedge::db
     private:
         hedge::status _append_to_wal(int32_t fd, uint32_t seq_nr, const key_t& key, std::span<const uint8_t> value);
 
-        bool _flush();
+        bool _flush(rw_sync_table_ptr_t expected_table);
     };
 
 } // namespace hedge::db

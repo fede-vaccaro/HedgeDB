@@ -56,6 +56,8 @@ namespace hedge::async
             std::lock_guard lk(this->_queue_m);
             this->_job_queue.emplace_back(std::move(job));
         }
+
+        this->_job_count.notify_all();
     }
 
     void worker::shutdown()
@@ -69,7 +71,8 @@ namespace hedge::async
             this->_running = false;
         }
 
-        this->_job_count.store(0, std::memory_order::relaxed);
+        this->_job_count.fetch_add(1, std::memory_order::relaxed);
+        this->_job_count.notify_all();
 
         if(this->_worker.joinable())
             this->_worker.join();
@@ -118,8 +121,9 @@ namespace hedge::async
                     this->_job_count.notify_all();
             }
 
-            while(this->_job_count.load(std::memory_order::relaxed) == 0 && this->_running)
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            // while(this->_job_count.load(std::memory_order::relaxed) == 0 && this->_running)
+            // std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            this->_job_count.wait(0, std::memory_order::relaxed);
 
             {
                 std::unique_lock lk(this->_queue_m);

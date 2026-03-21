@@ -332,18 +332,18 @@ namespace hedge::async
 
                 if(this->_in_progress_tasks.size() < this->_queue_depth)
                 {
-                    if(this->_count_before_sleep >= YIELD_TRIGGER_LOOPS)
-                    {
-                        std::this_thread::yield();
-                    }
 
-                    if(this->_count_before_sleep == SLEEP_TRIGGER_LOOPS)
+                    if(this->_count_before_sleep >= _loops_before_sleeping)
                     {
                         bool expected = true;
                         if(this->_sleep.compare_exchange_strong(expected, true, std::memory_order_relaxed))
                             this->_sleep.wait(true, std::memory_order_relaxed);
 
                         this->_count_before_sleep = 0;
+                    }
+                    else if(this->_count_before_sleep >= _loops_before_yielding)
+                    {
+                        std::this_thread::yield();
                     }
 
                     while(this->_in_progress_tasks.size() + new_tasks.size() < this->_queue_depth * 2)
@@ -429,9 +429,11 @@ namespace hedge::async
         }
     }
 
-    std::shared_ptr<executor_context> executor_context::make_new(uint32_t queue_depth)
+    std::shared_ptr<executor_context> executor_context::make_new(uint32_t queue_depth, executor_config config)
     {
         auto new_executor = std::shared_ptr<executor_context>(new executor_context(queue_depth));
+        new_executor->_loops_before_sleeping = config.loops_before_sleeping;
+        new_executor->_loops_before_yielding = config.loops_before_yielding;
 
         auto task_generator = [&new_executor]() -> async::task<int>
         {
@@ -469,7 +471,7 @@ namespace hedge::async
     const std::shared_ptr<executor_context>& executor_pool::executor_from_static_pool()
     {
         assert(executor_pool::_static_pool);
-        return executor_pool::_static_pool->get_executor();
+        return executor_pool::_static_pool->get_executor_round_robin();
     }
 
     thread_local std::shared_ptr<executor_context> executor_context::_this_thread_executor = nullptr;
@@ -495,31 +497,48 @@ namespace hedge::async
             throw std::runtime_error("io_uring_register_buffers failed: " + std::string(strerror(-res)));
     }
 
+    void executor_context::set_core_affinity(int32_t tid)
+    {
+        set_core_affinity({tid, tid});
+    }
+
+    void executor_context::set_core_affinity(std::pair<int32_t, int32_t> cpu_range)
+    {
+        auto _set_affinity = [&](std::pair<int32_t, int32_t> cpu_range) -> async::task<int32_t>
+        {
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            for(int32_t cpu = cpu_range.first; cpu <= cpu_range.second; ++cpu)
+                CPU_SET(cpu, &cpuset);
+
+            pthread_t thread_id = pthread_self();
+            int result = pthread_setaffinity_np(thread_id, sizeof(cpu_set_t), &cpuset);
+            if(result != 0)
+            {
+                std::cerr << "Failed to set thread affinity: " << strerror(result) << std::endl;
+                throw std::runtime_error("Failed to set thread affinity: " + std::string(strerror(result)));
+            }
+            co_return 0;
+        };
+
+        this->sync_submit(_set_affinity(cpu_range));
+    }
+
+    void executor_context::set_thread_name(std::string name)
+    {
+        this->_thread_name = std::move(name);
+        pthread_setname_np(this->_worker.native_handle(), this->_thread_name.c_str());
+    }
+
     executor_pool::executor_pool(size_t pool_size, uint32_t queue_depth)
     {
         for(size_t i = 0; i < pool_size; ++i)
         {
             auto new_executor = executor_context::make_new(queue_depth);
 
-            auto set_affinity = [](int32_t tid) -> async::task<int32_t>
-            {
-                cpu_set_t cpuset;
-                CPU_ZERO(&cpuset);
-                CPU_SET(tid, &cpuset);
+            new_executor->set_core_affinity(i);
 
-                pthread_t thread_id = pthread_self();
-                int result = pthread_setaffinity_np(thread_id, sizeof(cpu_set_t), &cpuset);
-                if(result != 0)
-                {
-                    std::cerr << "Failed to set thread affinity: " << strerror(result) << std::endl;
-                    throw std::runtime_error("Failed to set thread affinity: " + std::string(strerror(result)));
-                }
-                co_return 0;
-            };
-
-            new_executor->sync_submit(set_affinity(i));
-
-            pthread_setname_np(new_executor->_worker.native_handle(), "io-extor-pool");
+            new_executor->set_thread_name("io-ex-pool-" + std::to_string(i));
 
             this->_executors.emplace_back(std::move(new_executor));
         }
@@ -533,10 +552,23 @@ namespace hedge::async
         return *executor_pool::_static_pool;
     }
 
-    const std::shared_ptr<executor_context>& executor_pool::get_executor()
+    const std::shared_ptr<executor_context>& executor_pool::get_executor_round_robin()
     {
         auto idx = this->_next_executor.fetch_add(1, std::memory_order_relaxed) % this->_executors.size();
         return this->_executors[idx];
+    }
+
+    std::shared_ptr<executor_context> executor_pool::get_executor(size_t idx)
+    {
+        if(idx >= this->_executors.size())
+            throw std::out_of_range("Executor index out of range");
+
+        return this->_executors[idx];
+    }
+
+    std::vector<std::shared_ptr<executor_context>> executor_pool::executors()
+    {
+        return this->_executors;
     }
 
 } // namespace hedge::async

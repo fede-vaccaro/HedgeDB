@@ -72,6 +72,8 @@ namespace hedge::db
         size_t min_merge_width = 4;
 
         size_t max_merge_width = -1;
+
+        bool disable_wal = false;
     };
 
     /**
@@ -146,6 +148,8 @@ namespace hedge::db
          * @return An async task resolving to a status indicating success or failure.
          */
         async::task<hedge::status> put_async(const key_t& key, const byte_buffer_t& value);
+
+        hedge::status put(const key_t& key, const byte_buffer_t& value);
 
         /**
          * @brief Asynchronously marks a key as deleted.

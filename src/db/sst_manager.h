@@ -9,6 +9,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_set>
+#include <span>
 #include <vector>
 
 #include <error.hpp>
@@ -50,7 +51,8 @@ namespace hedge::db
                                                                    std::shared_ptr<sharded_page_cache> page_cache);
 
         // Called by memtable flush callback
-        void push_indices(std::vector<sst> new_indices);
+        void push_indices(std::vector<sst> new_indices,
+                          std::span<std::shared_ptr<async::executor_context>> executors);
 
         // SST lookup for the read path
         async::task<expected<value_t>> lookup_async(const key_t& key, size_t matching_partition_id);
@@ -109,7 +111,7 @@ namespace hedge::db
         sorted_indices_map_t _sorted_indices;
 
         std::vector<std::shared_ptr<async::executor_context>> _compation_executor_pool{};
-        size_t _executor_idx{0};
+        size_t _compactor_executor_id{0};
         std::atomic_size_t _compaction_jobs_in_flight{0};
 
         async::worker _compaction_worker{};
@@ -152,7 +154,7 @@ namespace hedge::db
                                                                  size_t max_num_levels,
                                                                  bool use_odirect);
 
-        async::task<> _persist_partition_state(uint16_t partition_id);
+        async::task<hedge::status> _persist_partition_state(uint16_t partition_id);
 
         hedge::expected<compaction_stats> _compaction_job_size_tiered(bool compact_all);
 

@@ -16,6 +16,8 @@
 
 #include "perf_counter.h"
 
+using namespace std::literals;
+
 /*
 sudo sh -c 'echo 1 >/proc/sys/kernel/perf_event_paranoid'
 sudo sh -c 'echo 0 >/proc/sys/kernel/kptr_restrict'
@@ -24,7 +26,7 @@ sudo sh -c 'echo 0 >/proc/sys/kernel/kptr_restrict'
 namespace hedge::prof
 {
 
-    static constexpr bool PROFILING_ENABLED = true;
+    static constexpr bool PROFILING_ENABLED = false;
     static constexpr bool TIMING_ENABLED = true;
 
     int open_perf_counter(uint32_t type, uint64_t config)
@@ -142,37 +144,42 @@ namespace hedge::prof
     }
 
     constexpr static auto keys = std::array{
-        std::string_view{"cache_hits"},
-        std::string_view{"lookup"},
-        // std::string_view{"get_slot"},
-        // std::string_view{"find_in_page"},
-        // std::string_view{"push_coro"},
-        // std::string_view{"resumed_count"},
-        // std::string_view{"avg_resumed_count"},
-        // std::string_view{"gc_coros"},
-        std::string_view{"merge_cache_bulk_lookup"},
-        std::string_view{"merge_cache_hits"},
-        std::string_view{"merge_cache_bulk_writes"},
-        std::string_view{"merge_cache_bulk_write_us"},
-        std::string_view{"merge_cache_bulk_writes_count"},
-        std::string_view{"cache_find_frame_spins"},
-        std::string_view{"fs_read_requests"},
-        std::string_view{"file_reader_next"},
-        std::string_view{"consume_and_push"},
-        std::string_view{"merge_throughput_mbs"},
-        std::string_view{"merge_mb_written"},
-        std::string_view{"make_fs_page_from_span"},
-        std::string_view{"inner_merge_loop"},
-        std::string_view("memtable_put"),
-        std::string_view("put_async"),
-        std::string_view("executor_pop_tasks"),
-        std::string_view("swap_memtable"),
-        std::string_view("test_task"),
-        std::string_view("submit_job"),
-        std::string_view("rolling_buffer::pop_front"),
-        std::string_view("qf_false_positives"),
-        std::string_view("find_value_in_sst"),
-        std::string_view("sst_visited_per_lookup"),
+        "cache_hits"sv,
+        "lookup"sv,
+        // "get_slot"sv,
+        // "find_in_page"sv,
+        // "push_coro"sv,
+        // "resumed_count"sv,
+        // "avg_resumed_count"sv,
+        "merge_cache_bulk_lookup"sv,
+        "merge_cache_hits"sv,
+        "merge_cache_bulk_writes"sv,
+        "merge_cache_bulk_write_us"sv,
+        "merge_cache_bulk_writes_count"sv,
+        "cache_find_frame_spins"sv,
+        "fs_read_requests"sv,
+        "file_reader_next"sv,
+        "consume_and_push"sv,
+        "merge_throughput_mbs"sv,
+        "merge_mb_written"sv,
+        "make_fs_page_from_span"sv,
+        "inner_merge_loop"sv,
+        "memtable_put"sv,
+        "put_async"sv,
+        "executor_pop_tasks"sv,
+        "swap_memtable"sv,
+        "test_task"sv,
+        "submit_job"sv,
+        "rolling_buffer::pop_front"sv,
+        "qf_false_positives"sv,
+        "find_value_in_sst"sv,
+        "sst_visited_per_lookup"sv,
+        "gc_coros"sv,
+        "submit_sqe"sv,
+        "wait_for_cqe"sv,
+        "do_work"sv,
+        "executor_launch_tasks"sv,
+        // std::string_view("qf_lookups"),
     };
 
     static constexpr fixed_set<std::string_view, keys.size()> _metrics_set = fixed_set(keys);

@@ -58,7 +58,7 @@ if (CMAKE_BUILD_TYPE MATCHES "Debug")
     set(CMAKE_CXX_FLAGS "-O0 -g -fno-omit-frame-pointer -foptimize-sibling-calls -Wall -Wextra -Wpedantic -Werror")
 elseif (CMAKE_BUILD_TYPE MATCHES "Release")
     message (STATUS "Building in Release mode")
-    set(CMAKE_CXX_FLAGS "-O2 -g -fno-omit-frame-pointer")
+    set(CMAKE_CXX_FLAGS "-O3 -g -fno-omit-frame-pointer")
 endif()
 
 set(PUBLIC_INCLUDES 
@@ -127,9 +127,21 @@ target_link_libraries(skiplist_executor_test uring tcmalloc atomic)
 add_executable(memtable_perf_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/memtable_perf_test.cc)
 target_link_libraries(memtable_perf_test uring tcmalloc atomic)
 
+# memtable_perf_test_threads — same benchmark but using N plain std::threads instead of executors
+add_executable(memtable_perf_test_threads ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/memtable_perf_test_threads.cc)
+target_link_libraries(memtable_perf_test_threads uring tcmalloc atomic)
+
 # database_perf_test — full database write+read benchmark (no gtest)
 add_executable(database_perf_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/database_perf_test.cc)
 target_link_libraries(database_perf_test uring tcmalloc atomic)
+
+# database_perf_test_threads — same benchmark but using N plain std::threads + sync_submit instead of executor task loop
+add_executable(database_perf_test_threads ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/database_perf_test_threads.cc)
+target_link_libraries(database_perf_test_threads uring tcmalloc atomic)
+
+# database_perf_test_mixed — 50/50 mixed read+write benchmark
+add_executable(database_perf_test_mixed ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/database_perf_test_mixed.cc)
+target_link_libraries(database_perf_test_mixed uring tcmalloc atomic)
 
 # executor tests
 add_executable(executor_test ${IO_EXECUTOR_SRCS} test/io_executor.spec.cc)
@@ -193,6 +205,10 @@ target_link_libraries(cache_test uring gtest gtest_main atomic)
 # database tests
 add_executable(database_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/database.spec.cc)
 target_link_libraries(database_test uring gtest gtest_main atomic tcmalloc tbb)
+
+# WAL replay tests
+add_executable(wal_replay_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/wal_replay.spec.cc)
+target_link_libraries(wal_replay_test uring gtest gtest_main atomic tcmalloc)
 
 # skiplist tests
 add_executable(skiplist_test test/skiplist.spec.cc)
