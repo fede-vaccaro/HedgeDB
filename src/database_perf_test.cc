@@ -180,7 +180,7 @@ int main(int argc, char* argv[])
             wg->decr();
         };
 
-        constexpr size_t NUM_WRITERS = 8;
+        constexpr size_t NUM_WRITERS = 12;
         std::vector<std::shared_ptr<async::executor_context>> writers = async::executor_pool::static_pool().executors();
         writers.resize(NUM_WRITERS);
 

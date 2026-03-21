@@ -570,7 +570,10 @@ namespace hedge::db
 
                     bool under_pressure = this->_compaction_backpressure && this->_compaction_backpressure->load(std::memory_order::relaxed);
                     if(under_pressure)
-                        this->_compaction_backpressure->wait(false, std::memory_order::relaxed);
+                    {
+                        this->_logger.log("Flush completed for epoch ", curr_flush_epoch, " but compaction backpressure is active, waiting...");
+                        this->_compaction_backpressure->wait(true, std::memory_order::relaxed);
+                    }
 
                     if(this->_cfg.auto_compaction)
                         this->_trigger_compaction_callback();

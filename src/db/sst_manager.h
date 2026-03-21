@@ -119,6 +119,7 @@ namespace hedge::db
         std::shared_ptr<sharded_page_cache> _page_cache;
 
         std::mutex _pending_compactions_mutex;
+        size_t _pending_compacting_sst_in_l0_count{0};
         size_t _pending_compacting_sst_count{0};
         std::condition_variable _pending_compactions_cv;
 

@@ -219,18 +219,8 @@ namespace hedge::fs
                         if(res.error_code < 0)
                         {
                             auto err = std::string(strerror(-res.error_code));
-                            co_return hedge::error("Failed to allocate space for file: " + err);
-
-                            std::filesystem::remove(path); // todo: implement mailbox based remove function
-
-                            auto close_result = co_await executor->submit_request(async::close_request{fd});
-
-                            if(close_result.error_code < 0)
-                            {
-                                auto err = std::string(strerror(-close_result.error_code));
-                                co_return hedge::error("Failed to close file descriptor after fallocate failure: " + err);
-                            }
-
+                            std::filesystem::remove(path);
+                            co_await executor->submit_request(async::close_request{fd});
                             co_return hedge::error("Failed to allocate space for file: " + err);
                         }
                         break;

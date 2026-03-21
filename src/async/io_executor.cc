@@ -190,8 +190,8 @@ namespace hedge::async
 
         const uint32_t wait_for = wait_for_cqe ? std::min(1U, ready_soon) : 0; // wait for at least one cqe to be ready, to reduce latency
 
-        if(submitted_sqe_count == 0 && wait_for == 0)
-            return;
+        // if(submitted_sqe_count == 0 && wait_for == 0)
+        //     return;
 
         auto ret = io_uring_submit_and_wait(&this->_ring, wait_for);
 

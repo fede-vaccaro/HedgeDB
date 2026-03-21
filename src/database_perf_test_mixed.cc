@@ -117,9 +117,12 @@ int main(int argc, char* argv[])
               << "  N_OPS=" << N_OPS
               << "  PAYLOAD_SIZE=" << PAYLOAD_SIZE
               << "  MEMTABLE_CAPACITY=" << MEMTABLE_CAPACITY;
-    if(flag_compact_all) std::cout << "  --compact-all";
-    if(flag_load_only) std::cout << "  --load";
-    if(flag_reload) std::cout << "  --reload";
+    if(flag_compact_all)
+        std::cout << "  --compact-all";
+    if(flag_load_only)
+        std::cout << "  --load";
+    if(flag_reload)
+        std::cout << "  --reload";
     std::cout << std::endl;
 
     // --- Init ---
@@ -156,7 +159,7 @@ int main(int argc, char* argv[])
     auto db = std::move(maybe_db.value());
     auto values = pregenerate_values(PAYLOAD_SIZE);
 
-    constexpr size_t NUM_WORKERS = 8;
+    constexpr size_t NUM_WORKERS = 12;
     auto executors = async::executor_pool::static_pool().executors();
     executors.resize(NUM_WORKERS);
 
@@ -188,6 +191,7 @@ int main(int argc, char* argv[])
         std::cout << "\n--- Initial write phase (" << INITIAL_WRITES << " keys) ---" << std::endl;
         std::cout << "Duration: " << elapsed_s * 1000.0 << " ms" << std::endl;
         std::cout << "Throughput: " << static_cast<uint64_t>(INITIAL_WRITES / elapsed_s) << " items/s" << std::endl;
+        std::cout << "Backpressure: " << memtable::BACKPRESSURE.load(std::memory_order_relaxed) << " total backpressure events during initial load" << std::endl;
 
         if(N_OPS == 0)
         {

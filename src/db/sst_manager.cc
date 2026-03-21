@@ -115,6 +115,40 @@ namespace hedge::db
                 }
             }
 
+            if(loaded_from_state)
+            {
+                // Collect tracked filenames to detect orphans on disk
+                std::unordered_set<std::string> tracked_filenames;
+                for(const auto& level : state.levels)
+                {
+                    for(const auto& sst_ptr : level)
+                        tracked_filenames.insert(sst_ptr->path().filename().string());
+                }
+
+                std::vector<std::string> orphans;
+                for(const auto& entry : std::filesystem::directory_iterator(dir_path))
+                {
+                    if(!entry.is_regular_file() || entry.path().extension() == ".tiers")
+                        continue;
+
+                    auto filename = entry.path().filename().string();
+                    if(!tracked_filenames.contains(filename))
+                    {
+                        max_flush_iteration = std::max(max_flush_iteration,
+                                                       flush_iteration_from_filename(entry.path()));
+                        orphans.push_back(filename);
+                    }
+                }
+
+                if(!orphans.empty())
+                {
+                    std::string orphan_list;
+                    for(const auto& o : orphans)
+                        orphan_list += " " + o;
+                    return hedge::error("Orphan SST files detected in partition " + dir_prefix + ":" + orphan_list);
+                }
+            }
+
             if(!loaded_from_state)
             {
                 for(const auto& entry : std::filesystem::directory_iterator(dir_path))
@@ -422,13 +456,19 @@ namespace hedge::db
             std::lock_guard lk(this->_pending_compactions_mutex);
             this->_pending_compacting_sst_count -= input_count;
 
-            const size_t threshold = 16 * (1UL << this->_cfg.num_partition_exponent);
-            bool under_pressure = this->_pending_compacting_sst_count > threshold;
-            bool curr = this->_compaction_backpressure.load(std::memory_order::relaxed);
-            if(curr != under_pressure)
+            // Backpressure only applies to L0
+            if(level == 0)
             {
-                this->_compaction_backpressure.store(under_pressure, std::memory_order::release);
-                this->_compaction_backpressure.notify_all();
+                this->_pending_compacting_sst_in_l0_count -= input_count;
+                constexpr size_t stop_inserts_l0_threshold = 20;
+                const size_t threshold = stop_inserts_l0_threshold * (1UL << this->_cfg.num_partition_exponent);
+                bool release_pressure = this->_pending_compacting_sst_in_l0_count < threshold / 2;
+                if(release_pressure && this->_compaction_backpressure.load(std::memory_order::relaxed))
+                {
+                    this->_logger.log("Compaction backpressure released: pending compacting SST count in L0 is ", this->_pending_compacting_sst_in_l0_count, " below threshold ", threshold / 2);
+                    this->_compaction_backpressure.store(false, std::memory_order::release);
+                    this->_compaction_backpressure.notify_all();
+                }
             }
 
             this->_pending_compactions_cv.notify_all();
@@ -704,18 +744,23 @@ namespace hedge::db
                     {
                         size_t bucket_input_count = it->second.size();
 
-                        // Increment pending count and update backpressure
+                        // Always increment pending count
                         {
                             std::lock_guard lk(this->_pending_compactions_mutex);
                             this->_pending_compacting_sst_count += bucket_input_count;
 
-                            const auto threshold = 16 * (1UL << this->_cfg.num_partition_exponent);
-                            bool under_pressure = this->_pending_compacting_sst_count > threshold;
-                            auto curr = this->_compaction_backpressure.load(std::memory_order::relaxed);
-                            if(curr != under_pressure) // Avoid unnecessary stores
+                            // Backpressure only applies to L0
+                            if(level == 0)
                             {
-                                this->_compaction_backpressure.store(under_pressure, std::memory_order::release);
-                                this->_compaction_backpressure.notify_all();
+                                this->_pending_compacting_sst_in_l0_count += bucket_input_count;
+                                constexpr size_t stop_inserts_l0_threshold = 20;
+                                const auto threshold = stop_inserts_l0_threshold * (1UL << this->_cfg.num_partition_exponent);
+                                bool should_pressure = this->_pending_compacting_sst_in_l0_count > threshold;
+                                if(should_pressure && !this->_compaction_backpressure.load(std::memory_order::relaxed)) // Avoid unnecessary stores
+                                {
+                                    this->_compaction_backpressure.store(true, std::memory_order::release);
+                                    this->_compaction_backpressure.notify_all();
+                                }
                             }
                         }
 
