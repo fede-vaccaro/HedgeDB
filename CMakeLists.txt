@@ -143,6 +143,11 @@ target_link_libraries(database_perf_test_threads uring tcmalloc atomic)
 add_executable(database_perf_test_mixed ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/database_perf_test_mixed.cc)
 target_link_libraries(database_perf_test_mixed uring tcmalloc atomic)
 
+# database_perf_test_mixed — 50/50 mixed read+write benchmark
+add_executable(database_perf_test_mixed_batch ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/database_perf_test_mixed_batch.cc)
+target_link_libraries(database_perf_test_mixed_batch uring tcmalloc atomic)
+
+
 # executor tests
 add_executable(executor_test ${IO_EXECUTOR_SRCS} test/io_executor.spec.cc)
 target_link_libraries(executor_test uring gtest gtest_main)

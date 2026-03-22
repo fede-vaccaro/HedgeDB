@@ -118,7 +118,7 @@ int main(int argc, char* argv[])
               << std::endl;
 
     // --- Init ---
-    constexpr size_t NUM_WRITERS = 8;
+    constexpr size_t NUM_WRITERS = 20;
     constexpr size_t NUM_READERS = 12;
     constexpr size_t POOL_SIZE = std::max(NUM_WRITERS, NUM_READERS);
 
@@ -130,7 +130,7 @@ int main(int argc, char* argv[])
     config.auto_compaction = true;
     config.compaction_read_ahead_size_bytes = 2 * 1024 * 1024;
     config.keys_in_mem_before_flush = MEMTABLE_CAPACITY;
-    config.num_partition_exponent = 4;
+    config.num_partition_exponent = 0;
     config.bucket_ratio = 1.50;
     config.use_odirect_for_indices = true;
     config.index_page_clock_cache_size_bytes = 0;
@@ -202,6 +202,7 @@ int main(int argc, char* argv[])
         std::cout << "Duration: " << elapsed_finish_writing_s * 1000.0 << " ms" << std::endl;
         std::cout << "Write throughput: " << static_cast<uint64_t>(N_KEYS / elapsed_finish_writing_s) << " items/s" << std::endl;
         std::cout << "Bandwidth: " << (N_KEYS * (PAYLOAD_SIZE + KEY_SIZE) / 1e6) / elapsed_finish_writing_s << " MB/s" << std::endl;
+        std::cout << "Backpressure: " << memtable::BACKPRESSURE.load(std::memory_order_relaxed) << " total backpressure events during write phase" << std::endl;
 
         // std::cout << "Waiting for pending compactions..." << std::endl;
         // db->wait_for_compactions_to_finish();

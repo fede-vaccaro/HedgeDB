@@ -7,6 +7,7 @@
 #include <future>
 #include <map>
 #include <memory>
+#include <span>
 #include <unordered_set>
 
 #include <error.hpp>
@@ -148,6 +149,14 @@ namespace hedge::db
          * @return An async task resolving to a status indicating success or failure.
          */
         async::task<hedge::status> put_async(const key_t& key, const byte_buffer_t& value);
+
+        /**
+         * @brief Asynchronously inserts a batch of small key-value pairs (values < 512 bytes).
+         * All values are stored in-place in the memtable (no value table). Max 128 entries per batch.
+         * @param entries Span of key-value pairs to insert.
+         * @return An async task resolving to a status indicating success or failure.
+         */
+        async::task<hedge::status> put_batch_async(std::span<const std::pair<key_t, byte_buffer_t>> entries);
 
         hedge::status put(const key_t& key, const byte_buffer_t& value);
 

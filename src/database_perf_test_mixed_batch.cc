@@ -31,6 +31,9 @@ namespace hedge::db
     static constexpr size_t KEY_SIZE = 24;
     static constexpr uint64_t SEED = 0xDEADBEEF;
     static constexpr size_t NUM_CACHED_VALUES = 1024;
+    static constexpr uint32_t BATCH_SIZE = 1;
+
+    using kv_pair_t = std::pair<key_t, std::vector<uint8_t>>;
 
     static key_t make_key(size_t i)
     {
@@ -168,22 +171,27 @@ int main(int argc, char* argv[])
     // =========================================================================
     if(INITIAL_WRITES > 0 && !flag_reload)
     {
+        const size_t num_batches = (INITIAL_WRITES + BATCH_SIZE - 1) / BATCH_SIZE;
         auto wg = async::wait_group::make_shared();
-        wg->set(INITIAL_WRITES);
+        wg->set(num_batches);
 
-        auto make_put = [&](size_t i) -> async::task<void>
+        auto make_put_batch = [&](size_t batch_start) -> async::task<void>
         {
-            auto key = make_key(i);
-            const auto& val = values[value_slot(i)];
-            auto status = co_await db->put_async(key, val);
+            const size_t batch_end = std::min(batch_start + BATCH_SIZE, INITIAL_WRITES);
+            std::vector<kv_pair_t> entries;
+            entries.reserve(batch_end - batch_start);
+            for(size_t i = batch_start; i < batch_end; ++i)
+                entries.emplace_back(make_key(i), values[value_slot(i)]);
+
+            auto status = co_await db->put_batch_async(entries);
             if(!status)
-                std::cerr << "initial put error at i=" << i << ": " << status.error().to_string() << std::endl;
+                std::cerr << "initial put_batch error at batch_start=" << batch_start << ": " << status.error().to_string() << std::endl;
             wg->decr();
         };
 
         auto t0 = clk::now();
-        for(size_t i = 0; i < INITIAL_WRITES; ++i)
-            executors[i % NUM_WORKERS]->submit_io_task(make_put(i));
+        for(size_t b = 0; b < INITIAL_WRITES; b += BATCH_SIZE)
+            executors[(b / BATCH_SIZE) % NUM_WORKERS]->submit_io_task(make_put_batch(b));
         wg->wait();
         auto t1 = clk::now();
 
@@ -227,8 +235,9 @@ int main(int argc, char* argv[])
     // =========================================================================
     if(!flag_load_only && N_OPS > 0)
     {
+        const size_t num_chunks = (N_OPS + BATCH_SIZE - 1) / BATCH_SIZE;
         auto wg = async::wait_group::make_shared();
-        wg->set(N_OPS);
+        wg->set(num_chunks);
 
         std::atomic_size_t read_count{0};
         std::atomic_size_t write_count{0};
@@ -244,49 +253,55 @@ int main(int argc, char* argv[])
 
         std::atomic_size_t next_write_idx{INITIAL_WRITES};
 
-        auto make_op = [&](size_t op_idx, size_t worker_id) -> async::task<void>
+        auto make_chunk = [&](size_t chunk_start, size_t worker_id) -> async::task<void>
         {
-            // Decide read vs write: use a hash of op_idx for deterministic 50/50 split
-            uint64_t decision = xxh64::hash(reinterpret_cast<const char*>(&op_idx), sizeof(op_idx), 0x12345678);
-            bool is_read = (decision & 1) == 0;
+            const size_t chunk_end = std::min(chunk_start + BATCH_SIZE, N_OPS);
+            std::vector<kv_pair_t> write_batch;
 
-            if(is_read)
+            for(size_t op_idx = chunk_start; op_idx < chunk_end; ++op_idx)
             {
-                // Pick a random key from [0, INITIAL_WRITES) — the guaranteed-written initial batch
-                uint64_t& rng = rng_seeds[worker_id];
-                size_t idx = fast_rand(rng) % INITIAL_WRITES;
+                uint64_t decision = xxh64::hash(reinterpret_cast<const char*>(&op_idx), sizeof(op_idx), 0x12345678);
+                bool is_read = (decision & 1) == 0;
 
-                auto key = make_key(idx);
-                auto maybe_value = co_await db->get_async(key);
-                if(!maybe_value)
+                if(is_read)
                 {
-                    read_errors.fetch_add(1, std::memory_order_relaxed);
-                    std::cerr << "get error at idx=" << idx << ": " << maybe_value.error().to_string() << std::endl;
-                }
-                read_count.fetch_add(1, std::memory_order_relaxed);
-            }
-            else
-            {
-                size_t idx = next_write_idx.fetch_add(1, std::memory_order_relaxed);
-                auto key = make_key(idx);
-                const auto& val = values[value_slot(idx)];
-                auto status = co_await db->put_async(key, val);
-                if(!status)
-                    std::cerr << "put error at i=" << idx << ": " << status.error().to_string() << std::endl;
+                    uint64_t& rng = rng_seeds[worker_id];
+                    size_t idx = fast_rand(rng) % INITIAL_WRITES;
 
-                write_count.fetch_add(1, std::memory_order_relaxed);
+                    auto key = make_key(idx);
+                    auto maybe_value = co_await db->get_async(key);
+                    if(!maybe_value)
+                    {
+                        read_errors.fetch_add(1, std::memory_order_relaxed);
+                        std::cerr << "get error at idx=" << idx << ": " << maybe_value.error().to_string() << std::endl;
+                    }
+                    read_count.fetch_add(1, std::memory_order_relaxed);
+                }
+                else
+                {
+                    size_t idx = next_write_idx.fetch_add(1, std::memory_order_relaxed);
+                    write_batch.emplace_back(make_key(idx), values[value_slot(idx)]);
+                }
+            }
+
+            if(!write_batch.empty())
+            {
+                auto status = co_await db->put_batch_async(write_batch);
+                if(!status)
+                    std::cerr << "put_batch error at chunk_start=" << chunk_start << ": " << status.error().to_string() << std::endl;
+                write_count.fetch_add(write_batch.size(), std::memory_order_relaxed);
             }
 
             wg->decr();
         };
 
-        std::cout << "\n--- Mixed phase (50/50 r/w, " << N_OPS << " ops) ---" << std::endl;
+        std::cout << "\n--- Mixed phase (50/50 r/w, " << N_OPS << " ops, batch_size=" << BATCH_SIZE << ") ---" << std::endl;
         auto t0 = clk::now();
 
-        for(size_t i = 0; i < N_OPS; ++i)
+        for(size_t c = 0; c < N_OPS; c += BATCH_SIZE)
         {
-            size_t w = i % NUM_WORKERS;
-            executors[w]->submit_io_task(make_op(i, w));
+            size_t w = (c / BATCH_SIZE) % NUM_WORKERS;
+            executors[w]->submit_io_task(make_chunk(c, w));
         }
         wg->wait();
 

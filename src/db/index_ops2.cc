@@ -892,7 +892,10 @@ namespace hedge::db
         std::vector<sst> results;
         std::vector<hedge::error> errors;
 
-        size_t executor_id = 0;
+        thread_local std::mt19937 rng{std::random_device{}()};
+        thread_local std::uniform_int_distribution<size_t> dist(0, executor_pool.size() - 1);
+
+        size_t executor_id = dist(rng);
         size_t range_count = 0;
         for(auto& range : ranges)
         {

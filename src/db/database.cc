@@ -41,7 +41,7 @@ namespace hedge::db
         ::new(memtable_mem) memtable(
             memtable_config{
                 .max_inserts_cap = config.keys_in_mem_before_flush,
-                .memory_budget_cap = 64 * 1024 * 1024,
+                .memory_budget_cap = 128 * 1024 * 1024,
                 .auto_compaction = config.auto_compaction,
                 .use_odirect = config.use_odirect_for_indices,
                 .num_writer_threads = async::executor_pool::static_pool().size(),
@@ -225,13 +225,13 @@ namespace hedge::db
         return db;
     }
 
-    // hedge::status database::put(const key_t& key, const byte_buffer_t& value)
-    // {
-    //     if(value.size() < 512) [[likely]]
-    //         return this->_memtable.put(key, value, hedge::value_type::IN_PLACE_VALUE);
+    hedge::status database::put(const key_t& key, const byte_buffer_t& value)
+    {
+        if(value.size() < 512) [[likely]]
+            return this->_memtable.put(key, value, hedge::value_type::IN_PLACE_VALUE);
 
-    //     return hedge::error("Synchronous put is not supported for values larger than 512 bytes");
-    // }
+        return hedge::error("Synchronous put is not supported for values larger than 512 bytes");
+    }
 
     async::task<hedge::status> database::put_async(const key_t& key, const byte_buffer_t& value)
     {
@@ -301,6 +301,22 @@ namespace hedge::db
         this->_memtable.put_async(key, maybe_write.value(), hedge::value_type::VALUE_PTR);
 
         co_return hedge::ok();
+    }
+
+    async::task<hedge::status> database::put_batch_async(std::span<const std::pair<key_t, byte_buffer_t>> entries)
+    {
+        static constexpr size_t MAX_BATCH_SIZE = 128;
+
+        if(entries.size() > MAX_BATCH_SIZE)
+            co_return hedge::error("put_batch_async: batch size exceeds maximum of 128 entries");
+
+        for(const auto& [key, value] : entries)
+        {
+            if(value.size() >= 512)
+                co_return hedge::error("put_batch_async only supports values < 512 bytes");
+        }
+
+        co_return co_await this->_memtable.put_batch_async(entries, hedge::value_type::IN_PLACE_VALUE);
     }
 
     async::task<expected<value_t>> database::_find_value(const key_t& key)

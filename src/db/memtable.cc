@@ -20,6 +20,7 @@
 #include "io_executor.h"
 #include "key.h"
 #include "memtable.h"
+#include "spinlock.h"
 #include "types.h"
 
 namespace
@@ -357,7 +358,9 @@ namespace hedge::db
                     {
                         BACKPRESSURE.fetch_add(1, std::memory_order::relaxed);
                         // this->_table.wait(t, std::memory_order::relaxed);
-                        std::this_thread::yield();
+                        // std::this_thread::yield();
+                        constexpr timespec ns = {.tv_sec = 0, .tv_nsec = 1};
+                        nanosleep(&ns, nullptr);
                     }
                     continue;
                 }
@@ -400,6 +403,144 @@ namespace hedge::db
                 return hedge::ok();
 
             return this->_append_to_wal(memtable->per_thread_wals[THIS_THREAD_IDX].fd(), seq_nr, key, value_span);
+        }
+    }
+
+    hedge::status memtable::_append_batch_to_wal(
+        int32_t fd,
+        std::span<const std::pair<key_t, std::vector<uint8_t>>> entries,
+        std::span<const wal_batch_meta> meta,
+        std::span<const std::span<const uint8_t>> value_spans)
+    {
+        constexpr size_t IOVECS_PER_ENTRY = 5;
+        const size_t n = entries.size();
+
+        std::array<iovec, 128 * IOVECS_PER_ENTRY> iovecs;
+        size_t expected_bytes = 0;
+
+        for(size_t i = 0; i < n; ++i)
+        {
+            const size_t base = i * IOVECS_PER_ENTRY;
+            const auto& [key, _] = entries[i];
+
+            iovecs[base + 0] = {.iov_base = const_cast<uint32_t*>(&meta[i].seq_nr), .iov_len = sizeof(uint32_t)};
+            iovecs[base + 1] = {.iov_base = const_cast<uint8_t*>(&meta[i].encoded_key_size), .iov_len = sizeof(uint8_t)};
+            iovecs[base + 2] = {.iov_base = const_cast<uint8_t*>(key.data()), .iov_len = key.size()};
+            iovecs[base + 3] = {.iov_base = const_cast<uint16_t*>(&meta[i].value_size), .iov_len = sizeof(uint16_t)};
+            iovecs[base + 4] = {.iov_base = const_cast<uint8_t*>(value_spans[i].data()), .iov_len = value_spans[i].size()};
+
+            expected_bytes += sizeof(uint32_t) + sizeof(uint8_t) + key.size() + sizeof(uint16_t) + value_spans[i].size();
+        }
+
+        int32_t res = pwritev2(fd, iovecs.data(), static_cast<int>(n * IOVECS_PER_ENTRY), -1, 0);
+        if(res < 0)
+            return hedge::error("could not write batch into wal: " + std::string(strerror(errno)));
+
+        if(static_cast<size_t>(res) != expected_bytes)
+            return hedge::error("partial batch write into wal: " + std::to_string(res) + " != " + std::to_string(expected_bytes));
+
+        return hedge::ok();
+    }
+
+    async::task<hedge::status> memtable::put_batch_async(
+        std::span<const std::pair<key_t, std::vector<uint8_t>>> entries,
+        hedge::value_type value_type)
+    {
+        thread_local std::shared_ptr<rw_sync_table_t> local_memtable_ref = this->_table.load(std::memory_order::relaxed);
+
+        static std::atomic_size_t THREADS{0};
+        thread_local std::atomic_size_t THIS_THREAD_IDX = THREADS.fetch_add(1, std::memory_order::relaxed);
+        auto insert_attempts = 0UL;
+
+        const size_t n = entries.size();
+
+        while(true)
+        {
+            auto memtable = local_memtable_ref->acquire_writer(THIS_THREAD_IDX % this->_cfg.num_writer_threads);
+
+            if(!memtable) [[unlikely]]
+            {
+                auto t = this->_table.load(std::memory_order::relaxed);
+                if(t == local_memtable_ref)
+                {
+                    constexpr size_t ATTEMPTS_BEFORE_BACKPRESSURE = 4;
+
+                    if(insert_attempts++ < ATTEMPTS_BEFORE_BACKPRESSURE)
+                    {
+                        folly::detail::asm_volatile_pause();
+                    }
+                    else
+                    {
+                        BACKPRESSURE.fetch_add(1, std::memory_order::relaxed);
+                        co_await async::this_thread_executor()->submit_request(async::sleep_request{.nanoseconds = 64});
+                    }
+                    continue;
+                }
+
+                local_memtable_ref = t;
+                insert_attempts = 0;
+                continue;
+            }
+
+            constexpr size_t alignment = std::atomic_ref<std::span<const uint8_t>>::required_alignment;
+            const size_t writer_idx = THIS_THREAD_IDX % this->_cfg.num_writer_threads;
+
+            std::array<uint32_t, 128> seq_nrs{};
+            std::array<std::span<const uint8_t>, 128> value_spans{};
+            size_t total_bytes = 0;
+            bool all_ok = true;
+
+            for(size_t i = 0; i < n; ++i)
+            {
+                const auto& [key, value] = entries[i];
+
+                auto* value_ptr = memtable->value_arenas[writer_idx]->allocate_many(value.size() + 1, alignment);
+                if(!value_ptr)
+                {
+                    all_ok = false;
+                    break;
+                }
+
+                std::span<uint8_t> value_span(value_ptr, value.size() + 1);
+                value_span[0] = static_cast<uint8_t>(value_type);
+                std::memcpy(value_span.data() + 1, value.data(), value.size());
+
+                auto [ok, seq_nr] = memtable->insert(key, value_span);
+                if(!ok)
+                {
+                    all_ok = false;
+                    break;
+                }
+
+                seq_nrs[i] = seq_nr;
+                value_spans[i] = value_span;
+                total_bytes += key.size() + value.size() + 1;
+            }
+
+            if(!all_ok || memtable->bytes_written.fetch_add(total_bytes, std::memory_order_relaxed) > this->_cfg.memory_budget_cap) [[unlikely]]
+            {
+                bool this_thread_flushed = this->_flush(local_memtable_ref);
+                if(!this_thread_flushed)
+                    folly::detail::asm_volatile_pause();
+                continue;
+            }
+
+            if(!this->_cfg.use_wal)
+                co_return hedge::ok();
+
+            std::array<wal_batch_meta, 128> meta{};
+            for(size_t i = 0; i < n; ++i)
+            {
+                meta[i] = {
+                    .seq_nr = seq_nrs[i],
+                    .encoded_key_size = hedge::encode_key_size(entries[i].first.size()),
+                    .value_size = static_cast<uint16_t>(value_spans[i].size()),
+                };
+            }
+
+            co_return this->_append_batch_to_wal(
+                memtable->per_thread_wals[THIS_THREAD_IDX].fd(),
+                entries, meta, std::span(value_spans.data(), n));
         }
     }
 
@@ -490,17 +631,21 @@ namespace hedge::db
                 this->_flush_mutex.store(false);
                 return false;
             }
+
             size_t curr_flush_epoch = this->_flush_epoch->fetch_add(1, std::memory_order::relaxed);
             rw_sync_table_ptr_t memtable_to_flush{};
 
-            this->_table.load(std::memory_order::relaxed)->freeze_writes();
+            expected_table->freeze_writes();
             // this->_pipelined_table.wait(nullptr, std::memory_order::relaxed);
 
             {
                 std::unique_lock lk(this->_pending_flushes_mutex);
 
                 this->_pending_flushes_cv.wait(lk, [this]()
-                                               { return this->_pending_flushes.size() < MAX_PENDING_FLUSHES; });
+                                               { 
+                                                // if(this->_pending_flushes.size() >= MAX_PENDING_FLUSHES)
+                                                    // this->_logger.log("Flush waiting, pending flushes: ", this->_pending_flushes.size());
+                                                return this->_pending_flushes.size() < MAX_PENDING_FLUSHES; });
 
                 rw_sync_table_ptr_t next_in_pipeline = this->_pipelined_table.exchange(nullptr);
                 // this->_pipelined_table.notify_one(); // Notify the table_maker thread

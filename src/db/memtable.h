@@ -170,6 +170,10 @@ namespace hedge::db
 
         async::task<hedge::status> put_async(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type);
 
+        async::task<hedge::status> put_batch_async(
+            std::span<const std::pair<key_t, std::vector<uint8_t>>> entries,
+            hedge::value_type value_type);
+
         hedge::status put(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type);
 
         std::optional<value_t> get(const key_t& key) const;
@@ -192,6 +196,19 @@ namespace hedge::db
 
     private:
         hedge::status _append_to_wal(int32_t fd, uint32_t seq_nr, const key_t& key, std::span<const uint8_t> value);
+
+        struct wal_batch_meta
+        {
+            uint32_t seq_nr;
+            uint8_t encoded_key_size;
+            uint16_t value_size;
+        };
+
+        hedge::status _append_batch_to_wal(
+            int32_t fd,
+            std::span<const std::pair<key_t, std::vector<uint8_t>>> entries,
+            std::span<const wal_batch_meta> meta,
+            std::span<const std::span<const uint8_t>> value_spans);
 
         bool _flush(rw_sync_table_ptr_t expected_table);
     };
