@@ -139,8 +139,7 @@ int main(int argc, char* argv[])
     config.use_odirect_for_indices = true;
     config.index_page_clock_cache_size_bytes = 0;
     config.index_point_cache_size_bytes = 0;
-    config.flush_io_workers = 4;
-    config.compaction_io_workers = 4;
+    config.io_workers = 8;
     config.disable_wal = false;
 
     auto maybe_db = [&]() -> expected<std::shared_ptr<database>>

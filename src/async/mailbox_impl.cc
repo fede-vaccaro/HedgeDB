@@ -195,7 +195,7 @@ namespace hedge::async
     void sleep_mailbox::handle_cqe(io_uring_cqe* cqe)
     {
         // -ETIME is the normal completion for a timeout
-        if (cqe->res < 0 && cqe->res != -ETIME)
+        if(cqe->res < 0 && cqe->res != -ETIME)
             response.error_code = cqe->res;
     }
 
@@ -208,6 +208,15 @@ namespace hedge::async
     {
         if(cqe->res < 0)
             this->response.error_code = cqe->res;
+    }
+
+    void send_msg_mailbox::prepare_sqe(io_uring_sqe* sqe)
+    {
+        io_uring_prep_msg_ring(sqe, this->request.target_ring_fd, this->request.len, this->request.data, 0);
+    }
+    void send_msg_mailbox::handle_cqe(io_uring_cqe* cqe)
+    {
+        this->response.res = cqe->res;
     }
 
 } // namespace hedge::async

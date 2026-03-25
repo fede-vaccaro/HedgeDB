@@ -3,6 +3,7 @@
 #include <functional>
 #include <iostream>
 #include <pthread.h>
+#include <string>
 #include <thread>
 
 #include "perf_counter.h"
@@ -33,6 +34,14 @@ namespace hedge::async
                                     { this->_run(); });
 
         pthread_setname_np(this->_worker.native_handle(), "db-worker");
+    }
+
+    worker::worker(std::string name) : _name(std::move(name))
+    {
+        this->_worker = std::thread([this]()
+                                    { this->_run(); });
+
+        pthread_setname_np(this->_worker.native_handle(), this->_name.c_str());
     }
 
     worker::~worker()
@@ -76,6 +85,12 @@ namespace hedge::async
 
         if(this->_worker.joinable())
             this->_worker.join();
+
+        if(this->_has_ring)
+        {
+            io_uring_queue_exit(&this->_ring);
+            this->_has_ring = false;
+        }
     }
 
     void worker::wait_for_all_jobs()
@@ -87,6 +102,14 @@ namespace hedge::async
 
     void worker::_run()
     {
+        int ret = io_uring_queue_init(32, &this->_ring,
+                                       IORING_SETUP_SINGLE_ISSUER |
+                                           IORING_SETUP_COOP_TASKRUN);
+        if(ret < 0)
+            throw std::runtime_error("worker io_uring_queue_init: " + std::string(strerror(-ret)));
+
+        this->_has_ring = true;
+
         while(true)
         {
             std::deque<job_t> fetched_tasks;

@@ -119,9 +119,8 @@ int main()
     hedge::db::memtable_config cfg;
     cfg.memory_budget_cap = 64 * 1024 * 1024;
     cfg.auto_compaction = false;
-    cfg.flush_io_workers = 4;
     cfg.use_odirect = true;
-    cfg.use_wal = false;
+    cfg.use_wal = true;
     cfg.num_writer_threads = N_EXECUTORS;
 
     static std::atomic_size_t flush_epoch{0};
@@ -129,13 +128,37 @@ int main()
     std::filesystem::remove_all("/tmp/indices_test");
     std::filesystem::create_directories("/tmp/indices_test");
 
+    // std::vector<std::shared_ptr<hedge::async::executor_context>> flush_pool(4);
+    // for(size_t i = 0; i < flush_pool.size(); ++i)
+    // {
+    //     flush_pool[i] = hedge::async::executor_context::make_new(32, hedge::async::executor_config{
+    //                                                                      .loops_before_sleeping = 0,
+    //                                                                      .loops_before_yielding = 0});
+    //     flush_pool[i]->set_thread_name("flush-" + std::to_string(i));
+    // }
+
+    const auto num_workers = 4;
+    std::vector<std::shared_ptr<hedge::async::executor_context>> flush_pool;
+    flush_pool.reserve(num_workers);
+
+    for(int i = 0; i < num_workers; i++)
+        flush_pool.emplace_back(hedge::async::executor_context::make_new(32));
+
+    auto writer_executors_shared = hedge::async::executor_pool::static_pool().executors();
+    std::vector<hedge::async::executor_context*> writer_executors;
+    writer_executors.reserve(writer_executors_shared.size());
+    for(auto& ex : writer_executors_shared)
+        writer_executors.push_back(ex.get());
+
     hedge::db::memtable mt(
         cfg,
         /*num_partition_exponent=*/4,
         /*indices_path=*/"/tmp/indices_test", &flush_epoch,
-        /*push_new_indices=*/[](std::vector<hedge::db::sst> /*new_indices*/, std::span<std::shared_ptr<hedge::async::executor_context>> /*pool*/) {},
+        /*push_new_indices=*/[](std::vector<hedge::db::sst>) {},
         /*trigger_compaction_callback=*/[] {},
-        /*page_cache=*/nullptr);
+        /*page_cache=*/nullptr,
+        /*flush_executor_pool=*/std::move(flush_pool),
+        /*writer_executors=*/std::move(writer_executors));
 
     auto wg = hedge::async::wait_group::make_shared();
     wg->set(N_EXECUTORS);
@@ -145,7 +168,7 @@ int main()
     for(size_t tid = 0; tid < N_EXECUTORS; ++tid)
     {
         auto task = make_put_task(&mt, tid, N, N_EXECUTORS, wg.get());
-        hedge::async::executor_pool::executor_from_static_pool()->submit_io_task(std::move(task));
+        hedge::async::executor_pool::executor_from_static_pool()->submit_io_task(std::move(task), hedge::async::request_priority::HIGH);
     }
 
     wg->wait();

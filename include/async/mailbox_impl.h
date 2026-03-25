@@ -634,19 +634,76 @@ namespace hedge::async
     };
 
     // Hack for transferring coros
+    struct continuation_request;
+    struct continuation_response;
+    struct continuation_mailbox;
+
+    struct continuation_request
+    {
+        using response_t = continuation_response;
+        using mailbox_t = continuation_mailbox;
+    };
+
+    struct continuation_response
+    {
+    };
+
     struct continuation_mailbox : mailbox_base<continuation_mailbox>
     {
-        char request;
+        using response_t = continuation_response;
+        using mailbox_t = continuation_mailbox;
+
+        continuation_request request{};
+        continuation_response response{};
 
         void prepare_sqe(io_uring_sqe*) {}
         void handle_cqe(io_uring_cqe*) {}
 
         void* get_response()
         {
-            assert(false);
-            return nullptr;
+            return &response;
         }
     };
+    //
+
+    struct send_msg_request;
+    struct send_msg_response;
+    struct send_msg_mailbox;
+
+    struct send_msg_request
+    {
+        using response_t = send_msg_response;
+        using mailbox_t = send_msg_mailbox;
+        int32_t target_ring_fd = -1;
+        uint64_t data{};
+        int32_t len{};
+    };
+
+    struct send_msg_response
+    {
+        int32_t res;
+    };
+
+    struct send_msg_mailbox : mailbox_base<send_msg_mailbox>
+    {
+        using response_t = send_msg_response;
+        using mailbox_t = send_msg_mailbox;
+
+        send_msg_mailbox(send_msg_request req)
+            : request(std::move(req)) {}
+
+        send_msg_request request{};
+        send_msg_response response{};
+
+        void prepare_sqe(io_uring_sqe*);
+        void handle_cqe(io_uring_cqe*);
+
+        void* get_response()
+        {
+            return &response;
+        }
+    };
+    //
 
     // NOLINTEND (*-readability-convert-member-functions-to-static)
 

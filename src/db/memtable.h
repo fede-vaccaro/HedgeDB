@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include "async/atomic.h"
+#include "async/async_cond_var.h"
 #include "async/io_executor.h"
 #include "btree.h"
 #include "cache.h"
@@ -32,7 +34,6 @@ namespace hedge::db
         bool auto_compaction = true;
         bool use_odirect = true;
         size_t num_writer_threads = 256; // (quite) safe upper bound
-        size_t flush_io_workers = 4;
         bool use_wal = true;
         /* bool use_fsync = false; // NOT IMPLEMENTED */
         bool fdatasync_flushed_sst = true;
@@ -122,7 +123,7 @@ namespace hedge::db
 
         // DB state & callbacks
         std::atomic_size_t* _flush_epoch{};
-        std::function<void(std::vector<sst>, std::span<std::shared_ptr<async::executor_context>>)> _push_new_indices;
+        std::function<void(std::vector<sst>)> _push_new_indices;
         std::function<void()> _trigger_compaction_callback;
         std::atomic_bool* _compaction_backpressure{};
 
@@ -133,7 +134,7 @@ namespace hedge::db
         using rw_sync_table_t = async::rw_sync<memtable_with_arena_t>;
         using rw_sync_table_ptr_t = std::shared_ptr<rw_sync_table_t>;
 
-        alignas(64) std::atomic<rw_sync_table_ptr_t> _table;
+        alignas(64) async::atomic<rw_sync_table_ptr_t> _table;
         alignas(64) std::atomic_bool _flush_mutex;
         alignas(64) std::atomic_size_t _wal_epoch{0};
         alignas(64) std::atomic<rw_sync_table_ptr_t> _pipelined_table;
@@ -142,10 +143,10 @@ namespace hedge::db
         static constexpr size_t MAX_PENDING_FLUSHES = 8;
         alignas(64) std::atomic_size_t _table_switch_epoch;
         alignas(64) mutable std::shared_mutex _pending_flushes_mutex;
-        alignas(64) std::condition_variable_any _pending_flushes_cv;
+        async::cond_var _pending_flushes_cv;
         std::map<size_t, rw_sync_table_ptr_t> _pending_flushes;
 
-        async::worker _flusher;
+        async::worker _flusher = async::worker("flush-wrk");
         std::thread _table_maker;
         std::atomic_bool _running{true};
         std::vector<std::shared_ptr<async::executor_context>> _flush_executor_pool;
@@ -161,9 +162,11 @@ namespace hedge::db
                  size_t num_partition_exponent,
                  std::filesystem::path indices_path,
                  std::atomic_size_t* flush_epoch_ptr,
-                 std::function<void(std::vector<sst>, std::span<std::shared_ptr<async::executor_context>>)> push_new_indices,
+                 std::function<void(std::vector<sst>)> push_new_indices,
                  std::function<void()> compaction_callback,
                  std::shared_ptr<db::sharded_page_cache> page_cache,
+                 std::vector<std::shared_ptr<async::executor_context>> flush_executor_pool,
+                 std::vector<async::executor_context*> writer_executors,
                  std::atomic_bool* compaction_backpressure = nullptr);
 
         ~memtable();
@@ -195,7 +198,7 @@ namespace hedge::db
         }
 
     private:
-        hedge::status _append_to_wal(int32_t fd, uint32_t seq_nr, const key_t& key, std::span<const uint8_t> value);
+        async::task<hedge::status> _append_to_wal(int32_t fd, uint32_t seq_nr, const key_t& key, std::span<const uint8_t> value);
 
         struct wal_batch_meta
         {
@@ -210,7 +213,7 @@ namespace hedge::db
             std::span<const wal_batch_meta> meta,
             std::span<const std::span<const uint8_t>> value_spans);
 
-        bool _flush(rw_sync_table_ptr_t expected_table);
+        async::task<bool> _flush(rw_sync_table_ptr_t expected_table);
     };
 
 } // namespace hedge::db

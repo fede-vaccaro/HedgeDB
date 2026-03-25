@@ -71,7 +71,8 @@ namespace hedge::db
             uint32_t new_file_id, // NB: A File ID is not a File Descriptor
             size_t write_offset,
             const std::shared_ptr<sharded_page_cache>& cache,
-            const std::shared_ptr<async::executor_context>& executor)
+            const std::shared_ptr<async::executor_context>& executor,
+            async::request_priority pri = async::request_priority::MEDIUM)
         {
             this->_block_writer.force_commit();
 
@@ -79,10 +80,11 @@ namespace hedge::db
             assert(hedge::is_page_aligned(bytes_written));
 
             auto awaitable_write_response = executor->submit_request(async::write_request{
-                .fd = output_fd,
-                .data = this->_buf.begin(),
-                .size = bytes_written,
-                .offset = write_offset});
+                                                                         .fd = output_fd,
+                                                                         .data = this->_buf.begin(),
+                                                                         .size = bytes_written,
+                                                                         .offset = write_offset},
+                                                                     pri);
 
             // Yielding has the purpose to allow the executor/io_uring to start processing the request while we reset the cache
             co_await async::this_thread_executor()->yield();

@@ -37,7 +37,6 @@ namespace hedge::db
             size_t max_merge_width;
             double bucket_ratio;
             size_t compaction_read_ahead_size_bytes;
-            size_t compaction_io_workers;
             bool use_odirect_for_indices;
             std::filesystem::path indices_path;
         };
@@ -45,14 +44,15 @@ namespace hedge::db
         sst_manager() = default;
 
         explicit sst_manager(const config& cfg,
-                             std::shared_ptr<sharded_page_cache> page_cache);
+                             std::shared_ptr<sharded_page_cache> page_cache,
+                             std::vector<std::shared_ptr<async::executor_context>> executor_pool);
 
         static hedge::expected<std::unique_ptr<sst_manager>> load(const config& cfg,
-                                                                   std::shared_ptr<sharded_page_cache> page_cache);
+                                                                   std::shared_ptr<sharded_page_cache> page_cache,
+                                                                   std::vector<std::shared_ptr<async::executor_context>> executor_pool);
 
         // Called by memtable flush callback
-        void push_indices(std::vector<sst> new_indices,
-                          std::span<std::shared_ptr<async::executor_context>> executors);
+        void push_indices(std::vector<sst> new_indices);
 
         // SST lookup for the read path
         async::task<expected<value_t>> lookup_async(const key_t& key, size_t matching_partition_id);
@@ -114,7 +114,7 @@ namespace hedge::db
         size_t _compactor_executor_id{0};
         std::atomic_size_t _compaction_jobs_in_flight{0};
 
-        async::worker _compaction_worker{};
+        async::worker _compaction_worker = async::worker("compact-wrk");
 
         std::shared_ptr<sharded_page_cache> _page_cache;
 

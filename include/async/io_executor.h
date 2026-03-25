@@ -1,15 +1,19 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <coroutine>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <future>
 #include <liburing.h>
 #include <liburing/io_uring.h>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <thread>
 #include <tsl/robin_map.h>
 #include <tsl/sparse_map.h>
@@ -18,6 +22,7 @@
 #include <logger.h>
 
 #include "mailbox.h"
+#include "mailbox_impl.h"
 #include "mpsc.h"
 #include "task.h"
 
@@ -69,6 +74,22 @@ namespace hedge::async
         6. mailbox.handle_cqe() → populate response
         7. mailbox.resume() → coroutine continues
     */
+    template <typename T>
+    void push_item_heap(std::vector<T>& heap, T item)
+    {
+        heap.push_back(std::move(item));
+        std::push_heap(heap.begin(), heap.end());
+    }
+
+    template <typename T>
+    T pop_item_heap(std::vector<T>& heap)
+    {
+        std::pop_heap(heap.begin(), heap.end());
+        auto item = std::move(heap.back());
+        heap.pop_back();
+        return item;
+    }
+
     struct executor_config
     {
         int32_t loops_before_sleeping = 0;
@@ -76,6 +97,13 @@ namespace hedge::async
     };
 
     class executor_pool;
+
+    enum class request_priority : uint8_t
+    {
+        HIGH = 0,
+        MEDIUM = 1,
+        LOW = 2
+    };
 
     class executor_context : public std::enable_shared_from_this<executor_context>
     {
@@ -96,15 +124,51 @@ namespace hedge::async
 
         uint64_t _current_request_id{0};
 
-        tsl::robin_map<uint64_t, std::unique_ptr<mailbox>> _in_flight_requests;
+        struct mailbox_ptr_with_pri_t
+        {
+            std::unique_ptr<mailbox> mbox;
+            request_priority pri;
+
+            bool operator<(const mailbox_ptr_with_pri_t& other) const
+            {
+                return this->pri > other.pri;
+            };
+        };
+
+        tsl::robin_map<uint64_t, mailbox_ptr_with_pri_t> _in_flight_requests;
         std::unordered_map<std::coroutine_handle<>, task<void>> _in_progress_tasks;
 
-        std::deque<std::unique_ptr<mailbox>> _waiting_for_io_queue;
-        std::deque<std::unique_ptr<mailbox>> _io_ready_queue;
+        using task_queue_t = std::deque<std::unique_ptr<mailbox>>;
+
+        struct queues_empty
+        {
+            template <typename QTYPE>
+            bool operator()(const std::array<QTYPE, 3>& queues)
+            {
+                return std::ranges::all_of(queues, [](const auto& q)
+                                           { return q.empty(); });
+            }
+        };
+
+        struct queues_size
+        {
+            template <typename QTYPE>
+            size_t operator()(const std::array<QTYPE, 3>& queues)
+            {
+                return std::accumulate(queues.begin(), queues.end(), 0ULL, [](size_t acc, const auto& q)
+                                       { return acc + q.size(); });
+            }
+        };
+
+        static int32_t _pop_n(std::vector<mailbox_ptr_with_pri_t>& out, task_queue_t& queue, request_priority out_pri, size_t n);
+
+        std::array<std::deque<async::task<>>, 3> _new_tasks_queues;
+        std::array<task_queue_t, 3> _waiting_for_io_queues;
+        std::array<task_queue_t, 3> _io_ready_queues;
 
         alignas(64) std::atomic_bool _sleep{false};
 
-        async::mpsc_queue<task<void>, 1024> _pending_requests;
+        async::mpsc_queue<std::pair<task<void>, request_priority>, 1024> _pending_requests;
 
         std::vector<int32_t> _registered_fds;
 
@@ -134,13 +198,12 @@ namespace hedge::async
             return future.get();
         }
 
-        void submit_io_task(task<void> task);      // do NOT call this from a task, otherwise it will deadlock! TODO: address this
-        bool try_submit_io_task(task<void>& task); // do NOT call this from a task, otherwise it will deadlock! TODO: address this
+        void submit_io_task(task<void> task, request_priority pri = request_priority::MEDIUM);
+        bool try_submit_io_task(task<void>& task);
 
         void shutdown();
 
-        // TODO: enforce that this is callable only from this_thread_executor()
-        auto submit_request(auto request)
+        auto submit_request(auto request, request_priority pri = request_priority::MEDIUM)
         {
             using request_t = std::decay_t<decltype(request)>;
 
@@ -148,9 +211,36 @@ namespace hedge::async
 
             auto awaitable = awaitable_mailbox<typename request_t::response_t>{new_mailbox.get()};
 
-            this->_waiting_for_io_queue.emplace_back(std::move(new_mailbox));
+            this->_waiting_for_io_queues[static_cast<size_t>(pri)].emplace_back(std::move(new_mailbox));
 
             return awaitable;
+        }
+
+        static constexpr size_t WAKE_MSG_BIT_FLAG = 1UL << 63;
+
+        size_t wait(std::coroutine_handle<> this_coro_handle)
+        {
+            std::unique_ptr<mailbox> wait_mailbox = std::make_unique<mailbox>(continuation_mailbox{});
+
+            wait_mailbox->set_continuation(this_coro_handle);
+
+            size_t request_id = this->_current_request_id++;
+
+            /// not okay, we should group together every handle related to the same mutex
+            /// come identificarli?
+            /// - potrei usare il MSB per flaggare una coro bloccata su un mutex
+            /// - pero' ogni mutex (non sono mutex) dovrebbe avere un ID
+            /// - - - qualcosa tipo executor register_mutex presso un executor? e poi si fa push back sul vector
+            /// complicazione: inviare la sqe puo' fallire
+            ///    potrei fare prepare+submit sqe immediatamente e poi controllare il risultato (come?) e in caso riprovare
+            ///    forse la cosa piu' ragionevole e' fare una mailbox e farci co_await di sopra in modo tale che venga sottomessa ASAP
+            /// complicazione: la recezione delle cqe puo' andare in overflow e fallire
+            ///    soluzione: IORING_FEAT_NODROP + oversizing
+            auto [it, ok] = this->_in_flight_requests.emplace(request_id, std::move(wait_mailbox));
+
+            assert(ok);
+
+            return request_id;
         }
 
         // TODO: enforce that this is callable only from this_thread_executor()
@@ -176,13 +266,127 @@ namespace hedge::async
             // make continuation mailbox
             auto continuation_mailbox = std::make_unique<mailbox>(async::continuation_mailbox{});
             continuation_mailbox->set_continuation(continuation);
-            this->_io_ready_queue.push_front(std::move(continuation_mailbox));
+            this->_io_ready_queues[static_cast<size_t>(request_priority::HIGH)].emplace_back(std::move(continuation_mailbox));
         }
 
         // TODO: enforce that this is callable only from this_thread_executor()
         auto yield()
         {
             return this->submit_request(yield_request{});
+        }
+
+        [[nodiscard]] io_uring* ring()
+        {
+            return &this->_ring;
+        }
+
+        tsl::robin_map<int32_t, std::vector<std::coroutine_handle<>>> _waiting_coros = []()
+        {
+            tsl::robin_map<int32_t, std::vector<std::coroutine_handle<>>> m;
+            m.reserve(32); // Initialize for 32 mutexes
+            return m;
+        }();
+
+        static void register_mutex(int32_t* mutex_id)
+        {
+            static std::atomic_int32_t mutex_counter{0};
+
+            int32_t exp = -1;
+            std::atomic_ref(*mutex_id).compare_exchange_strong(
+                exp,
+                mutex_counter.fetch_add(1, std::memory_order::relaxed),
+                std::memory_order::relaxed,
+                std::memory_order::relaxed);
+        }
+
+        template <typename LOCK>
+        struct awaitable_enque
+        {
+            LOCK& lk;
+            int32_t mutex_id;
+            executor_context* ex;
+
+            bool await_ready()
+            {
+                return false;
+            }
+
+            std::coroutine_handle<> await_suspend(std::coroutine_handle<> h)
+            {
+                auto it = ex->_waiting_coros.find(mutex_id);
+                if(it == ex->_waiting_coros.end())
+                {
+                    auto v = std::vector<std::coroutine_handle<>>{};
+                    v.reserve(32);
+                    it = ex->_waiting_coros.insert({mutex_id, std::move(v)}).first;
+                }
+
+                it.value().emplace_back(h);
+                lk.unlock();
+
+                return std::noop_coroutine();
+            }
+
+            void await_resume()
+            {
+            }
+        };
+
+        template <typename LOCK>
+        awaitable_enque<LOCK> enque_coro(LOCK& lk, int32_t mutex_id)
+        {
+            return {lk, mutex_id, this};
+        }
+
+        template <typename T>
+        struct awaitable_enque_atomic
+        {
+            std::atomic<T>& value;
+            T old;
+            std::memory_order order;
+            int32_t mutex_id;
+            executor_context* ex;
+
+            bool await_ready()
+            {
+                return false;
+            }
+
+            std::coroutine_handle<> await_suspend(std::coroutine_handle<> h)
+            {
+                auto it = ex->_waiting_coros.find(mutex_id);
+                if(it == ex->_waiting_coros.end())
+                {
+                    auto v = std::vector<std::coroutine_handle<>>{};
+                    v.reserve(32);
+                    it = ex->_waiting_coros.insert({mutex_id, std::move(v)}).first;
+                }
+
+                it.value().emplace_back(h);
+
+                if(value.load(order) != old)
+                {
+                    it.value().pop_back();
+                    return h;
+                }
+
+                return std::noop_coroutine();
+            }
+
+            void await_resume()
+            {
+            }
+        };
+
+        template <typename T>
+        awaitable_enque_atomic<T> enque_coro_atomic(std::atomic<T>& value, T old, std::memory_order order, int32_t mutex_id)
+        {
+            return {value, old, order, mutex_id, this};
+        }
+
+        [[nodiscard]] int32_t uring_fd() const
+        {
+            return this->_ring.ring_fd;
         }
 
         void register_fd(int32_t fd);
@@ -202,6 +406,12 @@ namespace hedge::async
         void register_page_buffers(const std::vector<uint8_t*>& buffers);
         std::vector<iovec> _registered_page_buffers;
 
+        void wake()
+        {
+            this->_sleep.store(false, std::memory_order::relaxed);
+            this->_sleep.notify_one();
+        }
+
     private:
         explicit executor_context(uint32_t queue_depth); // use executor_context::make_new instead
 
@@ -212,6 +422,9 @@ namespace hedge::async
         void _wait_and_submit(bool wait_for_cqe);
         void _event_loop();
         void _gc_tasks();
+
+        void _process_cqe_normal(io_uring_cqe* cqe);
+        void _process_cqe_uring_msg(io_uring_cqe* cqe);
 
         [[nodiscard]] bool _should_sleep() const;
         std::vector<io_uring_sqe*>& _fill_sqes(size_t sqes_requested);

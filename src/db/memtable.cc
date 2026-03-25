@@ -19,6 +19,7 @@
 #include "index_ops.h"
 #include "io_executor.h"
 #include "key.h"
+#include "mailbox_impl.h"
 #include "memtable.h"
 #include "spinlock.h"
 #include "types.h"
@@ -131,9 +132,11 @@ namespace hedge::db
                        size_t num_partition_exponent,
                        std::filesystem::path indices_path,
                        std::atomic_size_t* flush_epoch_ptr,
-                       std::function<void(std::vector<sst>, std::span<std::shared_ptr<async::executor_context>>)> push_new_indices,
+                       std::function<void(std::vector<sst>)> push_new_indices,
                        std::function<void()> trigger_compaction_callback,
                        std::shared_ptr<db::sharded_page_cache> page_cache,
+                       std::vector<std::shared_ptr<async::executor_context>> flush_executor_pool,
+                       std::vector<async::executor_context*> writer_executors,
                        std::atomic_bool* compaction_backpressure)
         : _cfg(cfg),
           _num_partition_exponent(num_partition_exponent),
@@ -143,53 +146,13 @@ namespace hedge::db
           _trigger_compaction_callback(std::move(trigger_compaction_callback)),
           _compaction_backpressure(compaction_backpressure),
           _cache(std::move(page_cache)),
+          _table(writer_executors),
+          _pending_flushes_cv(writer_executors),
+          _flush_executor_pool(std::move(flush_executor_pool)),
           _logger("memtable")
     {
-        this->_table = this->make_memtable();
+        this->_table.store(this->make_memtable());
         this->_pipelined_table = this->make_memtable();
-
-        this->_flush_executor_pool.resize(this->_cfg.flush_io_workers);
-        // size_t starting_affinity_idx = async::executor_pool::static_pool().size();
-        // size_t starting_affinity_idx = 12;
-        size_t i = 0;
-        for(auto& ex : this->_flush_executor_pool)
-        {
-            ex = async::executor_context::make_new(32, async::executor_config{
-                                                           .loops_before_sleeping = 0,
-                                                           .loops_before_yielding = 0});
-            ex->set_thread_name("mem-flusher-" + std::to_string(i));
-            i++;
-
-            // ex->sync_submit(async::executor_context::set_affinity(starting_affinity_idx + c));
-            // ++c;
-        }
-
-        // size_t slave_workers = this->_cfg.flush_io_workers > 0 ? this->_cfg.flush_io_workers - 1 : 0;
-        // this->_flush_worker_pool.resize(slave_workers);
-        // for(auto& w : this->_flush_worker_pool)
-        // {
-        //     w = std::make_unique<async::worker>();
-        //     w->submit([idx = starting_affinity_idx + c]()
-        //               { auto t = async::executor_context::set_affinity(idx);
-        //                 t.resume(); });
-        // }
-        // this->_table_maker = std::thread(
-        //     [this]()
-        //     {
-        //         while(this->_running.load(std::memory_order::relaxed))
-        //         {
-        //             auto curr = this->_pipelined_table.load(std::memory_order::relaxed);
-
-        //             if(curr != nullptr)
-        //                 this->_pipelined_table.wait(curr, std::memory_order_relaxed);
-
-        //             if(this->_running.load(std::memory_order::relaxed))
-        //             {
-        //                 this->_pipelined_table.store(make_memtable(), std::memory_order_relaxed);
-        //                 this->_pipelined_table.notify_one();
-        //             }
-        //         }
-        //     });
     }
 
     memtable::~memtable()
@@ -202,7 +165,7 @@ namespace hedge::db
             this->_table_maker.join();
     }
 
-    hedge::status memtable::_append_to_wal(int32_t fd, uint32_t seq_nr, const key_t& key, std::span<const uint8_t> value)
+    async::task<hedge::status> memtable::_append_to_wal(int32_t fd, uint32_t seq_nr, const key_t& key, std::span<const uint8_t> value)
     {
         uint8_t encoded_key_size = hedge::encode_key_size(key.size());
         auto value_size = static_cast<uint16_t>(value.size());
@@ -233,13 +196,23 @@ namespace hedge::db
         const size_t expected_bytes = sizeof(uint32_t) + sizeof(uint8_t) + key.size() + sizeof(uint16_t) + value.size();
 
         int32_t res = pwritev2(fd, wal_entry.data(), wal_entry.size(), -1 /* File is opened with O_APPEND */, 0);
+        // auto res = co_await async::this_thread_executor()->submit_request(async::writev_request{
+        //                                                                       .fd = fd,
+        //                                                                       .iovecs = wal_entry.data(),
+        //                                                                       .iovecs_count = static_cast<int>(wal_entry.size()),
+        //                                                                       .offset = 0, // File is opened with O_APPEND
+        //                                                                   },
+        //                                                                   async::request_priority::HIGH);
+
+
+
         if(res < 0)
-            return hedge::error("could not write into wal: " + std::string(strerror(errno)));
+            co_return hedge::error("could not write into wal: " + std::string(strerror(errno)));
 
-        if(static_cast<size_t>(res) != expected_bytes)
-            return hedge::error("partial write into wal: " + std::to_string(res) + " != " + std::to_string(expected_bytes));
+        if(size_t(res) != expected_bytes)
+            co_return hedge::error("partial write into wal: " + std::to_string(res) + " != " + std::to_string(expected_bytes));
 
-        return hedge::ok();
+        co_return hedge::ok();
     }
 
     async::task<hedge::status> memtable::put_async(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type)
@@ -265,21 +238,18 @@ namespace hedge::db
                 auto t = this->_table.load(std::memory_order::relaxed);
                 if(t == local_memtable_ref) // Backpressure
                 {
-
-                    constexpr size_t ATTEMPTS_BEFORE_BACKPRESSURE = 4;
+                    constexpr size_t ATTEMPTS_BEFORE_BACKPRESSURE = 0;
 
                     if(insert_attempts++ < ATTEMPTS_BEFORE_BACKPRESSURE)
                     {
                         folly::detail::asm_volatile_pause();
+                        continue;
                     }
-                    else
-                    {
-                        BACKPRESSURE.fetch_add(1, std::memory_order::relaxed);
-                        // this->_table.wait(t, std::memory_order::relaxed);
-                        // std::this_thread::yield();
-                        // co_await async::this_thread_executor()->yield();
-                        co_await async::this_thread_executor()->submit_request(async::sleep_request{.nanoseconds = 64});
-                    }
+
+                    BACKPRESSURE.fetch_add(1, std::memory_order::relaxed);
+                    co_await this->_table.wait(local_memtable_ref, std::memory_order::relaxed);
+                    local_memtable_ref = this->_table.load(std::memory_order::relaxed);
+                    insert_attempts = 0;
                     continue;
                 }
 
@@ -305,14 +275,9 @@ namespace hedge::db
 
             if(!ok || memtable->bytes_written.fetch_add(key.size() + value.size() + 1, std::memory_order_relaxed) > this->_cfg.memory_budget_cap) [[unlikely]]
             {
-                bool this_thread_flushed = this->_flush(local_memtable_ref);
+                bool this_thread_flushed = co_await this->_flush(local_memtable_ref);
                 if(!this_thread_flushed)
-                {
                     folly::detail::asm_volatile_pause();
-
-                    // std::this_thread::yield();
-                    // folly::detail::asm_volatile_pause();
-                }
                 continue;
             }
 
@@ -320,7 +285,7 @@ namespace hedge::db
             if(!this->_cfg.use_wal)
                 co_return hedge::ok();
 
-            co_return this->_append_to_wal(memtable->per_thread_wals[THIS_THREAD_IDX].fd(), seq_nr, key, value_span);
+            co_return co_await this->_append_to_wal(memtable->per_thread_wals[THIS_THREAD_IDX].fd(), seq_nr, key, value_span);
         }
     }
 
@@ -387,14 +352,7 @@ namespace hedge::db
 
             if(!ok || memtable->bytes_written.fetch_add(key.size() + value.size() + 1, std::memory_order_relaxed) > this->_cfg.memory_budget_cap) [[unlikely]]
             {
-                bool this_thread_flushed = this->_flush(local_memtable_ref);
-                if(!this_thread_flushed)
-                {
-                    folly::detail::asm_volatile_pause();
-
-                    // std::this_thread::yield();
-                    // folly::detail::asm_volatile_pause();
-                }
+                assert(false && "sync put does not support flush (use put_async)");
                 continue;
             }
 
@@ -402,7 +360,7 @@ namespace hedge::db
             if(!this->_cfg.use_wal)
                 return hedge::ok();
 
-            return this->_append_to_wal(memtable->per_thread_wals[THIS_THREAD_IDX].fd(), seq_nr, key, value_span);
+            // return co_await this->_append_to_wal(memtable->per_thread_wals[THIS_THREAD_IDX].fd(), seq_nr, key, value_span);
         }
     }
 
@@ -468,12 +426,13 @@ namespace hedge::db
                     if(insert_attempts++ < ATTEMPTS_BEFORE_BACKPRESSURE)
                     {
                         folly::detail::asm_volatile_pause();
+                        continue;
                     }
-                    else
-                    {
-                        BACKPRESSURE.fetch_add(1, std::memory_order::relaxed);
-                        co_await async::this_thread_executor()->submit_request(async::sleep_request{.nanoseconds = 64});
-                    }
+
+                    BACKPRESSURE.fetch_add(1, std::memory_order::relaxed);
+                    co_await this->_table.wait(local_memtable_ref, std::memory_order::relaxed);
+                    local_memtable_ref = this->_table.load(std::memory_order::relaxed);
+                    insert_attempts = 0;
                     continue;
                 }
 
@@ -519,7 +478,7 @@ namespace hedge::db
 
             if(!all_ok || memtable->bytes_written.fetch_add(total_bytes, std::memory_order_relaxed) > this->_cfg.memory_budget_cap) [[unlikely]]
             {
-                bool this_thread_flushed = this->_flush(local_memtable_ref);
+                bool this_thread_flushed = co_await this->_flush(local_memtable_ref);
                 if(!this_thread_flushed)
                     folly::detail::asm_volatile_pause();
                 continue;
@@ -618,7 +577,7 @@ namespace hedge::db
         return future;
     }
 
-    bool memtable::_flush(rw_sync_table_ptr_t expected_table)
+    async::task<bool> memtable::_flush(rw_sync_table_ptr_t expected_table)
     {
         bool expected = false;
 
@@ -629,31 +588,32 @@ namespace hedge::db
             if(this->_table.load(std::memory_order::relaxed) != expected_table)
             {
                 this->_flush_mutex.store(false);
-                return false;
+                co_return false;
             }
 
             size_t curr_flush_epoch = this->_flush_epoch->fetch_add(1, std::memory_order::relaxed);
             rw_sync_table_ptr_t memtable_to_flush{};
 
             expected_table->freeze_writes();
-            // this->_pipelined_table.wait(nullptr, std::memory_order::relaxed);
 
             {
                 std::unique_lock lk(this->_pending_flushes_mutex);
 
-                this->_pending_flushes_cv.wait(lk, [this]()
-                                               { 
-                                                // if(this->_pending_flushes.size() >= MAX_PENDING_FLUSHES)
-                                                    // this->_logger.log("Flush waiting, pending flushes: ", this->_pending_flushes.size());
-                                                return this->_pending_flushes.size() < MAX_PENDING_FLUSHES; });
+                co_await this->_pending_flushes_cv.wait(lk, [this]()
+                                                        { 
+                                                            // if(this->_pending_flushes.size() >= MAX_PENDING_FLUSHES)
+                                                                // std::cout << "Stalling pending flushes: " << this->_pending_flushes.size() << std::endl;
+
+                                                            return this->_pending_flushes.size() < MAX_PENDING_FLUSHES; });
 
                 rw_sync_table_ptr_t next_in_pipeline = this->_pipelined_table.exchange(nullptr);
-                // this->_pipelined_table.notify_one(); // Notify the table_maker thread
 
                 memtable_to_flush = this->_table.exchange(next_in_pipeline, std::memory_order::relaxed);
-                this->_table.notify_all(); // Notify every thread waiting for the new memtable to
                 this->_pending_flushes.insert({curr_flush_epoch, memtable_to_flush});
             }
+
+            co_await this->_table.notify_all();
+
             // Publish new memtable to readers
             this->_table_switch_epoch.fetch_add(1, std::memory_order::release);
 
@@ -702,7 +662,7 @@ namespace hedge::db
 
                     {
                         std::unique_lock lk(this->_pending_flushes_mutex);
-                        this->_push_new_indices(std::move(partitioned_sorted_indices.value()), this->_flush_executor_pool);
+                        this->_push_new_indices(std::move(partitioned_sorted_indices.value()));
                         auto it = this->_pending_flushes.find(curr_flush_epoch);
                         assert(it->second == memtable_to_flush);
                         wals = std::move(it->second->ptr()->per_thread_wals);
@@ -711,7 +671,7 @@ namespace hedge::db
                     }
 
                     if(should_notify_flush)
-                        this->_pending_flushes_cv.notify_one();
+                        this->_pending_flushes_cv.notify_all(this->_flusher.ring());
 
                     bool under_pressure = this->_compaction_backpressure && this->_compaction_backpressure->load(std::memory_order::relaxed);
                     if(under_pressure)
@@ -735,10 +695,10 @@ namespace hedge::db
 
             // Release mutex
             this->_flush_mutex.store(false);
-            return true;
+            co_return true;
         }
 
-        return false;
+        co_return false;
     }
 
     hedge::status memtable::replay_wal()

@@ -14,6 +14,7 @@
 #include "db/sorted_index.h"
 #include "generator.h"
 #include "index_ops.h"
+#include "io_executor.h"
 #include "mailbox_impl.h"
 #include "page_aligned_buffer.h"
 #include "sst.h"
@@ -426,7 +427,7 @@ namespace hedge::db
         auto flush = [&]() -> async::task<hedge::status>
         {
             auto write_response = co_await write_buffer.flush(
-                fd, file_id, bytes_written, cache, executor);
+                fd, file_id, bytes_written, cache, executor, async::request_priority::MEDIUM);
 
             if(write_response.error_code)
                 co_return hedge::error("Failed to write index data: " + std::string(strerror(-write_response.error_code)));
@@ -908,20 +909,21 @@ namespace hedge::db
 
             const auto& executor = executor_pool[executor_id++ % executor_pool.size()];
             executor->submit_io_task(flush_partition_task(
-                std::move(path),
-                range.begin,
-                range.end,
-                range.count,
-                range.sum_key_value_lengths,
-                range.partition_id,
-                flush_iteration,
-                cache,
-                use_odirect,
-                &results_mutex,
-                &results,
-                &errors,
-                wg,
-                fdatasync_ssts));
+                                         std::move(path),
+                                         range.begin,
+                                         range.end,
+                                         range.count,
+                                         range.sum_key_value_lengths,
+                                         range.partition_id,
+                                         flush_iteration,
+                                         cache,
+                                         use_odirect,
+                                         &results_mutex,
+                                         &results,
+                                         &errors,
+                                         wg,
+                                         fdatasync_ssts),
+                                     async::request_priority::MEDIUM);
 
             range_count++;
         }

@@ -200,6 +200,28 @@ namespace hedge::async
         }
     };
 
+    struct get_this_coro_handle
+    {
+        bool await_ready()
+        {
+            return false;
+        }
+
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<> h)
+        {
+            this->_h = h;
+            return h;
+        }
+
+        std::coroutine_handle<> await_resume()
+        {
+            return this->_h;
+        }
+
+    private:
+        std::coroutine_handle<> _h;
+    };
+
 } // namespace hedge::async
 
 namespace std

@@ -28,20 +28,10 @@ namespace hedge::db
 {
 
     sst_manager::sst_manager(const config& cfg,
-                             std::shared_ptr<sharded_page_cache> page_cache)
-        : _cfg(cfg), _page_cache(std::move(page_cache))
+                             std::shared_ptr<sharded_page_cache> page_cache,
+                             std::vector<std::shared_ptr<async::executor_context>> executor_pool)
+        : _cfg(cfg), _compation_executor_pool(std::move(executor_pool)), _page_cache(std::move(page_cache))
     {
-        _compation_executor_pool.resize(cfg.compaction_io_workers);
-        // auto n_cpus = std::thread::hardware_concurrency();
-        auto i = 0;
-        for(auto& ex : _compation_executor_pool)
-        {
-            ex = async::executor_context::make_new(32, async::executor_config{
-                                                           .loops_before_sleeping = 0,
-                                                           .loops_before_yielding = 0});
-            ex->set_thread_name("cmpt-wrk-" + std::to_string(i));
-            ++i;
-        }
         size_t num_partitions = 1UL << cfg.num_partition_exponent;
         size_t partition_size = (1 << 16) / num_partitions;
         for(size_t i = 0; i < num_partitions; ++i)
@@ -54,9 +44,10 @@ namespace hedge::db
     }
 
     hedge::expected<std::unique_ptr<sst_manager>> sst_manager::load(const config& cfg,
-                                                                    std::shared_ptr<sharded_page_cache> page_cache)
+                                                                    std::shared_ptr<sharded_page_cache> page_cache,
+                                                                    std::vector<std::shared_ptr<async::executor_context>> executor_pool)
     {
-        auto mgr = std::make_unique<sst_manager>(cfg, page_cache);
+        auto mgr = std::make_unique<sst_manager>(cfg, page_cache, std::move(executor_pool));
 
         if(!std::filesystem::exists(cfg.indices_path))
             return mgr;
@@ -180,8 +171,7 @@ namespace hedge::db
         return mgr;
     }
 
-    void sst_manager::push_indices(std::vector<sst> new_indices,
-                                   std::span<std::shared_ptr<async::executor_context>> executors)
+    void sst_manager::push_indices(std::vector<sst> new_indices)
     {
         std::vector<uint16_t> affected_partitions;
 
@@ -214,7 +204,7 @@ namespace hedge::db
             unique.begin(),
             unique.end());
 
-        if(affected_partitions.empty() || executors.empty())
+        if(affected_partitions.empty() || this->_compation_executor_pool.empty())
             return;
 
         auto wg = async::wait_group::make_shared();
@@ -230,7 +220,7 @@ namespace hedge::db
 
         for(size_t i = 0; i < affected_partitions.size(); ++i)
         {
-            auto& executor = executors[i % executors.size()];
+            auto& executor = this->_compation_executor_pool[i % this->_compation_executor_pool.size()];
             executor->submit_io_task(make_persist_task(affected_partitions[i], wg));
         }
 

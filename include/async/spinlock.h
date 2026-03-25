@@ -1,5 +1,5 @@
 // Extracted from https://github.com/PacktPublishing/The-Art-of-Writing-Efficient-Programs/blob/master/Chapter07/spinlock.h
-#pragma once 
+#pragma once
 
 #include <atomic>
 #include <emmintrin.h>
@@ -9,7 +9,7 @@
 namespace hedge::async
 {
 
-    static constexpr timespec ns = {.tv_sec=0, .tv_nsec=1};
+    static constexpr timespec ns = {.tv_sec = 0, .tv_nsec = 1};
     inline void nanosleep(int& i)
     {
         if(++i == 32)
@@ -27,9 +27,10 @@ namespace hedge::async
         spinlock& operator=(const spinlock&) = delete;
         void lock()
         {
-            for(int i = 0; flag_.load(std::memory_order_relaxed) || flag_.exchange(1, std::memory_order_acquire);)
+            for(;(flag_.load(std::memory_order_relaxed) != 0U) || (flag_.exchange(1, std::memory_order_acquire) != 0U);)
             {
-                nanosleep(i);
+                // nanosleep(i);
+                _mm_pause();
             }
         }
         void unlock() { flag_.store(0, std::memory_order_release); }
