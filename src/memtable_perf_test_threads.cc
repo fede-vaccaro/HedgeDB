@@ -86,26 +86,12 @@ int main()
     cfg.use_odirect = true;
     cfg.use_wal = false;
     cfg.num_writer_threads = N_THREADS;
+    cfg.flush_io_workers = 4;
 
     static std::atomic_size_t flush_epoch{0};
 
     std::filesystem::remove_all("/tmp/indices_test_threads");
     std::filesystem::create_directories("/tmp/indices_test_threads");
-
-    std::vector<std::shared_ptr<hedge::async::executor_context>> flush_pool(4);
-    for(size_t i = 0; i < flush_pool.size(); ++i)
-    {
-        flush_pool[i] = hedge::async::executor_context::make_new(32, hedge::async::executor_config{
-                                                                          .loops_before_sleeping = 0,
-                                                                          .loops_before_yielding = 0});
-        flush_pool[i]->set_thread_name("flush-" + std::to_string(i));
-    }
-
-    auto writer_executors_shared = hedge::async::executor_pool::static_pool().executors();
-    std::vector<hedge::async::executor_context*> writer_executors;
-    writer_executors.reserve(writer_executors_shared.size());
-    for(auto& ex : writer_executors_shared)
-        writer_executors.push_back(ex.get());
 
     hedge::db::memtable mt(
         cfg,
@@ -113,9 +99,7 @@ int main()
         /*indices_path=*/"/tmp/indices_test_threads", &flush_epoch,
         /*push_new_indices=*/[](std::vector<hedge::db::sst>) {},
         /*trigger_compaction_callback=*/[] {},
-        /*page_cache=*/nullptr,
-        /*flush_executor_pool=*/std::move(flush_pool),
-        /*writer_executors=*/std::move(writer_executors));
+        /*page_cache=*/nullptr);
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -129,7 +113,7 @@ int main()
             // hedge::async::executor_context::set_affinity(tid).resume();
             for(size_t i = tid; i < N; i += N_THREADS)
             {
-                mt.put(make_key(i), DUMMY_VALUE, hedge::value_type::IN_PLACE_VALUE);
+                mt.put_sync(make_key(i), DUMMY_VALUE, hedge::value_type::IN_PLACE_VALUE);
             }
         });
     }

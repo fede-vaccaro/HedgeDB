@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <condition_variable>
 #include <future>
 #include <limits>
 #include <map>
@@ -34,6 +35,7 @@ namespace hedge::db
         bool auto_compaction = true;
         bool use_odirect = true;
         size_t num_writer_threads = 256; // (quite) safe upper bound
+        size_t flush_io_workers = 4;
         bool use_wal = true;
         /* bool use_fsync = false; // NOT IMPLEMENTED */
         bool fdatasync_flushed_sst = true;
@@ -140,10 +142,11 @@ namespace hedge::db
         alignas(64) std::atomic<rw_sync_table_ptr_t> _pipelined_table;
 
         // Pending flushes
-        static constexpr size_t MAX_PENDING_FLUSHES = 8;
+        static constexpr size_t MAX_PENDING_FLUSHES = 4;
         alignas(64) std::atomic_size_t _table_switch_epoch;
         alignas(64) mutable std::shared_mutex _pending_flushes_mutex;
         async::cond_var _pending_flushes_cv;
+        std::condition_variable_any _pending_flushes_cv_sync;
         std::map<size_t, rw_sync_table_ptr_t> _pending_flushes;
 
         async::worker _flusher = async::worker("flush-wrk");
@@ -165,8 +168,6 @@ namespace hedge::db
                  std::function<void(std::vector<sst>)> push_new_indices,
                  std::function<void()> compaction_callback,
                  std::shared_ptr<db::sharded_page_cache> page_cache,
-                 std::vector<std::shared_ptr<async::executor_context>> flush_executor_pool,
-                 std::vector<async::executor_context*> writer_executors,
                  std::atomic_bool* compaction_backpressure = nullptr);
 
         ~memtable();
@@ -177,7 +178,7 @@ namespace hedge::db
             std::span<const std::pair<key_t, std::vector<uint8_t>>> entries,
             hedge::value_type value_type);
 
-        hedge::status put(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type);
+        hedge::status put_sync(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type);
 
         std::optional<value_t> get(const key_t& key) const;
 
@@ -198,7 +199,7 @@ namespace hedge::db
         }
 
     private:
-        async::task<hedge::status> _append_to_wal(int32_t fd, uint32_t seq_nr, const key_t& key, std::span<const uint8_t> value);
+        hedge::status _append_to_wal(int32_t fd, uint32_t seq_nr, const key_t& key, std::span<const uint8_t> value);
 
         struct wal_batch_meta
         {
@@ -214,6 +215,7 @@ namespace hedge::db
             std::span<const std::span<const uint8_t>> value_spans);
 
         async::task<bool> _flush(rw_sync_table_ptr_t expected_table);
+        bool _flush_sync(rw_sync_table_ptr_t expected_table);
     };
 
 } // namespace hedge::db

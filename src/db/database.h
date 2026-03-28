@@ -63,8 +63,10 @@ namespace hedge::db
         size_t index_page_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024;
         /// Experimental; it's like a giant memtable; do not use
         size_t index_point_cache_size_bytes = 0;
-        /// Number of io_uring executor threads shared between flush and compaction
-        size_t io_workers = 4;
+        /// Number of background workers to be used for compaction
+        size_t compaction_io_workers = 4;
+        /// Number of io_uring executor threads for parallel memtable flush
+        size_t flush_io_workers = 4;
 
         size_t max_num_levels = 40;
 
@@ -113,9 +115,6 @@ namespace hedge::db
 
         // --- SST management and compaction ---
         std::unique_ptr<sst_manager> _sst_manager;
-
-        // --- Shared I/O executor pool (flush + compaction) ---
-        std::vector<std::shared_ptr<async::executor_context>> _io_pool;
 
         // --- Background Workers ---
         async::worker _value_table_worker{}; ///< Worker thread for instantiating new value tables

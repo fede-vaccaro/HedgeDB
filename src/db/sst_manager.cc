@@ -28,10 +28,17 @@ namespace hedge::db
 {
 
     sst_manager::sst_manager(const config& cfg,
-                             std::shared_ptr<sharded_page_cache> page_cache,
-                             std::vector<std::shared_ptr<async::executor_context>> executor_pool)
-        : _cfg(cfg), _compation_executor_pool(std::move(executor_pool)), _page_cache(std::move(page_cache))
+                             std::shared_ptr<sharded_page_cache> page_cache)
+        : _cfg(cfg), _page_cache(std::move(page_cache))
     {
+        _compation_executor_pool.resize(cfg.compaction_io_workers);
+        size_t idx = 0;
+        for(auto& ex : _compation_executor_pool)
+        {
+            ex = async::executor_context::make_new(32);
+            ex->set_thread_name("compact-wrk-" + std::to_string(idx++));
+        }
+
         size_t num_partitions = 1UL << cfg.num_partition_exponent;
         size_t partition_size = (1 << 16) / num_partitions;
         for(size_t i = 0; i < num_partitions; ++i)
@@ -44,10 +51,9 @@ namespace hedge::db
     }
 
     hedge::expected<std::unique_ptr<sst_manager>> sst_manager::load(const config& cfg,
-                                                                    std::shared_ptr<sharded_page_cache> page_cache,
-                                                                    std::vector<std::shared_ptr<async::executor_context>> executor_pool)
+                                                                    std::shared_ptr<sharded_page_cache> page_cache)
     {
-        auto mgr = std::make_unique<sst_manager>(cfg, page_cache, std::move(executor_pool));
+        auto mgr = std::make_unique<sst_manager>(cfg, page_cache);
 
         if(!std::filesystem::exists(cfg.indices_path))
             return mgr;

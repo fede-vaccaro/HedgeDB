@@ -279,3 +279,11 @@ target_link_libraries(index_merge gtest gtest_main uring atomic)
 # concurrent_skiplist tests
 add_executable(concurrent_skiplist_test test/concurrent_skiplist.spec.cc)
 target_link_libraries(concurrent_skiplist_test gtest gtest_main atomic tcmalloc)
+
+
+# async cond var test
+add_executable(async_cond_var_test ${IO_EXECUTOR_SRCS} test/async_cond_var_test.cc)
+target_link_libraries(async_cond_var_test uring atomic tcmalloc)
+
+add_executable(async_cond_var_notify_test ${IO_EXECUTOR_SRCS} test/async_cond_var_notify_test.cc)
+target_link_libraries(async_cond_var_notify_test uring atomic tcmalloc)

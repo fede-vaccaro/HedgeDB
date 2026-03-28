@@ -36,12 +36,6 @@ namespace hedge::db
 
     void database::_init_memtable(database& db, const db_config& config)
     {
-        auto writer_executors_shared = async::executor_pool::static_pool().executors();
-        std::vector<async::executor_context*> writer_executors;
-        writer_executors.reserve(writer_executors_shared.size());
-        for(auto& ex : writer_executors_shared)
-            writer_executors.push_back(ex.get());
-
         db._memtable.~memtable();
         auto* memtable_mem = &db._memtable;
         ::new(memtable_mem) memtable(
@@ -51,6 +45,7 @@ namespace hedge::db
                 .auto_compaction = config.auto_compaction,
                 .use_odirect = config.use_odirect_for_indices,
                 .num_writer_threads = async::executor_pool::static_pool().size(),
+                .flush_io_workers = config.flush_io_workers,
                 .use_wal = !config.disable_wal,
             },
             config.num_partition_exponent,
@@ -61,8 +56,6 @@ namespace hedge::db
             [&sst_mgr = *db._sst_manager]()
             { sst_mgr.trigger_compaction(false); },
             db._page_cache,
-            db._io_pool,
-            std::move(writer_executors),
             &db._sst_manager->compaction_backpressure());
     }
 
@@ -90,16 +83,6 @@ namespace hedge::db
         if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB page cache
             db->_page_cache = std::make_shared<sharded_page_cache>(config.index_page_clock_cache_size_bytes, async::executor_pool::static_pool().size() * 4);
 
-        // Init shared I/O executor pool (flush + compaction)
-        db->_io_pool.resize(config.io_workers);
-        for(size_t i = 0; i < config.io_workers; ++i)
-        {
-            db->_io_pool[i] = async::executor_context::make_new(32, async::executor_config{
-                                                                         .loops_before_sleeping = 0,
-                                                                         .loops_before_yielding = 0});
-            db->_io_pool[i]->set_thread_name("io-pool-" + std::to_string(i));
-        }
-
         // Init sst_manager
         db->_sst_manager = std::make_unique<sst_manager>(
             sst_manager::config{
@@ -109,11 +92,11 @@ namespace hedge::db
                 .max_merge_width = config.max_merge_width,
                 .bucket_ratio = config.bucket_ratio,
                 .compaction_read_ahead_size_bytes = config.compaction_read_ahead_size_bytes,
+                .compaction_io_workers = config.compaction_io_workers,
                 .use_odirect_for_indices = config.use_odirect_for_indices,
                 .indices_path = db->_indices_path,
             },
-            db->_page_cache,
-            db->_io_pool);
+            db->_page_cache);
 
         // Setup memtable
         _init_memtable(*db, config);
@@ -173,16 +156,6 @@ namespace hedge::db
         if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1)
             db->_page_cache = std::make_shared<sharded_page_cache>(config.index_page_clock_cache_size_bytes, async::executor_pool::static_pool().size() * 4);
 
-        // Init shared I/O executor pool (flush + compaction)
-        db->_io_pool.resize(config.io_workers);
-        for(size_t i = 0; i < config.io_workers; ++i)
-        {
-            db->_io_pool[i] = async::executor_context::make_new(32, async::executor_config{
-                                                                         .loops_before_sleeping = 0,
-                                                                         .loops_before_yielding = 0});
-            db->_io_pool[i]->set_thread_name("io-pool-" + std::to_string(i));
-        }
-
         // Load sst_manager from indices directory
         auto maybe_sst_mgr = sst_manager::load(
             sst_manager::config{
@@ -192,11 +165,11 @@ namespace hedge::db
                 .max_merge_width = config.max_merge_width,
                 .bucket_ratio = config.bucket_ratio,
                 .compaction_read_ahead_size_bytes = config.compaction_read_ahead_size_bytes,
+                .compaction_io_workers = config.compaction_io_workers,
                 .use_odirect_for_indices = config.use_odirect_for_indices,
                 .indices_path = db->_indices_path,
             },
-            db->_page_cache,
-            db->_io_pool);
+            db->_page_cache);
 
         if(!maybe_sst_mgr)
             return maybe_sst_mgr.error();
@@ -254,7 +227,7 @@ namespace hedge::db
     hedge::status database::put(const key_t& key, const byte_buffer_t& value)
     {
         if(value.size() < 512) [[likely]]
-            return this->_memtable.put(key, value, hedge::value_type::IN_PLACE_VALUE);
+            return this->_memtable.put_sync(key, value, hedge::value_type::IN_PLACE_VALUE);
 
         return hedge::error("Synchronous put is not supported for values larger than 512 bytes");
     }
@@ -266,6 +239,7 @@ namespace hedge::db
         if(value.size() < 512) [[likely]]
         {
             co_return co_await this->_memtable.put_async(key, value, hedge::value_type::IN_PLACE_VALUE);
+            // co_return this->_memtable.put_sync(key, value, value_type::IN_PLACE_VALUE);
         }
 
         // --- Try writing value to buffer first ---

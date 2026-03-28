@@ -13,7 +13,6 @@
 #include <liburing/io_uring.h>
 #include <limits>
 #include <memory>
-#include <numeric>
 #include <thread>
 #include <tsl/robin_map.h>
 #include <tsl/sparse_map.h>
@@ -74,22 +73,6 @@ namespace hedge::async
         6. mailbox.handle_cqe() → populate response
         7. mailbox.resume() → coroutine continues
     */
-    template <typename T>
-    void push_item_heap(std::vector<T>& heap, T item)
-    {
-        heap.push_back(std::move(item));
-        std::push_heap(heap.begin(), heap.end());
-    }
-
-    template <typename T>
-    T pop_item_heap(std::vector<T>& heap)
-    {
-        std::pop_heap(heap.begin(), heap.end());
-        auto item = std::move(heap.back());
-        heap.pop_back();
-        return item;
-    }
-
     struct executor_config
     {
         int32_t loops_before_sleeping = 0;
@@ -97,13 +80,6 @@ namespace hedge::async
     };
 
     class executor_pool;
-
-    enum class request_priority : uint8_t
-    {
-        HIGH = 0,
-        MEDIUM = 1,
-        LOW = 2
-    };
 
     class executor_context : public std::enable_shared_from_this<executor_context>
     {
@@ -124,51 +100,18 @@ namespace hedge::async
 
         uint64_t _current_request_id{0};
 
-        struct mailbox_ptr_with_pri_t
-        {
-            std::unique_ptr<mailbox> mbox;
-            request_priority pri;
-
-            bool operator<(const mailbox_ptr_with_pri_t& other) const
-            {
-                return this->pri > other.pri;
-            };
-        };
-
-        tsl::robin_map<uint64_t, mailbox_ptr_with_pri_t> _in_flight_requests;
+        tsl::robin_map<uint64_t, std::unique_ptr<mailbox>> _in_flight_requests;
         std::unordered_map<std::coroutine_handle<>, task<void>> _in_progress_tasks;
 
         using task_queue_t = std::deque<std::unique_ptr<mailbox>>;
 
-        struct queues_empty
-        {
-            template <typename QTYPE>
-            bool operator()(const std::array<QTYPE, 3>& queues)
-            {
-                return std::ranges::all_of(queues, [](const auto& q)
-                                           { return q.empty(); });
-            }
-        };
-
-        struct queues_size
-        {
-            template <typename QTYPE>
-            size_t operator()(const std::array<QTYPE, 3>& queues)
-            {
-                return std::accumulate(queues.begin(), queues.end(), 0ULL, [](size_t acc, const auto& q)
-                                       { return acc + q.size(); });
-            }
-        };
-
-        static int32_t _pop_n(std::vector<mailbox_ptr_with_pri_t>& out, task_queue_t& queue, request_priority out_pri, size_t n);
-
-        std::array<std::deque<async::task<>>, 3> _new_tasks_queues;
-        std::array<task_queue_t, 3> _waiting_for_io_queues;
-        std::array<task_queue_t, 3> _io_ready_queues;
+        std::deque<async::task<>> _new_tasks_queue;
+        task_queue_t _waiting_for_io_queue;
+        task_queue_t _io_ready_queue;
 
         alignas(64) std::atomic_bool _sleep{false};
 
-        async::mpsc_queue<std::pair<task<void>, request_priority>, 1024> _pending_requests;
+        async::mpsc_queue<task<void>, 1024> _pending_requests;
 
         std::vector<int32_t> _registered_fds;
 
@@ -198,12 +141,12 @@ namespace hedge::async
             return future.get();
         }
 
-        void submit_io_task(task<void> task, request_priority pri = request_priority::MEDIUM);
+        void submit_io_task(task<void> task);
         bool try_submit_io_task(task<void>& task);
 
         void shutdown();
 
-        auto submit_request(auto request, request_priority pri = request_priority::MEDIUM)
+        auto submit_request(auto request)
         {
             using request_t = std::decay_t<decltype(request)>;
 
@@ -211,7 +154,7 @@ namespace hedge::async
 
             auto awaitable = awaitable_mailbox<typename request_t::response_t>{new_mailbox.get()};
 
-            this->_waiting_for_io_queues[static_cast<size_t>(pri)].emplace_back(std::move(new_mailbox));
+            this->_waiting_for_io_queue.emplace_back(std::move(new_mailbox));
 
             return awaitable;
         }
@@ -266,7 +209,7 @@ namespace hedge::async
             // make continuation mailbox
             auto continuation_mailbox = std::make_unique<mailbox>(async::continuation_mailbox{});
             continuation_mailbox->set_continuation(continuation);
-            this->_io_ready_queues[static_cast<size_t>(request_priority::HIGH)].emplace_back(std::move(continuation_mailbox));
+            this->_io_ready_queue.emplace_back(std::move(continuation_mailbox));
         }
 
         // TODO: enforce that this is callable only from this_thread_executor()

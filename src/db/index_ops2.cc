@@ -427,7 +427,7 @@ namespace hedge::db
         auto flush = [&]() -> async::task<hedge::status>
         {
             auto write_response = co_await write_buffer.flush(
-                fd, file_id, bytes_written, cache, executor, async::request_priority::MEDIUM);
+                fd, file_id, bytes_written, cache, executor);
 
             if(write_response.error_code)
                 co_return hedge::error("Failed to write index data: " + std::string(strerror(-write_response.error_code)));
@@ -922,8 +922,7 @@ namespace hedge::db
                                          &results,
                                          &errors,
                                          wg,
-                                         fdatasync_ssts),
-                                     async::request_priority::MEDIUM);
+                                         fdatasync_ssts));
 
             range_count++;
         }

@@ -104,8 +104,8 @@ namespace hedge::async
 
         int32_t fd{-1};
         uint8_t* data{nullptr};
-        size_t offset{0};
-        size_t size{0};
+        size_t off{0};
+        size_t len{0};
     };
 
     struct read_response

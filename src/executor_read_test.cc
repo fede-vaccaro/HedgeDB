@@ -274,8 +274,8 @@ int main()
     {
         auto* context = contexts[j++ % contexts.size()].get();
         auto task = get_obj(
-            hedge::async::read_request{.fd = fds[i % fds.size()], .offset = offsets[i], .size = PAGE_SIZE},
-            hedge::async::read_request{.fd = fds[i % fds.size()], .offset = offsets2[i], .size = PAGE_SIZE},
+            hedge::async::read_request{.fd = fds[i % fds.size()], .off = offsets[i], .len = PAGE_SIZE},
+            hedge::async::read_request{.fd = fds[i % fds.size()], .off = offsets2[i], .len = PAGE_SIZE},
             *context, wg);
         // hedge::prof::do_not_optimize(task);
         context->submit_io_task(std::move(task));

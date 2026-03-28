@@ -235,8 +235,8 @@ namespace hedge::db
             async::read_request{
                 .fd = this->fd(),
                 .data = data_ptr,
-                .offset = offset,
-                .size = PAGE_SIZE_IN_BYTES});
+                .off = offset,
+                .len = PAGE_SIZE_IN_BYTES});
 
         if(response.error_code != 0)
         {

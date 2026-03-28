@@ -82,8 +82,8 @@ namespace hedge::fs
                     auto read_response = co_await async::this_thread_executor()->submit_request(async::read_request{
                         .fd = fd,
                         .data = data_ptr,
-                        .offset = page_idx * PAGE_SIZE_IN_BYTES,
-                        .size = PAGE_SIZE_IN_BYTES,
+                        .off = page_idx * PAGE_SIZE_IN_BYTES,
+                        .len = PAGE_SIZE_IN_BYTES,
                     });
 
                     std::cout << "Populated cache for page " << page_idx << std::endl;

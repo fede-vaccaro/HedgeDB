@@ -14,7 +14,7 @@ namespace hedge::async
 {
     void read_mailbox::prepare_sqe(io_uring_sqe* sqe)
     {
-        io_uring_prep_read(sqe, this->request.fd, this->request.data, this->request.size, this->request.offset);
+        io_uring_prep_read(sqe, this->request.fd, this->request.data, this->request.len, this->request.off);
     }
 
     void read_mailbox::handle_cqe(io_uring_cqe* cqe)

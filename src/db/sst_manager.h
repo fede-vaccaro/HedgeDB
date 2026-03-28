@@ -37,6 +37,7 @@ namespace hedge::db
             size_t max_merge_width;
             double bucket_ratio;
             size_t compaction_read_ahead_size_bytes;
+            size_t compaction_io_workers;
             bool use_odirect_for_indices;
             std::filesystem::path indices_path;
         };
@@ -44,12 +45,10 @@ namespace hedge::db
         sst_manager() = default;
 
         explicit sst_manager(const config& cfg,
-                             std::shared_ptr<sharded_page_cache> page_cache,
-                             std::vector<std::shared_ptr<async::executor_context>> executor_pool);
+                             std::shared_ptr<sharded_page_cache> page_cache);
 
         static hedge::expected<std::unique_ptr<sst_manager>> load(const config& cfg,
-                                                                   std::shared_ptr<sharded_page_cache> page_cache,
-                                                                   std::vector<std::shared_ptr<async::executor_context>> executor_pool);
+                                                                   std::shared_ptr<sharded_page_cache> page_cache);
 
         // Called by memtable flush callback
         void push_indices(std::vector<sst> new_indices);

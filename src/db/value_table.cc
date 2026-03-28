@@ -193,8 +193,8 @@ namespace hedge::db
             auto read_response = co_await async::this_thread_executor()->submit_request(async::read_request{
                 .fd = this->fd(),
                 .data = data.get(),
-                .offset = page_offset,
-                .size = page_aligned_size,
+                .off = page_offset,
+                .len = page_aligned_size,
             });
 
             if(read_response.error_code != 0)

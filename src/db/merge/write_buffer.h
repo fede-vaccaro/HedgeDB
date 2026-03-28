@@ -71,8 +71,7 @@ namespace hedge::db
             uint32_t new_file_id, // NB: A File ID is not a File Descriptor
             size_t write_offset,
             const std::shared_ptr<sharded_page_cache>& cache,
-            const std::shared_ptr<async::executor_context>& executor,
-            async::request_priority pri = async::request_priority::MEDIUM)
+            const std::shared_ptr<async::executor_context>& executor)
         {
             this->_block_writer.force_commit();
 
@@ -83,8 +82,7 @@ namespace hedge::db
                                                                          .fd = output_fd,
                                                                          .data = this->_buf.begin(),
                                                                          .size = bytes_written,
-                                                                         .offset = write_offset},
-                                                                     pri);
+                                                                         .offset = write_offset});
 
             // Yielding has the purpose to allow the executor/io_uring to start processing the request while we reset the cache
             co_await async::this_thread_executor()->yield();

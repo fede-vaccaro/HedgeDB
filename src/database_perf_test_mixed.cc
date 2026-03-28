@@ -126,7 +126,7 @@ int main(int argc, char* argv[])
     std::cout << std::endl;
 
     // --- Init ---
-    async::executor_pool::init_static_pool(20, 64);
+    async::executor_pool::init_static_pool(12, 64);
 
     const std::filesystem::path base_path = "/tmp/db_perf";
 
@@ -139,7 +139,8 @@ int main(int argc, char* argv[])
     config.use_odirect_for_indices = true;
     config.index_page_clock_cache_size_bytes = 0;
     config.index_point_cache_size_bytes = 0;
-    config.io_workers = 8;
+    config.compaction_io_workers = 4;
+    config.flush_io_workers = 4;
     config.disable_wal = false;
 
     auto maybe_db = [&]() -> expected<std::shared_ptr<database>>
@@ -158,7 +159,7 @@ int main(int argc, char* argv[])
     auto db = std::move(maybe_db.value());
     auto values = pregenerate_values(PAYLOAD_SIZE);
 
-    constexpr size_t NUM_WORKERS = 20;
+    constexpr size_t NUM_WORKERS = 12;
     auto executors = async::executor_pool::static_pool().executors();
     executors.resize(NUM_WORKERS);
 

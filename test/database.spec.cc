@@ -172,8 +172,8 @@ namespace hedge::db
         config.index_page_clock_cache_size_bytes = 0 * 256 * 1024 * 1024;
         config.index_point_cache_size_bytes = 0;
         config.compaction_timeout = std::chrono::minutes(20);
-        config.flush_io_workers = 6;
         config.compaction_io_workers = 6;
+        config.flush_io_workers = 6;
 
         if(config.index_page_clock_cache_size_bytes > 0)
             std::cout << "Using CLOCK cache. Allocated space: " << config.index_page_clock_cache_size_bytes / (1000.0 * 1000.0) << "MB" << std::endl;
