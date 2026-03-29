@@ -2,15 +2,16 @@
 
 #include <cstdlib>
 
-#include "async/io_executor.h"
-#include "async/worker.h"
 #include "cache.h"
 #include "key.h"
 #include "memtable.h"
 #include "page_aligned_buffer.h"
 #include "sorted_index.h"
 #include "sst.h"
+#include "tmc/task.hpp"
 #include "types.h"
+
+namespace tmc { class ex_cpu; }
 
 namespace hedge::db
 {
@@ -105,16 +106,6 @@ namespace hedge::db
                                                                           const std::shared_ptr<db::sharded_page_cache>& cache,
                                                                           bool use_odirect = false);
 
-        static hedge::expected<std::vector<sst>> flush_mem_index2(
-            const std::filesystem::path& base_path,
-            memtable_impl3_t* index,
-            size_t num_partition_exponent,
-            size_t flush_iteration,
-            const std::shared_ptr<db::sharded_page_cache>& cache,
-            bool use_odirect,
-            const std::vector<std::unique_ptr<async::worker>>& worker_pool,
-            bool fdatasync_ssts);
-
         struct partition_range
         {
             size_t partition_id;
@@ -131,7 +122,7 @@ namespace hedge::db
             size_t flush_iteration,
             const std::shared_ptr<db::sharded_page_cache>& cache,
             bool use_odirect,
-            const std::vector<std::shared_ptr<async::executor_context>>& executor_pool,
+            tmc::ex_cpu& flush_executor,
             bool fdatasync_ssts);
 
         struct merge_config
@@ -148,16 +139,14 @@ namespace hedge::db
             bool fdatasync_output{true};          ///< If `true`, issues an fdatasync on the output file descriptor before completing the merge, to ensure durability of the merged index on disk before it becomes visible to the rest of the system.
         };
 
-        static async::task<hedge::expected<sorted_index>> k_way_merge_async(
+        static tmc::task<hedge::expected<sorted_index>> k_way_merge_async(
             const merge_config& config,
             const std::vector<const sorted_index*>& indices,
-            const std::shared_ptr<async::executor_context>& executor,
             const std::shared_ptr<db::sharded_page_cache>& cache);
 
-        static async::task<hedge::expected<sst>> k_way_merge_async2(
+        static tmc::task<hedge::expected<sst>> k_way_merge_async2(
             const merge_config& config,
             const std::vector<const sst*>& indices,
-            const std::shared_ptr<async::executor_context>& executor,
             std::shared_ptr<db::sharded_page_cache> cache);
     };
 

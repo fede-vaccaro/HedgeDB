@@ -10,9 +10,9 @@
 #include <error.hpp>
 #include <uuid.h>
 
-#include "async/io_executor.h"
-#include "async/mailbox_impl.h"
-#include "async/task.h"
+#include "io/io_requests.hpp"
+
+#include <tmc/task.hpp>
 #include "cache.h"
 #include "fs/fs.hpp"
 #include "sorted_index.h"
@@ -127,7 +127,7 @@ namespace hedge::db
         return sorted_index::_find_in_page(key, page_start_ptr, page_end_ptr);
     }
 
-    async::task<expected<std::optional<value_ptr_t>>> sorted_index::lookup_async(const uuid_t& key, const std::shared_ptr<sharded_page_cache>& cache) const
+    tmc::task<expected<std::optional<value_ptr_t>>> sorted_index::lookup_async(const uuid_t& key, const std::shared_ptr<sharded_page_cache>& cache) const
     {
         auto maybe_page_id = this->_find_page_id(key);
         if(!maybe_page_id)
@@ -229,30 +229,25 @@ namespace hedge::db
         co_return res;
     }
 
-    async::task<hedge::status> sorted_index::_load_page_async(size_t offset, uint8_t* data_ptr) const
+    tmc::task<hedge::status> sorted_index::_load_page_async(size_t offset, uint8_t* data_ptr) const
     {
-        auto response = co_await async::this_thread_executor()->submit_request(
-            async::read_request{
-                .fd = this->fd(),
-                .data = data_ptr,
-                .off = offset,
-                .len = PAGE_SIZE_IN_BYTES});
+        auto res = co_await hedge::io::read(this->fd(), data_ptr, PAGE_SIZE_IN_BYTES, offset);
 
-        if(response.error_code != 0)
+        if(res < 0)
         {
             auto err_msg = std::format(
                 "An error occurred while reading page at offset {} from file {}:  {}",
                 offset,
                 this->path().string(),
-                strerror(-response.error_code));
+                strerror(-res));
             co_return hedge::error(err_msg);
         }
 
-        if(response.bytes_read != PAGE_SIZE_IN_BYTES)
+        if(static_cast<size_t>(res) != PAGE_SIZE_IN_BYTES)
         {
             auto err_msg = std::format(
                 "Read {} bytes instead of {} from file {} at offset {}",
-                response.bytes_read,
+                static_cast<size_t>(res),
                 PAGE_SIZE_IN_BYTES,
                 this->path().string(),
                 offset);

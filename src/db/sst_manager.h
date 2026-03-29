@@ -141,10 +141,6 @@ namespace hedge::db
             std::vector<compaction_args> results;
         };
 
-        async::task<> _make_compaction_task(compaction_output& output,
-                                            std::vector<sst_ptr_t> inputs,
-                                            std::shared_ptr<async::wait_group> wg);
-
         async::task<> _make_self_completing_compaction_task(size_t level, std::vector<sst_ptr_t> inputs, size_t merge_width);
 
         static std::string _serialize_levels(const partition_t& levels);

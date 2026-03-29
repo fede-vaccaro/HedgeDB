@@ -15,9 +15,8 @@
 #include <error.hpp>
 #include <uuid.h>
 
-#include "async/io_executor.h"
-#include "async/mailbox_impl.h"
-#include "async/task.h"
+#include "io/io_requests.hpp"
+#include "tmc/task.hpp"
 #include "cache.h"
 #include "db/merge/merge_utils.h"
 #include "fs/file_reader.h"
@@ -426,10 +425,9 @@ namespace hedge::db
     // i.e. `rolling_buffer` and `entry_deduplicator` since they are heavily used here.
     //
     // NOLINTNEXTLINE(readability-function-cognitive-complexity) - Acknowledging complexity inherent in external merge. TODO: consider refactoring later.
-    async::task<hedge::expected<sorted_index>> index_ops::k_way_merge_async(
+    tmc::task<hedge::expected<sorted_index>> index_ops::k_way_merge_async(
         const merge_config& config,
         const std::vector<const sorted_index*>& indices,
-        const std::shared_ptr<async::executor_context>& executor,
         const std::shared_ptr<db::sharded_page_cache>& cache)
     {
         /*
@@ -474,7 +472,6 @@ namespace hedge::db
 
         auto fd_maybe = co_await fs::file::from_path_async(new_path,
                                                            fs::file::open_mode::write_new,
-                                                           async::this_thread_executor(),
                                                            true,
                                                            estimated_size);
 
@@ -486,7 +483,6 @@ namespace hedge::db
         auto read_fd = co_await fs::file::from_path_async(
             output_fd.path(),
             fs::file::open_mode::read_only,
-            async::this_thread_executor(),
             config.create_new_with_odirect,
             std::nullopt);
 
@@ -554,14 +550,14 @@ namespace hedge::db
             }
 
             // refresh is idempotent if the readers are EOF
-            async::task<status> refresh(const std::shared_ptr<db::sharded_page_cache>& cache)
+            tmc::task<status> refresh(const std::shared_ptr<db::sharded_page_cache>& cache)
             {
                 auto unpack_mailbox = hedge::overloaded{
-                    [](freader::awaitable_page_guard_t& awaitable) -> async::task<expected<buffered_page_t>>
+                    [](freader::awaitable_page_guard_t& awaitable) -> tmc::task<expected<buffered_page_t>>
                     {
                         co_return buffered_page_t{page_guard_with_buffer_span_t{db::page_cache::read_page_guard(co_await awaitable.first), awaitable.second}};
                     },
-                    [](freader::awaitable_read_request_t& awaitable) -> async::task<expected<buffered_page_t>>
+                    [](freader::awaitable_read_request_t& awaitable) -> tmc::task<expected<buffered_page_t>>
                     {
                         auto response = co_await awaitable.first;
 
@@ -688,7 +684,7 @@ namespace hedge::db
         auto* rbufs_end = buf_ptr + num_bufs;
 
         // Helper lambda to refresh both buffers by reading the next chunk from each index
-        auto refresh_buffers = [&]() -> async::task<hedge::status>
+        auto refresh_buffers = [&]() -> tmc::task<hedge::status>
         {
             for(auto* it = rbufs_begin; it < rbufs_end; ++it)
             {

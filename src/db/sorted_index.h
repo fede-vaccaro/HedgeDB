@@ -11,8 +11,7 @@
 
 #include <error.hpp>
 
-#include "async/io_executor.h"
-#include "async/task.h"
+#include <tmc/task.hpp>
 #include "cache.h"
 #include "fs/fs.hpp"
 #include "tsl/robin_map.h"
@@ -135,9 +134,9 @@ namespace hedge::db
          * 3. Performs a binary search within the loaded page data.
          * @param key The key (`key_t`) to search for.
          * @param executor A shared pointer to the `io_uring` executor context used for the read operation.
-         * @return A `async::task` that resolves to an `expected` containing an `std::optional<value_ptr_t>`, or an error.
+         * @return A `tmc::task` that resolves to an `expected` containing an `std::optional<value_ptr_t>`, or an error.
          */
-        [[nodiscard]] async::task<expected<std::optional<value_ptr_t>>> lookup_async(const uuid_t& key, const std::shared_ptr<sharded_page_cache>& cache) const;
+        [[nodiscard]] tmc::task<expected<std::optional<value_ptr_t>>> lookup_async(const uuid_t& key, const std::shared_ptr<sharded_page_cache>& cache) const;
 
         /**
          * @brief Loads the entire main index data from the associated file into the in-memory `_index` vector.
@@ -200,10 +199,10 @@ namespace hedge::db
          * @brief Asynchronously loads a single data page (fixed size `PAGE_SIZE_IN_BYTES=4096 bytes`) from the index file using `io_executor` and `liburing`.
          * @param offset The byte offset within the file where the page begins.
          * @param executor A shared pointer to the `io_uring` executor context.
-         * @return A `async::task` that resolves to an `expected` containing a `std::unique_ptr<uint8_t>`
+         * @return A `tmc::task` that resolves to an `expected` containing a `std::unique_ptr<uint8_t>`
          * holding the page data, or an error if the read fails. The memory is allocated page-aligned.
          */
-        [[nodiscard]] async::task<hedge::status> _load_page_async(size_t offset, uint8_t* data_ptr) const;
+        [[nodiscard]] tmc::task<hedge::status> _load_page_async(size_t offset, uint8_t* data_ptr) const;
     };
 
 } // namespace hedge::db

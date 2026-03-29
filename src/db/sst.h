@@ -11,9 +11,9 @@
 
 #include <error.hpp>
 
-#include "async/task.h"
 #include "cache.h"
 #include "fs/fs.hpp"
+#include "tmc/task.hpp"
 #include "types.h"
 
 #include "page_aligned_buffer.h"
@@ -99,7 +99,7 @@ namespace hedge::db
 
         [[nodiscard]] bool probe_filter(uint64_t key_hash) const;
 
-        [[nodiscard]] async::task<expected<value_t>> lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache, std::optional<uint64_t> key_hash = std::nullopt) const;
+        [[nodiscard]] tmc::task<expected<value_t>> lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache, std::optional<uint64_t> key_hash = std::nullopt) const;
 
         [[nodiscard]] size_t upper_bound() const { return this->_footer.upper_bound; }
 
@@ -156,7 +156,7 @@ namespace hedge::db
 
         [[nodiscard]] std::optional<size_t> _find_page_id(const key_t& key) const;
 
-        [[nodiscard]] async::task<hedge::status> _load_page_async(size_t offset, uint8_t* data_ptr, int32_t buf_index) const;
+        [[nodiscard]] tmc::task<hedge::status> _load_page_async(size_t offset, uint8_t* data_ptr, int32_t buf_index) const;
     };
 
 } // namespace hedge::db

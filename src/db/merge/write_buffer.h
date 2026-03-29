@@ -7,13 +7,20 @@
 #include "db/index_ops.h"
 #include "db/merge/merge_utils.h"
 #include "error.hpp"
-#include "io_executor.h"
-#include "mailbox_impl.h"
+#include "io/io_requests.hpp"
 #include "page_aligned_buffer.h"
+#include "tmc/aw_yield.hpp"
+#include "tmc/task.hpp"
 #include "types.h"
 
 namespace hedge::db
 {
+
+    struct write_result
+    {
+        size_t bytes_written{0};
+        int32_t error_code{0};
+    };
 
     class merge_write_buffer
     {
@@ -66,33 +73,27 @@ namespace hedge::db
             return this->_indexed_kvs;
         }
 
-        async::task<async::write_response> flush(
+        tmc::task<write_result> flush(
             int32_t output_fd,
-            uint32_t new_file_id, // NB: A File ID is not a File Descriptor
+            uint32_t new_file_id,
             size_t write_offset,
-            const std::shared_ptr<sharded_page_cache>& cache,
-            const std::shared_ptr<async::executor_context>& executor)
+            const std::shared_ptr<sharded_page_cache>& cache)
         {
             this->_block_writer.force_commit();
 
             const size_t bytes_written = this->_block_writer.bytes_written();
             assert(hedge::is_page_aligned(bytes_written));
 
-            auto awaitable_write_response = executor->submit_request(async::write_request{
-                                                                         .fd = output_fd,
-                                                                         .data = this->_buf.begin(),
-                                                                         .size = bytes_written,
-                                                                         .offset = write_offset});
-
-            // Yielding has the purpose to allow the executor/io_uring to start processing the request while we reset the cache
-            co_await async::this_thread_executor()->yield();
+            int32_t res = co_await hedge::io::write(output_fd, this->_buf.begin(), bytes_written, write_offset);
 
             if(cache != nullptr)
                 this->_populate_cache(new_file_id, write_offset, bytes_written, cache);
 
             this->_block_writer.reset();
 
-            co_return co_await awaitable_write_response;
+            co_return write_result{
+                .bytes_written = res >= 0 ? static_cast<size_t>(res) : 0,
+                .error_code = res < 0 ? res : 0};
         }
 
     private:

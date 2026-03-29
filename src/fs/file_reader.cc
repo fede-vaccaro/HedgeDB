@@ -66,8 +66,8 @@ namespace hedge::fs
         auto awaitable_mailbox = async::this_thread_executor()->submit_request(async::read_request{
             .fd = this->_file.fd(),
             .data = static_cast<uint8_t*>(buffer.raw_data()),
-            .offset = this->_current_offset,
-            .size = page_aligned_bytes_to_read,
+            .off = this->_current_offset,
+            .len = page_aligned_bytes_to_read,
         });
 
         this->_current_offset += page_aligned_bytes_to_read;
@@ -139,8 +139,8 @@ namespace hedge::fs
                     auto awaitable_mailbox = async::this_thread_executor()->submit_request(async::read_request{
                         .fd = this->_file.fd(),
                         .data = static_cast<uint8_t*>(buffer.raw_data()),
-                        .offset = this->_current_offset + (coalescing_sequence_start_it * PAGE_SIZE_IN_BYTES),
-                        .size = coalesced_requests * PAGE_SIZE_IN_BYTES,
+                        .off = this->_current_offset + (coalescing_sequence_start_it * PAGE_SIZE_IN_BYTES),
+                        .len = coalesced_requests * PAGE_SIZE_IN_BYTES,
                     });
 
                     // myassert(size_t(buffer_head) < this->_config.read_ahead_size, "Buffer head " + std::to_string(buffer_head) + " exceeds read ahead size " + std::to_string(this->_config.read_ahead_size));
@@ -188,8 +188,8 @@ namespace hedge::fs
             auto awaitable_mailbox = async::this_thread_executor()->submit_request(async::read_request{
                 .fd = this->_file.fd(),
                 .data = static_cast<uint8_t*>(buffer.raw_data()),
-                .offset = this->_current_offset + (coalescing_sequence_start_it * PAGE_SIZE_IN_BYTES),
-                .size = coalesced_requests * PAGE_SIZE_IN_BYTES,
+                .off = this->_current_offset + (coalescing_sequence_start_it * PAGE_SIZE_IN_BYTES),
+                .len = coalesced_requests * PAGE_SIZE_IN_BYTES,
             });
 
             // myassert(size_t(buffer_head) < this->_config.read_ahead_size, "Buffer head " + std::to_string(buffer_head) + " exceeds read ahead size " + std::to_string(this->_config.read_ahead_size));

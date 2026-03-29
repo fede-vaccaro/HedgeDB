@@ -298,9 +298,7 @@ namespace hedge::db
         }
 
         // --- Update Memtable ---
-        this->_memtable.put_async(key, maybe_write.value(), hedge::value_type::VALUE_PTR);
-
-        co_return hedge::ok();
+        co_return co_await this->_memtable.put_async(key, maybe_write.value(), hedge::value_type::VALUE_PTR);
     }
 
     async::task<hedge::status> database::put_batch_async(std::span<const std::pair<key_t, byte_buffer_t>> entries)

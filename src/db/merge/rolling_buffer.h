@@ -1,12 +1,13 @@
 #pragma once
 
+#include <cstdlib>
+#include <memory>
+#include <new>
+
 #include "db/block.h"
 #include "db/sst.h"
 #include "fs/file_reader2.h"
 #include "io_executor.h"
-#include <cstdlib>
-#include <memory>
-#include <new>
 
 namespace hedge::db
 {
@@ -79,19 +80,19 @@ namespace hedge::db
         }
 
         // refresh is idempotent if the readers are EOF
-        async::task<status> refresh(const std::shared_ptr<db::sharded_page_cache>& cache)
+        tmc::task<status> refresh(const std::shared_ptr<db::sharded_page_cache>& cache)
         {
             auto unpack_read_result = hedge::overloaded{
-                [](file_reader::awaitable_page_guard_t& awaitable) -> async::task<expected<buffered_page_t>>
+                [](file_reader::awaitable_page_guard_t& awaitable) -> tmc::task<expected<buffered_page_t>>
                 {
                     co_return buffered_page_t{db::page_cache::read_page_guard(co_await awaitable)};
                 },
-                [](file_reader::awaitable_read_request_t& read_request) -> async::task<expected<buffered_page_t>>
+                [](file_reader::awaitable_read_request_t& read_request) -> tmc::task<expected<buffered_page_t>>
                 {
-                    auto response = co_await read_request.awaitable;
+                    auto response = co_await std::move(read_request.awaitable);
 
-                    if(response.error_code != 0)
-                        co_return hedge::error("Read request failed with error code: " + std::string(strerror(-response.error_code)));
+                    if(response < 0)
+                        co_return hedge::error("Read request failed with error code: " + std::string(strerror(-response)));
 
                     auto buffer = std::move(read_request.buffer);
 

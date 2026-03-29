@@ -11,6 +11,7 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <stdexcept>
 #include <tsl/robin_map.h>
 #include <tsl/sparse_map.h>
 #include <utility>
@@ -164,22 +165,12 @@ namespace hedge::db
             template <typename PROMISE_TYPE>
             std::coroutine_handle<> await_suspend(std::coroutine_handle<PROMISE_TYPE> continuation) noexcept
             {
-                prof::get<"push_coro">().start();
-
-                std::lock_guard lk(pg._frame->waiters_mutex);
-                if((pg._frame->flags.load() & PAGE_FLAG_READY) != 0UL)
+                if(!this->ready())
                 {
-                    prof::get<"push_coro">().stop(true);
-                    return continuation;
+                    std::cout << "cache error!\n";
                 }
-                auto root_coro = continuation.promise()._root_coro;
-                auto root_task = async::this_thread_executor()->extract_task(root_coro);
 
-                pg._frame->waiters.emplace_back(std::move(root_task), continuation);
-                prof::get<"push_coro">()
-                    .stop();
-
-                return std::noop_coroutine();
+                return continuation;
             }
 
             read_page_guard&& await_resume()

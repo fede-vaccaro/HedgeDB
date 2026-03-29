@@ -312,57 +312,6 @@ namespace hedge::db
         co_return std::move(value_opt.value());
     }
 
-    async::task<> sst_manager::_make_compaction_task(compaction_output& output,
-                                                     std::vector<sst_ptr_t> inputs,
-                                                     std::shared_ptr<async::wait_group> wg)
-    {
-        // set lower priority for thread
-        auto merge_config = hedge::db::index_ops::merge_config{
-            .read_ahead_size = this->_cfg.compaction_read_ahead_size_bytes,
-            .new_index_id = this->_flush_iteration.fetch_add(1, std::memory_order::relaxed),
-            .base_path = this->_cfg.indices_path,
-            .discard_deleted_keys = false,
-            .create_new_with_odirect = this->_cfg.use_odirect_for_indices,
-            .populate_cache_with_output = false,
-            .try_reading_from_cache = true,
-            .fdatasync_output = true,
-        };
-
-        std::vector<const sst*> indices;
-        indices.reserve(inputs.size());
-        for(const auto& i : inputs)
-            indices.emplace_back(i.get());
-
-        hedge::expected<sst> merge_result = co_await index_ops::k_way_merge_async2(merge_config,
-                                                                                   indices,
-                                                                                   async::this_thread_executor(),
-                                                                                   this->_page_cache);
-
-        hedge::expected<sst_ptr_t> result = [&]() -> hedge::expected<sst_ptr_t>
-        {
-            if(!merge_result)
-                return merge_result.error();
-
-            return std::make_shared<sst>(std::move(merge_result.value()));
-        }();
-
-        size_t input_bytes = std::accumulate(inputs.begin(), inputs.end(), 0UL, [](size_t sum, const sst_ptr_t& ptr)
-                                             { return sum + ptr->file_size(); });
-
-        {
-            std::lock_guard lk(output.m);
-            output.results.emplace_back(
-                compaction_output::compaction_args{
-                    .inputs = inputs,
-                    .output = result,
-                    .input_bytes = input_bytes,
-                    .output_bytes = (result.has_value() ? result.value()->file_size() : 0),
-                });
-        }
-
-        wg->decr();
-    }
-
     async::task<> sst_manager::_make_self_completing_compaction_task(size_t level, std::vector<sst_ptr_t> inputs, size_t input_min_merge_width)
     {
         auto merge_config = hedge::db::index_ops::merge_config{
@@ -382,7 +331,6 @@ namespace hedge::db
 
         hedge::expected<sst> merge_result = co_await index_ops::k_way_merge_async2(merge_config,
                                                                                    indices,
-                                                                                   async::this_thread_executor(),
                                                                                    this->_page_cache);
 
         size_t input_count = inputs.size();

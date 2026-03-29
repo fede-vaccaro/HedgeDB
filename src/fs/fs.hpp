@@ -12,9 +12,8 @@
 #include <error.hpp>
 #include <utility>
 
-#include "async/io_executor.h"
-#include "async/mailbox_impl.h"
-#include "async/task.h"
+#include "io/io_requests.hpp"
+#include "tmc/task.hpp"
 
 /*
     HedgeFS File Abstraction
@@ -165,34 +164,30 @@ namespace hedge::fs
             return fd_wrapped;
         }
 
-        static async::task<hedge::expected<file>> from_path_async(const std::filesystem::path& path, open_mode mode, std::shared_ptr<async::executor_context> executor, bool use_direct = false, std::optional<size_t> expected_size = std::nullopt)
+        static tmc::task<hedge::expected<file>> from_path_async(const std::filesystem::path& path, open_mode mode, bool use_direct = false, std::optional<size_t> expected_size = std::nullopt)
         {
-            // auto exists = std::filesystem::exists(path);
-            auto stats = co_await executor->submit_request(async::file_info_request{
-                .path = path.string()});
+            struct statx statx_buf
+            {
+            };
+            int32_t statx_res = co_await hedge::io::statx(path.string(), &statx_buf);
+            bool exists = (statx_res == 0);
 
-            if(!stats.exists && mode == open_mode::read_only)
+            if(!exists && mode == open_mode::read_only)
                 co_return hedge::error("File does not exist: " + path.string());
 
-            if(stats.exists && (mode == open_mode::write_new || mode == open_mode::read_write_new || mode == open_mode::read_write_append))
+            if(exists && (mode == open_mode::write_new || mode == open_mode::read_write_new || mode == open_mode::read_write_append))
                 co_return hedge::error("File already exists: " + path.string());
 
-            // Open the file;
             auto flags = static_cast<int32_t>(mode);
             if(use_direct)
                 flags |= O_DIRECT;
 
-            auto open_retvalue = co_await executor->submit_request(async::open_request{
-                .path = path.string(),
-                .flags = flags,
-                .mode = 0777});
+            int32_t fd = co_await hedge::io::open(path.string(), flags, 0777);
 
-            if(open_retvalue.error_code < 0)
-                co_return hedge::error("Failed to open file descriptor: " + std::string(strerror(-open_retvalue.error_code)));
+            if(fd < 0)
+                co_return hedge::error("Failed to open file descriptor: " + std::string(strerror(-fd)));
 
-            int fd = open_retvalue.file_descriptor;
-
-            size_t file_size = stats.exists ? stats.file_size : expected_size.value_or(0);
+            size_t file_size = exists ? statx_buf.stx_size : expected_size.value_or(0);
 
             if(expected_size.has_value())
             {
@@ -210,17 +205,13 @@ namespace hedge::fs
                     case open_mode::write_new:
                     case open_mode::read_write_new:
                     {
-                        auto res = co_await executor->submit_request(async::fallocate_request{
-                            .fd = fd,
-                            .mode = 0,
-                            .offset = 0,
-                            .length = expected_size.value()});
+                        int32_t res = co_await hedge::io::fallocate(fd, 0, 0, expected_size.value());
 
-                        if(res.error_code < 0)
+                        if(res < 0)
                         {
-                            auto err = std::string(strerror(-res.error_code));
+                            auto err = std::string(strerror(-res));
                             std::filesystem::remove(path);
-                            co_await executor->submit_request(async::close_request{fd});
+                            [[maybe_unused]] int32_t res = co_await hedge::io::close(fd);
                             co_return hedge::error("Failed to allocate space for file: " + err);
                         }
                         break;

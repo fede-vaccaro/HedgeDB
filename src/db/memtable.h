@@ -4,7 +4,6 @@
 #include <cassert>
 #include <condition_variable>
 #include <future>
-#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -12,18 +11,24 @@
 #include <utility>
 #include <vector>
 
-#include "async/atomic.h"
-#include "async/async_cond_var.h"
-#include "async/io_executor.h"
 #include "btree.h"
 #include "cache.h"
+#include "io/io_executor.h"
 #include "logger.h"
 #include "rw_sync.h"
 #include "single_buffer_arena_allocator.h"
 #include "skiplist.h"
 #include "sst.h"
+#include "tmc/atomic_condvar.hpp"
+#include "tmc/ex_cpu_st.hpp"
+#include "tmc/semaphore.hpp"
+#include "tmc/task.hpp"
 #include "types.h"
-#include "worker.h"
+
+namespace tmc
+{
+    class ex_cpu;
+}
 
 namespace hedge::db
 {
@@ -39,6 +44,7 @@ namespace hedge::db
         bool use_wal = true;
         /* bool use_fsync = false; // NOT IMPLEMENTED */
         bool fdatasync_flushed_sst = true;
+        size_t starting_wal_epoch = 0;
     };
 
     struct memtable_arena_holder
@@ -99,7 +105,11 @@ namespace hedge::db
             {
                 const auto initial_wal_size = static_cast<size_t>((static_cast<double>(value_memory_budget) / n_threads));
                 const auto wal_path = std::format("wal.t{}.{}", i, flush_iteration);
-                auto maybe_wal = fs::file::from_path(base_path / wal_path, fs::file::open_mode::write_append_new, false, std::nullopt);
+                auto maybe_wal =
+                    fs::file::from_path(base_path / wal_path,
+                                        fs::file::open_mode::write_append_new,
+                                        false,
+                                        std::nullopt);
 
                 if(!maybe_wal.has_value())
                     throw std::runtime_error("could not open wal " + (base_path / wal_path).string() + " : " + maybe_wal.error().to_string());
@@ -136,24 +146,22 @@ namespace hedge::db
         using rw_sync_table_t = async::rw_sync<memtable_with_arena_t>;
         using rw_sync_table_ptr_t = std::shared_ptr<rw_sync_table_t>;
 
-        alignas(64) async::atomic<rw_sync_table_ptr_t> _table;
+        alignas(64) tmc::atomic_condvar<rw_sync_table_ptr_t> _table{nullptr};
         alignas(64) std::atomic_bool _flush_mutex;
-        alignas(64) std::atomic_size_t _wal_epoch{0};
+        alignas(64) std::atomic_size_t _wal_epoch;
         alignas(64) std::atomic<rw_sync_table_ptr_t> _pipelined_table;
 
         // Pending flushes
         static constexpr size_t MAX_PENDING_FLUSHES = 4;
         alignas(64) std::atomic_size_t _table_switch_epoch;
         alignas(64) mutable std::shared_mutex _pending_flushes_mutex;
-        async::cond_var _pending_flushes_cv;
+        tmc::semaphore _pending_flush_slots{MAX_PENDING_FLUSHES};
         std::condition_variable_any _pending_flushes_cv_sync;
         std::map<size_t, rw_sync_table_ptr_t> _pending_flushes;
-
-        async::worker _flusher = async::worker("flush-wrk");
+        std::unique_ptr<tmc::ex_cpu_st> _flusher;
         std::thread _table_maker;
         std::atomic_bool _running{true};
-        std::vector<std::shared_ptr<async::executor_context>> _flush_executor_pool;
-        std::vector<std::unique_ptr<async::worker>> _flush_worker_pool;
+        std::unique_ptr<io::io_executor> _flush_executors;
         logger _logger;
 
     public:
@@ -172,9 +180,9 @@ namespace hedge::db
 
         ~memtable();
 
-        async::task<hedge::status> put_async(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type);
+        tmc::task<hedge::status> put_async(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type);
 
-        async::task<hedge::status> put_batch_async(
+        tmc::task<hedge::status> put_batch_async(
             std::span<const std::pair<key_t, std::vector<uint8_t>>> entries,
             hedge::value_type value_type);
 
@@ -186,20 +194,15 @@ namespace hedge::db
 
         hedge::status replay_wal();
 
-        [[nodiscard]] auto make_memtable() const
+        [[nodiscard]] size_t wal_epoch() const
         {
-            return std::make_shared<rw_sync_table_t>(
-                this->_cfg.num_writer_threads,
-                this->_indices_path,
-                this->_cfg.use_wal,
-                const_cast<std::atomic_size_t*>(&this->_wal_epoch)->fetch_add(1, std::memory_order::relaxed),
-                this->_cfg.memory_budget_cap * 2,
-                this->_cfg.num_writer_threads,
-                this->_cfg.memory_budget_cap);
+            return this->_wal_epoch.load(std::memory_order::relaxed);
         }
 
     private:
         hedge::status _append_to_wal(int32_t fd, uint32_t seq_nr, const key_t& key, std::span<const uint8_t> value);
+
+        [[nodiscard]] std::shared_ptr<rw_sync_table_t> _make_memtable() const;
 
         struct wal_batch_meta
         {
@@ -214,7 +217,7 @@ namespace hedge::db
             std::span<const wal_batch_meta> meta,
             std::span<const std::span<const uint8_t>> value_spans);
 
-        async::task<bool> _flush(rw_sync_table_ptr_t expected_table);
+        tmc::task<bool> _flush(rw_sync_table_ptr_t expected_table);
         bool _flush_sync(rw_sync_table_ptr_t expected_table);
     };
 

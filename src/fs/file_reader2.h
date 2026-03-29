@@ -6,6 +6,7 @@
 
 #include "cache.h"
 #include "fs.hpp"
+#include "io/io_ctx.h"
 #include "mailbox.h"
 #include "mailbox_impl.h"
 #include "page_aligned_buffer.h"
@@ -39,8 +40,8 @@ namespace hedge::fs
         // The caller can co_await on the mailbox to get the result, and the buffer is where the data will be written to.
         struct awaitable_read_request_t
         {
-            async::awaitable_mailbox<async::read_response> awaitable; // Awaitable request (just a handler, does not own the memory)
-            page_aligned_buffer<uint8_t> buffer;                      // Where the read_response result is written to (owned memory)
+            hedge::io::aw_io awaitable;          // Awaitable request (just a handler, does not own the memory)
+            page_aligned_buffer<uint8_t> buffer; // Where the read_response result is written to (owned memory)
         };
 
         // This object represents an asynchronous page guard request.
@@ -61,7 +62,7 @@ namespace hedge::fs
 
     private:
         std::vector<awaitable_from_cache_or_fs_t> _next_no_cache();
-        std::vector<awaitable_from_cache_or_fs_t> _next_cache(const std::shared_ptr<db::sharded_page_cache>& cache);
+        // std::vector<awaitable_from_cache_or_fs_t> _next_cache(const std::shared_ptr<db::sharded_page_cache>& cache);
     };
 
 } // namespace hedge::fs

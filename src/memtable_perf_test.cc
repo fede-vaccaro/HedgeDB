@@ -18,12 +18,13 @@
 #include <iostream>
 #include <random>
 #include <span>
+#include <vector>
 
 // Macros required by memtable.h (pulled in via Folly's ConcurrentSkipList)
 struct _NullStream
 {
     template <typename T>
-    _NullStream& operator<<(const T&) { return *this; }
+    _NullStream& operator<<(const T& /**/) { return *this; }
 };
 #ifndef CHECK_EQ
 #define CHECK_EQ(a, b) _NullStream()
@@ -47,17 +48,18 @@ struct _NullStream
 #define FOLLY_LIKELY(x) __builtin_expect(!!(x), 1)
 #endif
 
-#include "async/io_executor.h"
-#include "async/task.h"
-#include "async/wait_group.h"
 #include "db/memtable.h"
+#include "io/io_ctx.h"
+#include "tmc/ex_cpu.hpp"
+#include "tmc/sync.hpp"
+#include "tmc/task.hpp"
 #include "types.h"
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-static hedge::key_t make_key(uint64_t)
+static hedge::key_t make_key(uint64_t /**/)
 {
     std::array<uint8_t, 24> bytes{};
     thread_local std::mt19937_64 rng{std::random_device{}()};
@@ -68,7 +70,7 @@ static hedge::key_t make_key(uint64_t)
 }
 
 // ---------------------------------------------------------------------------
-// Coroutine task — one per insert
+// Coroutine task — one per thread
 // ---------------------------------------------------------------------------
 
 static const std::vector<uint8_t> DUMMY_VALUE = []()
@@ -81,48 +83,66 @@ static const std::vector<uint8_t> DUMMY_VALUE = []()
     return dummy;
 }();
 
-hedge::async::task<void>
-make_put_task(hedge::db::memtable* mt, size_t tid, size_t N, size_t N_EXECUTORS, hedge::async::wait_group* wg)
+tmc::task<void>
+make_put_task(hedge::db::memtable* mt, size_t tid, size_t N, size_t N_EXECUTORS)
 {
-    for(size_t i = 0; i < N; ++i)
+    for(size_t i = tid; i < N; i += N_EXECUTORS)
     {
-        if((i % N_EXECUTORS) != tid)
-            continue;
-
         co_await mt->put_async(make_key(i),
                                DUMMY_VALUE,
                                hedge::value_type::IN_PLACE_VALUE);
     }
-    wg->decr();
     co_return;
 }
 
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
+constexpr size_t N = 50'000'000;
+constexpr size_t N_EXECUTORS = 12;
+constexpr uint32_t QD = 64;
+constexpr size_t FLUSH_THREADS = 4;
 
 int main()
 {
-    constexpr size_t N = 50'000'000;
-    constexpr size_t N_EXECUTORS = 12;
-    constexpr uint32_t QUEUE_DEPTH = 64;
+    // --- Main threadpool (runs put_async coroutines) ---
+    std::vector<std::unique_ptr<hedge::io::io_ctx>> main_io_ctxs(N_EXECUTORS);
+    tmc::ex_cpu main_pool;
+    main_pool.set_thread_count(N_EXECUTORS);
+    main_pool.set_thread_init_hook([&main_io_ctxs](size_t id)
+                                   {
+                                       main_io_ctxs[id] = std::make_unique<hedge::io::io_ctx>(QD);
+                                       hedge::io::io_ctx::set_thread_local(main_io_ctxs[id].get()); });
+    main_pool.set_thread_teardown_hook([](size_t)
+                                       { hedge::io::io_ctx::set_thread_local(nullptr); });
+    main_pool.set_thread_post_run_hook([&main_io_ctxs](size_t tid) -> bool
+                                { return main_io_ctxs[tid]->submit_and_wait(); });
+    main_pool.init();
 
-    hedge::async::executor_pool::init_static_pool(N_EXECUTORS, QUEUE_DEPTH);
+    // --- Flush threadpool (runs SST write coroutines during flush) ---
+    std::vector<std::unique_ptr<hedge::io::io_ctx>> flush_io_ctxs(FLUSH_THREADS);
+    tmc::ex_cpu flush_pool;
+    flush_pool.set_thread_count(FLUSH_THREADS)
+        .set_thread_init_hook(
+            [&flush_io_ctxs](size_t id)
+            {
+                flush_io_ctxs[id] = std::make_unique<hedge::io::io_ctx>(QD);
+                hedge::io::io_ctx::set_thread_local(flush_io_ctxs[id].get());
+            })
+        .set_thread_teardown_hook([](size_t)
+                                  { hedge::io::io_ctx::set_thread_local(nullptr); })
+        .set_thread_post_run_hook([&flush_io_ctxs](size_t tid) -> bool
+                           { return flush_io_ctxs[tid]->submit_and_wait(); });
+    flush_pool.init();
 
-    // set affinity for static pool
-    for(size_t i = 0; i < N_EXECUTORS; ++i)
-    {
-        auto ex = hedge::async::executor_pool::static_pool().get_executor(i);
-        // ex->sync_submit(hedge::async::executor_context::set_affinity(i));
-    }
-
+    // --- Memtable setup ---
     hedge::db::memtable_config cfg;
     cfg.memory_budget_cap = 64 * 1024 * 1024;
     cfg.auto_compaction = false;
     cfg.use_odirect = true;
-    cfg.use_wal = false;
+    cfg.use_wal = true;
     cfg.num_writer_threads = N_EXECUTORS;
-    cfg.flush_io_workers = 4;
+    cfg.flush_io_workers = FLUSH_THREADS;
 
     static std::atomic_size_t flush_epoch{0};
 
@@ -132,23 +152,26 @@ int main()
     hedge::db::memtable mt(
         cfg,
         /*num_partition_exponent=*/4,
-        /*indices_path=*/"/tmp/indices_test", &flush_epoch,
-        /*push_new_indices=*/[](std::vector<hedge::db::sst>) {},
+        /*indices_path=*/"/tmp/indices_test",
+        &flush_epoch,
+        /*push_new_indices=*/[](std::vector<hedge::db::sst> /**/) {},
         /*trigger_compaction_callback=*/[] {},
         /*page_cache=*/nullptr);
 
-    auto wg = hedge::async::wait_group::make_shared();
-    wg->set(N_EXECUTORS);
-
+    // --- Run benchmark ---
     auto t0 = std::chrono::high_resolution_clock::now();
 
+    std::vector<std::future<void>> futures;
+    futures.reserve(N_EXECUTORS);
     for(size_t tid = 0; tid < N_EXECUTORS; ++tid)
     {
-        auto task = make_put_task(&mt, tid, N, N_EXECUTORS, wg.get());
-        hedge::async::executor_pool::executor_from_static_pool()->submit_io_task(std::move(task));
+        futures.push_back(tmc::post_waitable(main_pool,
+                                             make_put_task(&mt, tid, N, N_EXECUTORS),
+                                             0, tid));
     }
 
-    wg->wait();
+    for(auto& f : futures)
+        f.get();
 
     auto t1 = std::chrono::high_resolution_clock::now();
 

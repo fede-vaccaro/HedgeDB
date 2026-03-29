@@ -8,7 +8,8 @@
 #include "db/merge/write_buffer.h"
 #include "db/quotient_filter.h"
 #include "db/sst.h"
-#include "mailbox_impl.h"
+#include "io/io_requests.hpp"
+#include "tmc/task.hpp"
 #include "types.h"
 #include "utils.h"
 #include "xxh64.hpp"
@@ -32,10 +33,9 @@ namespace hedge::db
         return quotient_filter::make(q, r);
     }
 
-    async::task<hedge::expected<sst>> index_ops::k_way_merge_async2( // NOLINT(readability-function-cognitive-complexity)
+    tmc::task<hedge::expected<sst>> index_ops::k_way_merge_async2( // NOLINT(readability-function-cognitive-complexity)
         const merge_config& config,
         const std::vector<const sst*>& indices,
-        const std::shared_ptr<async::executor_context>& executor,
         std::shared_ptr<db::sharded_page_cache> cache)
     {
         // Check prefixes are all the same
@@ -91,7 +91,6 @@ namespace hedge::db
 
         auto fd_maybe = co_await fs::file::from_path_async(new_path,
                                                            fs::file::open_mode::read_write_new,
-                                                           async::this_thread_executor(),
                                                            config.create_new_with_odirect,
                                                            estimated_size);
 
@@ -127,7 +126,7 @@ namespace hedge::db
         auto* rbufs_end = rbufs.end();
 
         // Helper lambda to refresh both buffers by reading the next chunk from each index
-        auto refresh_buffers = [&]() -> async::task<hedge::status>
+        auto refresh_buffers = [&]() -> tmc::task<hedge::status>
         {
             for(auto* it = rbufs_begin; it < rbufs_end; ++it)
             {
@@ -170,14 +169,13 @@ namespace hedge::db
             return (bool)s;
         };
 
-        auto flush = [&]() -> async::task<hedge::status>
+        auto flush = [&]() -> tmc::task<hedge::status>
         {
             auto write_response = co_await write_buffer.flush(
                 output_file.fd(),
                 output_file.id(),
                 bytes_written,
-                config.populate_cache_with_output ? cache : nullptr,
-                executor);
+                config.populate_cache_with_output ? cache : nullptr);
 
             if(write_response.error_code)
             {
@@ -192,7 +190,7 @@ namespace hedge::db
         };
 
         // Cold path: flushes and retries writing the item
-        auto flush_and_retry = [&](const merge_entry_t& kv) -> async::task<hedge::status>
+        auto flush_and_retry = [&](const merge_entry_t& kv) -> tmc::task<hedge::status>
         {
             auto flush_result = co_await flush();
             if(!flush_result)
@@ -407,16 +405,16 @@ namespace hedge::db
         fb.meta_index_entries = merged_meta_index.size();
 
         {
-            auto res = co_await executor->submit_request(async::write_request{
-                .fd = output_file.fd(),
-                .data = merged_meta_index_bytes.data(),
-                .size = hedge::ceil_page_align(merged_meta_index_bytes.size()),
-                .offset = bytes_written});
+            auto res = co_await hedge::io::write(
+                output_file.fd(),
+                merged_meta_index_bytes.data(),
+                hedge::ceil_page_align(merged_meta_index_bytes.size()),
+                bytes_written);
 
-            if(res.error_code != 0)
-                co_return hedge::error("Failed to write meta index to file: " + std::string(strerror(res.error_code)));
+            if(res < 0)
+                co_return hedge::error("Failed to write meta index to file: " + std::string(strerror(-res)));
 
-            bytes_written += res.bytes_written;
+            bytes_written += static_cast<size_t>(res);
         }
 
         // Write quotient filter (header page + data pages)
@@ -429,15 +427,15 @@ namespace hedge::db
             page_aligned_buffer<uint8_t> qf_header_buf(PAGE_SIZE_IN_BYTES);
             std::memcpy(qf_header_buf.data(), header_span.data(), header_span.size());
 
-            auto qf_header_res = co_await executor->submit_request(async::write_request{
-                .fd = output_file.fd(),
-                .data = qf_header_buf.data(),
-                .size = PAGE_SIZE_IN_BYTES,
-                .offset = bytes_written});
+            auto qf_header_res = co_await hedge::io::write(
+                output_file.fd(),
+                qf_header_buf.data(),
+                PAGE_SIZE_IN_BYTES,
+                bytes_written);
 
-            if(qf_header_res.error_code != 0)
-                co_return hedge::error("Failed to write QF header: " + std::string(strerror(qf_header_res.error_code)));
-            bytes_written += qf_header_res.bytes_written;
+            if(qf_header_res < 0)
+                co_return hedge::error("Failed to write QF header: " + std::string(strerror(-qf_header_res)));
+            bytes_written += static_cast<size_t>(qf_header_res);
 
             // Write QF data (page-aligned)
             auto data_span = qf->data_as_byte_span();
@@ -445,15 +443,15 @@ namespace hedge::db
             page_aligned_buffer<uint8_t> qf_data_buf(data_write_size);
             std::memcpy(qf_data_buf.data(), data_span.data(), data_span.size());
 
-            auto qf_data_res = co_await executor->submit_request(async::write_request{
-                .fd = output_file.fd(),
-                .data = qf_data_buf.data(),
-                .size = data_write_size,
-                .offset = bytes_written});
+            auto qf_data_res = co_await hedge::io::write(
+                output_file.fd(),
+                qf_data_buf.data(),
+                data_write_size,
+                bytes_written);
 
-            if(qf_data_res.error_code != 0)
-                co_return hedge::error("Failed to write QF data: " + std::string(strerror(qf_data_res.error_code)));
-            bytes_written += qf_data_res.bytes_written;
+            if(qf_data_res < 0)
+                co_return hedge::error("Failed to write QF data: " + std::string(strerror(-qf_data_res)));
+            bytes_written += static_cast<size_t>(qf_data_res);
 
             fb.qf_size = bytes_written - *fb.qf_offset;
         }
@@ -471,26 +469,25 @@ namespace hedge::db
 
         // Write footer
         {
-            auto res = co_await executor->submit_request(async::write_request{
-                .fd = output_file.fd(),
-                .data = (uint8_t*)page_aligned_footer.raw_data(),
-                .size = PAGE_SIZE_IN_BYTES,
-                .offset = bytes_written});
+            auto res = co_await hedge::io::write(
+                output_file.fd(),
+                (uint8_t*)page_aligned_footer.raw_data(),
+                PAGE_SIZE_IN_BYTES,
+                bytes_written);
 
-            if(res.error_code != 0)
-                co_return hedge::error("Failed to write footer to file: " + std::string(strerror(res.error_code)));
+            if(res < 0)
+                co_return hedge::error("Failed to write footer to file: " + std::string(strerror(-res)));
 
-            bytes_written += res.bytes_written;
+            bytes_written += static_cast<size_t>(res);
         }
 
         // Truncate file to the actual written size
-        auto res = co_await async::this_thread_executor()->submit_request(async::ftruncate_request{
-            .fd = output_file.fd(),
-            .length = bytes_written,
-        });
+        {
+            auto res = co_await hedge::io::ftruncate(output_file.fd(), bytes_written);
 
-        if(res.error_code != 0)
-            co_return hedge::error("Failed to truncate merged file to final size: " + std::string(strerror(res.error_code)));
+            if(res < 0)
+                co_return hedge::error("Failed to truncate merged file to final size: " + std::string(strerror(-res)));
+        }
 
         constexpr size_t REF_PAGE_SIZE = PAGE_SIZE_IN_BYTES;
         constexpr size_t KEYS_PER_META_INDEX_PAGE = REF_PAGE_SIZE / sizeof(key_t);
@@ -503,7 +500,7 @@ namespace hedge::db
         merged_meta_index.shrink_to_fit();
 
         if(config.fdatasync_output)
-            co_await executor->submit_request(async::fdatasync_request{.fd = output_file.fd()});
+            co_await hedge::io::fdatasync(output_file.fd());
 
         if(!output_file.has_direct_access())
             posix_fadvise(output_file.fd(), 0, 0, POSIX_FADV_RANDOM);

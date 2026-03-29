@@ -6,10 +6,10 @@
 #include <utility>
 
 #include "db/block.h"
-#include "io_executor.h"
-#include "mailbox_impl.h"
+#include "io/io_requests.hpp"
 #include "perf_counter.h"
 #include "sst.h"
+#include "tmc/task.hpp"
 #include "types.h"
 #include "utils.h"
 #include "xxh64.hpp"
@@ -31,16 +31,14 @@ namespace hedge::db
         std::stack<tagged_buffer, buffers_t> _buffers;
 
     public:
+        // TODO: migrate to io_ctx
         read_buffer_pool()
         {
-            const auto queue_depth = async::this_thread_executor()->queue_depth();
-            const size_t n = queue_depth * 2;
+            // TODO: migrate to io_ctx (queue_depth / register_page_buffers)
+            constexpr size_t n = 256;
 
             buffers_t buffer_vec;
             buffer_vec.reserve(n);
-
-            std::vector<uint8_t*> buffer_ptrs;
-            buffer_ptrs.reserve(n);
 
             for(size_t i = 0; i < n; ++i)
             {
@@ -49,11 +47,9 @@ namespace hedge::db
                     throw std::runtime_error("Bould not allocate buffer");
 
                 buffer_vec.emplace_back(buffer_t(buf_ptr, std::free), static_cast<int32_t>(i));
-                buffer_ptrs.emplace_back(buf_ptr);
             }
 
             this->_buffers = std::stack<tagged_buffer, buffers_t>(std::move(buffer_vec));
-            async::this_thread_executor()->register_page_buffers(buffer_ptrs);
         }
 
         std::optional<tagged_buffer> try_pop()
@@ -177,41 +173,28 @@ namespace hedge::db
         return this->_qf->may_contain(key_hash);
     }
 
-    async::task<hedge::status> sst::_load_page_async(size_t offset, uint8_t* data_ptr, int32_t buf_index) const
+    tmc::task<hedge::status> sst::_load_page_async(size_t offset, uint8_t* data_ptr, int32_t buf_index) const
     {
-        auto response = buf_index != -1
-                            ? co_await async::this_thread_executor()->submit_request(
-                                  async::read_request_fixed{
-                                      .fd = this->fd(),
-                                      .data = data_ptr,
-                                      .offset = offset,
-                                      .size = PAGE_SIZE_IN_BYTES,
-                                      .buf_index = buf_index,
-                                  })
-                            : co_await async::this_thread_executor()->submit_request(
-                                  async::read_request{
-                                      .fd = this->fd(),
-                                      .data = data_ptr,
-                                      .off = offset,
-                                      .len = PAGE_SIZE_IN_BYTES,
-                                  });
+        int32_t res = buf_index != -1
+                          ? co_await hedge::io::read_fixed(this->fd(), data_ptr, PAGE_SIZE_IN_BYTES, offset, buf_index)
+                          : co_await hedge::io::read(this->fd(), data_ptr, PAGE_SIZE_IN_BYTES, offset);
 
-        if(response.error_code != 0)
+        if(res < 0)
         {
             auto err_msg = std::format(
                 "An error occurred while reading page at offset {} from file {}:  {} (buf idx {})",
                 offset,
                 this->path().string(),
-                strerror(-response.error_code),
+                strerror(-res),
                 buf_index);
             co_return hedge::error(err_msg);
         }
 
-        if(response.bytes_read != PAGE_SIZE_IN_BYTES)
+        if(static_cast<size_t>(res) != PAGE_SIZE_IN_BYTES)
         {
             auto err_msg = std::format(
                 "Read {} bytes instead of {} from file {} at offset {}",
-                response.bytes_read,
+                static_cast<size_t>(res),
                 PAGE_SIZE_IN_BYTES,
                 this->path().string(),
                 offset);
@@ -221,7 +204,7 @@ namespace hedge::db
         co_return hedge::ok();
     }
 
-    async::task<expected<value_t>> sst::lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache, std::optional<uint64_t> /*key_hash*/) const
+    tmc::task<expected<value_t>> sst::lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache, std::optional<uint64_t> /*key_hash*/) const
     {
         // prof::counter_guard guard(prof::get<"qf_lookups">());
 
