@@ -29,9 +29,6 @@ namespace hedge::db
         if(config.num_partition_exponent > db_config::MAX_PARTITION_EXPONENT)
             return hedge::error("num_partition_exponent must be <= " + std::to_string(db_config::MAX_PARTITION_EXPONENT));
 
-        if(config.keys_in_mem_before_flush < db_config::MIN_KEYS_IN_MEM_BEFORE_FLUSH)
-            return hedge::error("keys_in_mem_before_flush must be >= " + std::to_string(db_config::MIN_KEYS_IN_MEM_BEFORE_FLUSH));
-
         return hedge::ok();
     }
 
@@ -39,18 +36,21 @@ namespace hedge::db
     {
         db._memtable.emplace(
             memtable_config{
-                .max_inserts_cap = config.keys_in_mem_before_flush,
-                .memory_budget_cap = 128 * 1024 * 1024,
+                .max_inserts_cap = config.memtable_budget_bytes,
+                .memory_budget_cap = config.memtable_budget_bytes,
                 .auto_compaction = config.auto_compaction,
                 .use_odirect = config.use_odirect_for_indices,
-                .num_writer_threads = io::static_pool::instance().num_threads(),
+                .num_writer_threads = io::static_pool::instance()->num_threads(),
                 // .flush_io_workers = config.flush_io_workers,
                 .use_wal = !config.disable_wal,
+                .max_pending_flushes = config.max_pending_flushes,
             },
             config.num_partition_exponent,
             db._indices_path,
             &db._sst_manager->flush_iteration(),
-            std::make_shared<io::io_executor>(config.flush_io_workers, 32, "flusher"),
+            // db._bg_pool,
+            io::static_pool::instance(),
+            // std::make_shared<io::io_executor>(config.flush_io_workers, 32, "flusher"),
             [&sst_mgr = *db._sst_manager](std::vector<sst> indices) -> tmc::task<void>
             { return sst_mgr.push_new_indices(std::move(indices)); },
             [&sst_mgr = *db._sst_manager]()
@@ -67,6 +67,7 @@ namespace hedge::db
         db->_indices_path = base_path / "indices";
         db->_values_path = base_path / "values";
         db->_config = config;
+        db->_bg_pool = std::make_shared<io::io_executor>(config.compaction_io_workers, 32, "bg");
 
         if(auto status = _validate_config(config); !status)
             return status.error();
@@ -81,7 +82,7 @@ namespace hedge::db
 
         // Init clock cache
         if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB page cache
-            db->_page_cache = std::make_shared<sharded_page_cache>(config.index_page_clock_cache_size_bytes, io::static_pool::instance().num_threads() * 4);
+            db->_page_cache = std::make_shared<sharded_page_cache>(config.index_page_clock_cache_size_bytes, io::static_pool::instance()->num_threads() * 4);
 
         // Init sst_manager
         db->_sst_manager = std::make_unique<sst_manager>(
@@ -96,7 +97,9 @@ namespace hedge::db
                 .use_odirect_for_indices = config.use_odirect_for_indices,
                 .indices_path = db->_indices_path,
             },
-            std::make_shared<io::io_executor>(config.compaction_io_workers, 32, "compactor"),
+            // io::static_pool::instance(),
+            db->_bg_pool,
+            // std::make_shared<io::io_executor>(config.compaction_io_workers, 32, "compactor"),
             db->_page_cache);
 
         // Setup memtable
@@ -125,7 +128,7 @@ namespace hedge::db
         db->_value_tables.reserve(4096);
 
         // init write buffers
-        db->_write_buffers.resize(io::static_pool::instance().num_threads());
+        db->_write_buffers.resize(io::static_pool::instance()->num_threads());
 
         for(auto& write_buffer_ptr : db->_write_buffers)
         {
@@ -146,6 +149,7 @@ namespace hedge::db
         db->_indices_path = base_path / "indices";
         db->_values_path = base_path / "values";
         db->_config = config;
+        db->_bg_pool = std::make_shared<io::io_executor>(config.compaction_io_workers, 32, "bg");
 
         if(auto status = _validate_config(config); !status)
             return status.error();
@@ -155,7 +159,7 @@ namespace hedge::db
 
         // Init page cache
         if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1)
-            db->_page_cache = std::make_shared<sharded_page_cache>(config.index_page_clock_cache_size_bytes, io::static_pool::instance().num_threads() * 4);
+            db->_page_cache = std::make_shared<sharded_page_cache>(config.index_page_clock_cache_size_bytes, io::static_pool::instance()->num_threads() * 4);
 
         // Load sst_manager from indices directory
         auto maybe_sst_mgr = sst_manager::load(
@@ -170,7 +174,9 @@ namespace hedge::db
                 .use_odirect_for_indices = config.use_odirect_for_indices,
                 .indices_path = db->_indices_path,
             },
-            std::make_shared<io::io_executor>(config.compaction_io_workers, 32),
+            // io::static_pool::instance(),
+            db->_bg_pool,
+            // std::make_shared<io::io_executor>(config.compaction_io_workers, 32),
             db->_page_cache);
 
         if(!maybe_sst_mgr)
@@ -436,7 +442,7 @@ namespace hedge::db
             this->_value_tables[rotating->id()] = rotating;
         }
 
-        tmc::post(io::static_pool::instance(), [](database* database, size_t next_id) -> tmc::task<void>
+        tmc::post(*io::static_pool::instance(), [](database* database, size_t next_id) -> tmc::task<void>
                   {
                 auto t0 = std::chrono::high_resolution_clock::now();
                 auto new_value_table = value_table::make_new(database->_values_path, next_id);

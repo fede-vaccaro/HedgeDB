@@ -106,14 +106,6 @@ namespace hedge::db
         {
             return a.key < b.key;
         }
-        bool operator()(const key_t& a, const memtable_entry& b) const
-        {
-            return a < b.key;
-        }
-        bool operator()(const memtable_entry& a, const key_t& b) const
-        {
-            return a.key < b;
-        }
     };
 
     using skiplist_t = folly::ConcurrentSkipList<memtable_entry, memtable_cmp, std::allocator<uint8_t>>;

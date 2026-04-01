@@ -16,6 +16,7 @@
 #include <sys/types.h> // POSIX types, consider if needed or include specific headers like <fcntl.h> if used
 
 #include "cache.h"
+#include "io/io_executor.h"
 #include "memtable.h"
 #include "sst.h"
 #include "sst_manager.h"
@@ -37,9 +38,8 @@ namespace hedge::db
         static constexpr size_t MAX_PARTITION_EXPONENT = 16;
         /// Minimum number of keys required in the memtable before a flush is allowed.
         static constexpr size_t MIN_KEYS_IN_MEM_BEFORE_FLUSH = 1000;
-
-        /// Number of key-value pairs allowed in the memtable before it's flushed to disk.
-        size_t keys_in_mem_before_flush = 2'000'000;
+        /// Memory budget in bytes for the memtable before a flush is triggered.
+        size_t memtable_budget_bytes = 64 * 1024 * 1024;
         /// Exponent determining the number of partitions (2^num_partition_exponent). Affects index file organization.
         size_t num_partition_exponent = 10;
         /// Ratio (rhs_size / lhs_size) threshold triggering compaction during a two-way merge. rhs is the smaller index.
@@ -64,12 +64,14 @@ namespace hedge::db
         size_t compaction_io_workers = 4;
         /// Number of io_uring executor threads for parallel memtable flush
         size_t flush_io_workers = 4;
+        /// Maximum number of concurrent memtable flushes allowed before backpressure
+        size_t max_pending_flushes = 8;
 
         size_t max_num_levels = 40;
 
         size_t min_merge_width = 4;
 
-        size_t max_merge_width = -1;
+        size_t max_merge_width = 16;
 
         bool disable_wal = false;
     };
@@ -116,6 +118,9 @@ namespace hedge::db
         // Index page cache
         std::shared_ptr<sharded_page_cache> _page_cache;
         std::shared_ptr<point_cache> _index_point_cache;
+
+        // Background pool
+        std::shared_ptr<io::io_executor> _bg_pool;
 
         // --- Utilities ---
         logger _logger{"database"}; ///< Logger instance for database-related messages.

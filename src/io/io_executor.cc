@@ -1,6 +1,7 @@
 #include "io/io_executor.h"
 #include "tmc/ex_cpu.hpp"
 #include <cstddef>
+#include <limits>
 
 namespace hedge::io
 {
@@ -43,6 +44,7 @@ namespace hedge::io
                 {
                     return this->_ctxs[tid]->submit_and_wait();
                 })
+            .set_spins(32)
             .init();
 
         return *this;

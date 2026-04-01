@@ -14,17 +14,20 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <random>
 #include <vector>
 #include <xxh64.hpp>
 
-#include "async/io_executor.h"
-#include "async/task.h"
-#include "async/wait_group.h"
 #include "db/database.h"
+#include "db/memtable.h"
+#include "io/static_pool.h"
 #include "perf_counter.h"
+#include "tmc/fork_group.hpp"
+#include "tmc/sync.hpp"
+#include "tmc/task.hpp"
 
 namespace hedge::db
 {
@@ -90,7 +93,7 @@ int main(int argc, char* argv[])
     const size_t INITIAL_WRITES = std::strtoull(argv[1], nullptr, 10);
     const size_t N_OPS = std::strtoull(argv[2], nullptr, 10);
     constexpr size_t PAYLOAD_SIZE = 100;
-    constexpr size_t MEMTABLE_CAPACITY = 2'000'000;
+    constexpr size_t MEMTABLE_CAPACITY_BYTES = 64 * 1024 * 1024;
 
     bool flag_compact_all = false;
     bool flag_load_only = false;
@@ -116,7 +119,7 @@ int main(int argc, char* argv[])
     std::cout << "N_LOADS=" << INITIAL_WRITES
               << "  N_OPS=" << N_OPS
               << "  PAYLOAD_SIZE=" << PAYLOAD_SIZE
-              << "  MEMTABLE_CAPACITY=" << MEMTABLE_CAPACITY;
+              << "  MEMTABLE_CAPACITY=" << MEMTABLE_CAPACITY_BYTES;
     if(flag_compact_all)
         std::cout << "  --compact-all";
     if(flag_load_only)
@@ -126,14 +129,17 @@ int main(int argc, char* argv[])
     std::cout << std::endl;
 
     // --- Init ---
-    async::executor_pool::init_static_pool(12, 64);
+    constexpr size_t NUM_WORKERS = 16;
+    constexpr uint32_t QD = 64;
+
+    auto& pool = hedge::io::static_pool::instance()->init(NUM_WORKERS, QD, "io-pool");
 
     const std::filesystem::path base_path = "/tmp/db_perf";
 
     db_config config;
     config.auto_compaction = true;
     config.compaction_read_ahead_size_bytes = 2 * 1024 * 1024;
-    config.keys_in_mem_before_flush = MEMTABLE_CAPACITY;
+    config.memtable_budget_bytes = MEMTABLE_CAPACITY_BYTES;
     config.num_partition_exponent = 4;
     config.bucket_ratio = 1.50;
     config.use_odirect_for_indices = true;
@@ -159,39 +165,51 @@ int main(int argc, char* argv[])
     auto db = std::move(maybe_db.value());
     auto values = pregenerate_values(PAYLOAD_SIZE);
 
-    constexpr size_t NUM_WORKERS = 12;
-    auto executors = async::executor_pool::static_pool().executors();
-    executors.resize(NUM_WORKERS);
-
     // =========================================================================
     // Initial write phase — seed the database so reads have valid targets
     // =========================================================================
     if(INITIAL_WRITES > 0 && !flag_reload)
     {
-        auto wg = async::wait_group::make_shared();
-        wg->set(INITIAL_WRITES);
-
-        auto make_put = [&](size_t i) -> async::task<void>
+        auto make_put = [](size_t i, const auto& db, const auto& values, tmc::semaphore& s) -> tmc::task<void>
         {
             auto key = make_key(i);
             const auto& val = values[value_slot(i)];
             auto status = co_await db->put_async(key, val);
             if(!status)
                 std::cerr << "initial put error at i=" << i << ": " << status.error().to_string() << std::endl;
-            wg->decr();
+            s.release();
+        };
+
+        auto make_put_task = [](size_t tid, const auto& database, size_t initial_writes, const auto& values, auto make_put) -> tmc::task<void>
+        {
+            auto fg = tmc::fork_group();
+            auto semaphore = tmc::semaphore(io::static_pool::instance()->queue_depth());
+
+            for(size_t i = tid; i < initial_writes; i += NUM_WORKERS)
+            {
+                co_await semaphore;
+                fg.fork(make_put(i, database, values, semaphore));
+            }
+
+            co_await std::move(fg);
         };
 
         auto t0 = clk::now();
-        for(size_t i = 0; i < INITIAL_WRITES; ++i)
-            executors[i % NUM_WORKERS]->submit_io_task(make_put(i));
-        wg->wait();
+
+        std::vector<std::future<void>> futures;
+        futures.reserve(NUM_WORKERS);
+        for(size_t tid = 0; tid < NUM_WORKERS; ++tid)
+            futures.push_back(tmc::post_waitable(pool, make_put_task(tid, db, INITIAL_WRITES, values, make_put), 0, tid));
+        for(auto& f : futures)
+            f.get();
+
         auto t1 = clk::now();
 
         double elapsed_s = std::chrono::duration<double>(t1 - t0).count();
         std::cout << "\n--- Initial write phase (" << INITIAL_WRITES << " keys) ---" << std::endl;
         std::cout << "Duration: " << elapsed_s * 1000.0 << " ms" << std::endl;
         std::cout << "Throughput: " << static_cast<uint64_t>(INITIAL_WRITES / elapsed_s) << " items/s" << std::endl;
-        std::cout << "Backpressure: " << memtable::BACKPRESSURE.load(std::memory_order_relaxed) << " total backpressure events during initial load" << std::endl;
+        std::cout << "Backpressure: " << memtable::BACKPRESSURE << " total backpressure events during initial load" << std::endl;
 
         if(N_OPS == 0)
         {
@@ -227,9 +245,6 @@ int main(int argc, char* argv[])
     // =========================================================================
     if(!flag_load_only && N_OPS > 0)
     {
-        auto wg = async::wait_group::make_shared();
-        wg->set(N_OPS);
-
         std::atomic_size_t read_count{0};
         std::atomic_size_t write_count{0};
         std::atomic_size_t read_errors{0};
@@ -244,51 +259,68 @@ int main(int argc, char* argv[])
 
         std::atomic_size_t next_write_idx{INITIAL_WRITES};
 
-        auto make_op = [&](size_t op_idx, size_t worker_id) -> async::task<void>
+        auto make_read = [](size_t idx, const auto& db, std::atomic_size_t& read_count,
+                            std::atomic_size_t& read_errors, tmc::semaphore& s) -> tmc::task<void>
         {
-            // Decide read vs write: use a hash of op_idx for deterministic 50/50 split
-            uint64_t decision = xxh64::hash(reinterpret_cast<const char*>(&op_idx), sizeof(op_idx), 0x12345678);
-            bool is_read = (decision & 1) == 0;
-
-            if(is_read)
+            auto key = make_key(idx);
+            auto maybe_value = co_await db->get_async(key);
+            if(!maybe_value)
             {
-                // Pick a random key from [0, INITIAL_WRITES) — the guaranteed-written initial batch
-                uint64_t& rng = rng_seeds[worker_id];
-                size_t idx = fast_rand(rng) % INITIAL_WRITES;
+                read_errors.fetch_add(1, std::memory_order_relaxed);
+                // std::cerr << "get error at idx=" << idx << ": " << maybe_value.error().to_string() << std::endl;
+            }
+            read_count.fetch_add(1, std::memory_order_relaxed);
+            s.release();
+        };
 
-                auto key = make_key(idx);
-                auto maybe_value = co_await db->get_async(key);
-                if(!maybe_value)
+        auto make_write = [](size_t idx, const auto& db, const auto& values,
+                             std::atomic_size_t& write_count, tmc::semaphore& s) -> tmc::task<void>
+        {
+            auto key = make_key(idx);
+            const auto& val = values[value_slot(idx)];
+            auto status = co_await db->put_async(key, val);
+            if(!status)
+                std::cerr << "put error at i=" << idx << ": " << status.error().to_string() << std::endl;
+            write_count.fetch_add(1, std::memory_order_relaxed);
+            s.release();
+        };
+
+        auto make_op_task = [&](size_t tid) -> tmc::task<void>
+        {
+            auto fg = tmc::fork_group();
+            auto semaphore = tmc::semaphore(io::static_pool::instance()->queue_depth());
+            uint64_t rng = rng_seeds[tid];
+
+            for(size_t op_idx = tid; op_idx < N_OPS; op_idx += NUM_WORKERS)
+            {
+                uint64_t decision = xxh64::hash(reinterpret_cast<const char*>(&op_idx), sizeof(op_idx), 0x12345678);
+                bool is_read = (decision & 1) == 0;
+
+                co_await semaphore;
+                if(is_read)
                 {
-                    read_errors.fetch_add(1, std::memory_order_relaxed);
-                    std::cerr << "get error at idx=" << idx << ": " << maybe_value.error().to_string() << std::endl;
+                    size_t idx = fast_rand(rng) % INITIAL_WRITES;
+                    fg.fork(make_read(idx, db, read_count, read_errors, semaphore));
                 }
-                read_count.fetch_add(1, std::memory_order_relaxed);
-            }
-            else
-            {
-                size_t idx = next_write_idx.fetch_add(1, std::memory_order_relaxed);
-                auto key = make_key(idx);
-                const auto& val = values[value_slot(idx)];
-                auto status = co_await db->put_async(key, val);
-                if(!status)
-                    std::cerr << "put error at i=" << idx << ": " << status.error().to_string() << std::endl;
-
-                write_count.fetch_add(1, std::memory_order_relaxed);
+                else
+                {
+                    size_t idx = next_write_idx.fetch_add(1, std::memory_order_relaxed);
+                    fg.fork(make_write(idx, db, values, write_count, semaphore));
+                }
             }
 
-            wg->decr();
+            co_await std::move(fg);
         };
 
         std::cout << "\n--- Mixed phase (50/50 r/w, " << N_OPS << " ops) ---" << std::endl;
         auto t0 = clk::now();
 
-        for(size_t i = 0; i < N_OPS; ++i)
-        {
-            size_t w = i % NUM_WORKERS;
-            executors[w]->submit_io_task(make_op(i, w));
-        }
-        wg->wait();
+        std::vector<std::future<void>> futures;
+        futures.reserve(NUM_WORKERS);
+        for(size_t tid = 0; tid < NUM_WORKERS; ++tid)
+            futures.push_back(tmc::post_waitable(pool, make_op_task(tid), 0, tid));
+        for(auto& f : futures)
+            f.get();
 
         auto t1 = clk::now();
         double elapsed_s = std::chrono::duration<double>(t1 - t0).count();
@@ -318,5 +350,6 @@ int main(int argc, char* argv[])
 
     std::cout << "\n=== DONE ===" << std::endl;
     db->print_tree_structure();
+    db->wait_for_compactions_to_finish();
     return 0;
 }

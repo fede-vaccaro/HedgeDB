@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include "btree.h"
+#include "arena_allocator.h"
 #include "cache.h"
 #include "io/io_executor.h"
 #include "logger.h"
@@ -23,7 +23,6 @@
 #include "tmc/atomic_condvar.hpp"
 #include "tmc/ex_braid.hpp"
 #include "tmc/ex_cpu_st.hpp"
-#include "tmc/mutex.hpp"
 #include "tmc/semaphore.hpp"
 #include "tmc/task.hpp"
 #include "types.h"
@@ -48,6 +47,7 @@ namespace hedge::db
         /* bool use_fsync = false; // NOT IMPLEMENTED */
         bool fdatasync_flushed_sst = true;
         size_t starting_wal_epoch = 0;
+        size_t max_pending_flushes = 4;
     };
 
     struct memtable_arena_holder
@@ -123,10 +123,6 @@ namespace hedge::db
         }
     };
 
-    using memtable_impl_t = btree<uuid_t, value_ptr_t, std::less<>, false>; // READ_ONLY=false
-
-    using frozen_memtable_impl_t = btree<key_t, value_ptr_t, std::less<>, false>; // READ_ONLY=true -> When using this version, if we know that this type will be read only, every lock will be skipped for performance
-
     class memtable
     {
         memtable_config _cfg;
@@ -154,10 +150,9 @@ namespace hedge::db
         alignas(64) std::atomic<rw_sync_table_ptr_t> _pipelined_table;
 
         // Pending flushes
-        static constexpr size_t MAX_PENDING_FLUSHES = 8;
         alignas(64) std::atomic_size_t _table_switch_epoch;
         alignas(64) mutable std::shared_mutex _pending_flushes_mutex;
-        tmc::semaphore _pending_flush_slots{MAX_PENDING_FLUSHES};
+        tmc::semaphore _pending_flush_slots;
         std::condition_variable_any _pending_flushes_cv_sync;
         std::map<size_t, rw_sync_table_ptr_t> _pending_flushes;
         std::unique_ptr<tmc::ex_cpu_st> _flusher;
@@ -168,8 +163,6 @@ namespace hedge::db
 
     public:
         inline static std::atomic_size_t BACKPRESSURE{0};
-
-        memtable() = default;
 
         memtable(const memtable_config& cfg,
                  size_t num_partition_exponent,

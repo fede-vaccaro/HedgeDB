@@ -3,9 +3,9 @@
 
 namespace hedge::io
 {
-    io_executor& static_pool::instance()
+    std::shared_ptr<io_executor>& static_pool::instance()
     {
-        static io_executor executor;
+        static std::shared_ptr<io_executor> executor = std::make_shared<io_executor>();
         return executor;
     }
 } // namespace hedge::io

@@ -2,7 +2,6 @@
 #include <cstdint>
 #include <error.hpp>
 #include <fcntl.h>
-#include <latch>
 #include <mutex>
 #include <sys/mman.h>
 
@@ -17,6 +16,7 @@
 #include "page_aligned_buffer.h"
 #include "sst.h"
 #include "tmc/ex_cpu.hpp"
+#include "tmc/latch.hpp"
 #include "tmc/sync.hpp"
 #include "types.h"
 #include "utils.h"
@@ -550,7 +550,11 @@ namespace hedge::db
             posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM);
 
         if(fdatasync_output)
-            co_await hedge::io::fdatasync(fd);
+        {
+            int32_t res = co_await hedge::io::fdatasync(fd);
+            if(res < 0)
+                co_return hedge::error("Failed to fdatasync file: " + std::string(strerror(-res)));
+        }
 
         co_return sst(std::move(file),
                       std::move(meta_index),
@@ -572,7 +576,7 @@ namespace hedge::db
         std::mutex* results_mutex,
         std::vector<sst>* results,
         std::vector<hedge::error>* errors,
-        std::latch* latch,
+        tmc::latch* latch,
         bool fdatasync_output)
     {
         size_t avg_kv_len = hedge::ceil(sum_kv_len, entry_count);
@@ -605,7 +609,7 @@ namespace hedge::db
     // No async I/O, no intermediate entry buffer — iterates directly over the skiplist range.
     static constexpr size_t FLUSH_BUF_PAGES = 512;
 
-    hedge::expected<std::vector<sst>> index_ops::flush_mem_index2_parallel(
+    tmc::task<hedge::expected<std::vector<sst>>> index_ops::flush_mem_index2_parallel(
         const std::filesystem::path& base_path,
         memtable_impl3_t* index,
         size_t num_partition_exponent,
@@ -616,12 +620,12 @@ namespace hedge::db
         bool fdatasync_ssts)
     {
         if(num_partition_exponent > 16)
-            return hedge::error("Number of partitions exponent must be less than or equal to 16");
+            co_return hedge::error("Number of partitions exponent must be less than or equal to 16");
 
         auto ranges = partition_ranges_generator(index, num_partition_exponent);
 
         size_t max_partitions = size_t(1) << num_partition_exponent;
-        std::latch latch(max_partitions);
+        tmc::latch latch(max_partitions);
 
         std::mutex results_mutex;
         std::vector<sst> results;
@@ -664,12 +668,12 @@ namespace hedge::db
         for(size_t i = range_count; i < max_partitions; ++i)
             latch.count_down();
 
-        latch.wait();
+        co_await latch;
 
         if(!errors.empty())
-            return hedge::error("Parallel flush failed: " + errors.front().to_string());
+            co_return hedge::error("Parallel flush failed: " + errors.front().to_string());
 
-        return results;
+        co_return results;
     }
 
 } // namespace hedge::db

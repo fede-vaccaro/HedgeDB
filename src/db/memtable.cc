@@ -6,6 +6,7 @@
 #include <emmintrin.h>
 #include <filesystem>
 #include <future>
+#include <limits>
 #include <memory>
 #include <ranges>
 #include <thread>
@@ -17,15 +18,12 @@
 #include "generator.h"
 #include "index_ops.h"
 #include "io/io_executor.h"
-#include "io/io_requests.hpp"
 #include "key.h"
 #include "memtable.h"
 #include "tmc/atomic_condvar.hpp"
 #include "tmc/aw_resume_on.hpp"
-#include "tmc/ex_braid.hpp"
 #include "tmc/ex_cpu_st.hpp"
 #include "tmc/spawn.hpp"
-#include "tmc/sync.hpp"
 #include "types.h"
 
 namespace
@@ -150,6 +148,7 @@ namespace hedge::db
           _compaction_backpressure(compaction_backpressure),
           _cache(std::move(page_cache)),
           _wal_epoch(cfg.starting_wal_epoch),
+          _pending_flush_slots(cfg.max_pending_flushes),
           _flusher(std::make_unique<tmc::ex_cpu_st>()),
           _flush_executor(std::move(flusher_executor)),
           _logger("memtable")
@@ -487,32 +486,13 @@ namespace hedge::db
 
     std::future<void> memtable::wait_for_flush()
     {
-        auto promise_ptr = std::make_shared<std::promise<void>>();
-        auto future = promise_ptr->get_future();
+        std::shared_lock lk(this->_pending_flushes_mutex);
+        this->_pending_flushes_cv_sync.wait(lk, [this]
+                                            { return this->_pending_flushes.empty(); });
 
-        size_t num_pending_flushes;
-
-        {
-            std::shared_lock lk(this->_pending_flushes_mutex);
-            num_pending_flushes = this->_pending_flushes.size();
-        }
-
-        if(num_pending_flushes > 0)
-        {
-            tmc::post_waitable(
-                *this->_flusher,
-                [](auto* this_) -> tmc::task<void>
-                {
-                    co_await tmc::resume_on(*this_->_braid);
-                    co_return;
-                }(this))
-                .wait();
-        }
-        else
-        {
-        }
-
-        return future;
+        std::promise<void> promise;
+        promise.set_value();
+        return promise.get_future();
     }
 
     tmc::task<bool> memtable::_flush(rw_sync_table_ptr_t expected_table)
@@ -534,7 +514,7 @@ namespace hedge::db
 
             expected_table->freeze_writes();
 
-            // Acquire a flush slot (blocks if MAX_PENDING_FLUSHES in flight)
+            // Acquire a flush slot (blocks if max_pending_flushes in flight)
             co_await this->_pending_flush_slots;
 
             {
@@ -579,7 +559,7 @@ namespace hedge::db
         while(memtable_to_flush->any_active_writer()) // Wait until every writer is done with the object
             std::this_thread::yield();
 
-        auto partitioned_sorted_indices = index_ops::flush_mem_index2_parallel(
+        auto partitioned_sorted_indices = co_await index_ops::flush_mem_index2_parallel(
             this->_indices_path,
             memtable_to_flush.get()->ptr(),
             this->_num_partition_exponent,
@@ -607,6 +587,7 @@ namespace hedge::db
             assert(it->second == memtable_to_flush);
             wals = std::move(it->second->ptr()->per_thread_wals);
             this->_pending_flushes.erase(it);
+            this->_pending_flushes_cv_sync.notify_all();
         }
 
         // Avoids co_awaiting while holding lock
@@ -618,7 +599,7 @@ namespace hedge::db
         bool under_pressure = (this->_compaction_backpressure != nullptr) && this->_compaction_backpressure->ref().load(std::memory_order::relaxed);
         if(under_pressure)
         {
-            this->_logger.log("Flush completed for epoch ", curr_flush_epoch, " but compaction backpressure is active, waiting...");
+            // this->_logger.log("Flush completed for epoch ", curr_flush_epoch, " but compaction backpressure is active, waiting...");
             co_await this->_compaction_backpressure->await(false);
         }
 

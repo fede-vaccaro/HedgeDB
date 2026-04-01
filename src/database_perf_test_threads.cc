@@ -129,7 +129,7 @@ int main(int argc, char* argv[])
     db_config config;
     config.auto_compaction = true;
     config.compaction_read_ahead_size_bytes = 2 * 1024 * 1024;
-    config.keys_in_mem_before_flush = MEMTABLE_CAPACITY;
+    config.memtable_budget = MEMTABLE_CAPACITY;
     config.num_partition_exponent = 4;
     config.bucket_ratio = 1.50;
     config.use_odirect_for_indices = true;

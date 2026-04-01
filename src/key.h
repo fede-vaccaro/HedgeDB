@@ -280,6 +280,11 @@ namespace hedge
             return static_cast<std::string_view>(*this) < static_cast<std::string_view>(other);
         }
 
+        bool operator<=(const key& other) const
+        {
+            return static_cast<std::string_view>(*this) <= static_cast<std::string_view>(other);
+        }
+
         [[nodiscard]] uint8_t* data()
         {
             // Branch-free

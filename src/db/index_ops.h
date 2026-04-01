@@ -99,13 +99,6 @@ namespace hedge::db
             const std::shared_ptr<db::sharded_page_cache>& cache,
             bool use_odirect);
 
-        static hedge::expected<std::vector<sorted_index>> flush_mem_index(const std::filesystem::path& base_path,
-                                                                          memtable_impl_t* index,
-                                                                          size_t num_partition_exponent,
-                                                                          size_t flush_iteration,
-                                                                          const std::shared_ptr<db::sharded_page_cache>& cache,
-                                                                          bool use_odirect = false);
-
         struct partition_range
         {
             size_t partition_id;
@@ -115,7 +108,7 @@ namespace hedge::db
             size_t sum_key_value_lengths;
         };
 
-        static hedge::expected<std::vector<sst>> flush_mem_index2_parallel(
+        static tmc::task<hedge::expected<std::vector<sst>>> flush_mem_index2_parallel(
             const std::filesystem::path& base_path,
             memtable_impl3_t* index,
             size_t num_partition_exponent,

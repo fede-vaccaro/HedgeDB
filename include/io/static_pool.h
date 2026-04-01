@@ -7,7 +7,7 @@ namespace hedge::io
 
     struct static_pool
     {
-        static io_executor& instance();
+        static std::shared_ptr<io_executor>& instance();
 
         static_pool() = delete;
         ~static_pool() = delete;

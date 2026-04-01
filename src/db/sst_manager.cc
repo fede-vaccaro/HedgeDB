@@ -728,7 +728,7 @@ namespace hedge::db
                         {
                             // auto compaction_executor_idx = this->_compactor_executor_id++ % this->_compation_executor_pool.size();
                             // this->_compation_executor_pool[compaction_executor_idx]->submit_io_task(run_tasks_in_sequence(std::move(tasks)));
-                            tmc::post(*this->_compaction_pool, run_tasks_in_sequence(std::move(tasks)));
+                            tmc::post(*this->_compaction_pool, run_tasks_in_sequence(std::move(tasks)), 1, this->_compactor_executor_id++ % this->_compaction_pool->num_threads());
                         }
                         else
                         {

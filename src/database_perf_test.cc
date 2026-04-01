@@ -79,12 +79,12 @@ int main(int argc, char* argv[])
     constexpr size_t NUM_THREADS = 12;
     constexpr uint32_t QD = 64;
 
-    auto& pool = hedge::io::static_pool::instance().init(NUM_THREADS, QD, "io-pool");
+    auto& pool = hedge::io::static_pool::instance()->init(NUM_THREADS, QD, "io-pool");
 
     // --- CLI args ---
     size_t N_KEYS = 300'000'000;
     size_t PAYLOAD_SIZE = 100;
-    size_t MEMTABLE_CAPACITY = 2'000'000;
+    size_t MEMTABLE_CAPACITY_BYTES = 64 * 1024 * 1024;
     bool readonly = false;
     bool compact_all = false;
 
@@ -109,18 +109,18 @@ int main(int argc, char* argv[])
             PAYLOAD_SIZE = std::strtoull(argv[i], nullptr, 10);
             ++positional;
         }
-        else if(positional == 2)
-        {
-            MEMTABLE_CAPACITY = std::strtoull(argv[i], nullptr, 10);
-            ++positional;
-        }
+        // else if(positional == 2)
+        // {
+        // MEMTABLE_CAPACITY_BYTES = std::strtoull(argv[i], nullptr, 10);
+        // ++positional;
+        // }
     }
 
     std::cout << std::fixed << std::setprecision(2);
     std::cout << "=== database_perf_test ===" << std::endl;
     std::cout << "N_KEYS=" << N_KEYS
               << "  PAYLOAD_SIZE=" << PAYLOAD_SIZE
-              << "  MEMTABLE_CAPACITY=" << MEMTABLE_CAPACITY
+              << "  MEMTABLE_CAPACITY_BYTES=" << MEMTABLE_CAPACITY_BYTES
               << "  readonly=" << (readonly ? "true" : "false")
               << "  compact_all=" << (compact_all ? "true" : "false")
               << std::endl;
@@ -131,7 +131,7 @@ int main(int argc, char* argv[])
     db_config config;
     config.auto_compaction = true;
     config.compaction_read_ahead_size_bytes = 2 * 1024 * 1024;
-    config.keys_in_mem_before_flush = MEMTABLE_CAPACITY;
+    config.memtable_budget_bytes = MEMTABLE_CAPACITY_BYTES;
     config.num_partition_exponent = 4;
     config.bucket_ratio = 1.50;
     config.use_odirect_for_indices = true;
@@ -173,16 +173,29 @@ int main(int argc, char* argv[])
     // =========================================================================
     if(!readonly)
     {
-        auto make_put_task = [&](size_t tid) -> tmc::task<void>
+
+        auto make_put = [](size_t i, const auto& db, const auto& values, tmc::semaphore& s) -> tmc::task<void>
         {
-            for(size_t i = tid; i < N_KEYS; i += NUM_THREADS)
+            auto key = make_key(i);
+            const auto& val = values.at(value_slot(i));
+            auto status = co_await db->put_async(key, val);
+            if(!status)
+                std::cerr << "initial put error at i=" << i << ": " << status.error().to_string() << std::endl;
+            s.release();
+        };
+
+        auto make_put_task = [](size_t tid, const auto& database, size_t initial_writes, const auto& values, auto make_put) -> tmc::task<void>
+        {
+            auto fg = tmc::fork_group();
+            auto semaphore = tmc::semaphore(io::static_pool::instance()->queue_depth());
+
+            for(size_t i = tid; i < initial_writes; i += NUM_THREADS)
             {
-                auto key = make_key(i);
-                const auto& value = values[value_slot(i)];
-                auto status = co_await db->put_async(key, value);
-                if(!status)
-                    std::cerr << "put error at i=" << i << ": " << status.error().to_string() << std::endl;
+                co_await semaphore;
+                fg.fork(make_put(i, database, values, semaphore));
             }
+
+            co_await std::move(fg);
         };
 
         auto t0 = clk::now();
@@ -190,7 +203,7 @@ int main(int argc, char* argv[])
         std::vector<std::future<void>> futures;
         futures.reserve(NUM_THREADS);
         for(size_t tid = 0; tid < NUM_THREADS; ++tid)
-            futures.push_back(tmc::post_waitable(pool, make_put_task(tid), 0, tid));
+            futures.push_back(tmc::post_waitable(pool, make_put_task(tid, db, N_KEYS, values, make_put), 0, tid));
 
         for(auto& f : futures)
             f.get();
@@ -241,7 +254,7 @@ int main(int argc, char* argv[])
         auto make_get_task = [&](size_t tid) -> tmc::task<void>
         {
             auto fg = tmc::fork_group();
-            auto semaphore = tmc::semaphore(io::static_pool::instance().queue_depth());
+            auto semaphore = tmc::semaphore(io::static_pool::instance()->queue_depth());
 
             auto make_task = [](size_t idx, const auto& db, tmc::semaphore& s, bool readonly, auto& errors, const auto& values) -> tmc::task<void>
             {
