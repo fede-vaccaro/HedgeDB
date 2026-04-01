@@ -2,6 +2,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <coroutine>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -14,13 +15,15 @@
 
 #include <error.hpp>
 
-#include "async/wait_group.h"
 #include "fs/fs.hpp"
 #include "index_ops.h"
-#include "io_executor.h"
+#include "io/io_executor.h"
+#include "io/io_requests.hpp"
 #include "perf_counter.h"
 #include "sst_manager.h"
-#include "task.h"
+#include "tmc/aw_resume_on.hpp"
+#include "tmc/spawn_many.hpp"
+#include "tmc/sync.hpp"
 #include "utils.h"
 #include "xxh64.hpp"
 
@@ -28,16 +31,17 @@ namespace hedge::db
 {
 
     sst_manager::sst_manager(const config& cfg,
+                             std::shared_ptr<io::io_executor> compaction_pool,
                              std::shared_ptr<sharded_page_cache> page_cache)
-        : _cfg(cfg), _page_cache(std::move(page_cache))
+        : _cfg(cfg), _compaction_pool(std::move(compaction_pool)), _page_cache(std::move(page_cache))
     {
-        _compation_executor_pool.resize(cfg.compaction_io_workers);
-        size_t idx = 0;
-        for(auto& ex : _compation_executor_pool)
-        {
-            ex = async::executor_context::make_new(32);
-            ex->set_thread_name("compact-wrk-" + std::to_string(idx++));
-        }
+        // _compation_executor_pool.resize(cfg.compaction_io_workers);
+        // size_t idx = 0;
+        // for(auto& ex : _compation_executor_pool)
+        // {
+        // ex = async::executor_context::make_new(32);
+        // ex->set_thread_name("compact-wrk-" + std::to_string(idx++));
+        // }
 
         size_t num_partitions = 1UL << cfg.num_partition_exponent;
         size_t partition_size = (1 << 16) / num_partitions;
@@ -51,9 +55,10 @@ namespace hedge::db
     }
 
     hedge::expected<std::unique_ptr<sst_manager>> sst_manager::load(const config& cfg,
+                                                                    std::shared_ptr<io::io_executor> compaction_pool,
                                                                     std::shared_ptr<sharded_page_cache> page_cache)
     {
-        auto mgr = std::make_unique<sst_manager>(cfg, page_cache);
+        auto mgr = std::make_unique<sst_manager>(cfg, std::move(compaction_pool), std::move(page_cache));
 
         if(!std::filesystem::exists(cfg.indices_path))
             return mgr;
@@ -177,7 +182,7 @@ namespace hedge::db
         return mgr;
     }
 
-    void sst_manager::push_indices(std::vector<sst> new_indices)
+    tmc::task<void> sst_manager::push_new_indices(std::vector<sst> new_indices)
     {
         std::vector<uint16_t> affected_partitions;
 
@@ -191,16 +196,15 @@ namespace hedge::db
             assert(it != this->_sorted_indices.end() && "Partition not found in pre-initialized map");
 
             auto& state = *it->second;
-            std::lock_guard lk(state.mutex);
 
-            auto& l0 = state.levels[0];
-
-            l0.emplace_back(std::move(sorted_index_ptr));
-            state.levels_seq_num.fetch_add(1, std::memory_order::release);
-
-            assert(check_is_sorted_by_epoch(l0) && "Sorted indices vector is not sorted by epoch after memtable flush");
-
-            affected_partitions.push_back(prefix);
+            {
+                std::lock_guard lk(state.mutex);
+                auto& l0 = state.levels[0];
+                l0.emplace_back(std::move(sorted_index_ptr));
+                state.levels_seq_num.fetch_add(1, std::memory_order::release);
+                assert(check_is_sorted_by_epoch(l0) && "Sorted indices vector is not sorted by epoch after memtable flush");
+                affected_partitions.push_back(prefix);
+            }
         }
 
         // Deduplicate partition IDs
@@ -210,30 +214,32 @@ namespace hedge::db
             unique.begin(),
             unique.end());
 
-        if(affected_partitions.empty() || this->_compation_executor_pool.empty())
-            return;
+        if(affected_partitions.empty())
+            return tmc::task<void>{};
 
-        auto wg = async::wait_group::make_shared();
-        wg->set(affected_partitions.size());
-
-        auto make_persist_task = [this](uint16_t pid, std::shared_ptr<async::wait_group> wg_ptr) -> async::task<>
+        auto persist = [](sst_manager* sst_manager, uint16_t pid) -> tmc::task<void>
         {
-            auto status = co_await this->_persist_partition_state(pid);
+            auto status = co_await sst_manager->_persist_partition_state(pid);
             if(!status)
-                this->_logger.log("Failed to persist partition state after flush: ", status.error().to_string());
-            wg_ptr->decr();
+                sst_manager->_logger.log("Failed to persist partition state after flush: ", status.error().to_string());
         };
 
-        for(size_t i = 0; i < affected_partitions.size(); ++i)
-        {
-            auto& executor = this->_compation_executor_pool[i % this->_compation_executor_pool.size()];
-            executor->submit_io_task(make_persist_task(affected_partitions[i], wg));
-        }
+        std::vector<tmc::task<void>> tasks;
+        tasks.reserve(affected_partitions.size());
 
-        wg->wait();
+        for(unsigned short affected_partition : affected_partitions)
+            tasks.emplace_back(persist(this, affected_partition));
+
+        auto spawn_persist = [](sst_manager* sst_manager, std::vector<tmc::task<void>> tasks) -> tmc::task<void>
+        {
+            co_await tmc::resume_on(*sst_manager->_compaction_pool);
+            co_await tmc::spawn_many(tasks.begin(), tasks.end());
+        };
+
+        return spawn_persist(this, std::move(tasks));
     }
 
-    async::task<expected<value_t>> sst_manager::lookup_async(const key_t& key, size_t matching_partition_id)
+    tmc::task<expected<value_t>> sst_manager::lookup_async(const key_t& key, size_t matching_partition_id)
     {
         partition_t partition; // Local copy for safe iteration
 
@@ -312,7 +318,7 @@ namespace hedge::db
         co_return std::move(value_opt.value());
     }
 
-    async::task<> sst_manager::_make_self_completing_compaction_task(size_t level, std::vector<sst_ptr_t> inputs, size_t input_min_merge_width)
+    tmc::task<void> sst_manager::_make_self_completing_compaction_task(size_t level, std::vector<sst_ptr_t> inputs, size_t input_min_merge_width)
     {
         auto merge_config = hedge::db::index_ops::merge_config{
             .read_ahead_size = this->_cfg.compaction_read_ahead_size_bytes,
@@ -407,10 +413,10 @@ namespace hedge::db
                 constexpr size_t stop_inserts_l0_threshold = 20;
                 const size_t threshold = stop_inserts_l0_threshold * (1UL << this->_cfg.num_partition_exponent);
                 bool release_pressure = this->_pending_compacting_sst_in_l0_count < threshold / 2;
-                if(release_pressure && this->_compaction_backpressure.load(std::memory_order::relaxed))
+                if(release_pressure && this->_compaction_backpressure.ref().load(std::memory_order::relaxed))
                 {
                     this->_logger.log("Compaction backpressure released: pending compacting SST count in L0 is ", this->_pending_compacting_sst_in_l0_count, " below threshold ", threshold / 2);
-                    this->_compaction_backpressure.store(false, std::memory_order::release);
+                    this->_compaction_backpressure.ref().store(false, std::memory_order::release);
                     this->_compaction_backpressure.notify_all();
                 }
             }
@@ -495,7 +501,7 @@ namespace hedge::db
         return result;
     }
 
-    async::task<hedge::status> sst_manager::_persist_partition_state(uint16_t partition_id)
+    tmc::task<hedge::status> sst_manager::_persist_partition_state(uint16_t partition_id)
     {
         auto it = this->_sorted_indices.find(partition_id);
         if(it == this->_sorted_indices.end())
@@ -553,11 +559,11 @@ namespace hedge::db
             }
         }
 
-        auto fsync_res = co_await async::this_thread_executor()->submit_request(async::fdatasync_request{.fd = state.state_file.fd()});
-        if(fsync_res.error_code != 0)
+        auto fsync_res = co_await io::fdatasync(state.state_file.fd());
+        if(fsync_res < 0)
         {
-            this->_logger.log("fdatasync failed for partition state file: ", strerror(-fsync_res.error_code));
-            co_return hedge::error(std::string("fdatasync failed for partition state file: ") + strerror(-fsync_res.error_code));
+            this->_logger.log("fdatasync failed for partition state file: ", strerror(-fsync_res));
+            co_return hedge::error(std::string("fdatasync failed for partition state file: ") + strerror(-fsync_res));
         }
         co_return hedge::ok();
     }
@@ -657,15 +663,16 @@ namespace hedge::db
             thread_local std::random_device rd;
             thread_local std::mt19937 gen(rd());
             std::ranges::shuffle(buckets_per_partitions, gen); // Shuffle partitions to improve load distribution
-            auto run_tasks_in_sequence = [](std::vector<async::task<>> tasks) -> async::task<>
+            auto run_tasks_in_sequence = [](std::vector<tmc::task<void>> tasks) -> tmc::task<void>
             {
                 for(auto& t : tasks)
-                    co_await t;
+                    co_await std::move(t);
+                co_return;
             };
 
             constexpr bool OPTIMIZE_FOR_SPACE_AMP = false;
 
-            std::vector<async::task<>> last_level_tasks;
+            std::vector<tmc::task<void>> last_level_tasks;
 
             for(auto& [partition_prefix, buckets] : buckets_per_partitions)
             {
@@ -681,7 +688,7 @@ namespace hedge::db
                     // This is for avoiding merging SSTs containing non-adjacent epoch ranges in a following merging round
                     auto [begin, end] = buckets.equal_range(level);
 
-                    std::vector<async::task<void>> tasks;
+                    std::vector<tmc::task<void>> tasks;
                     tasks.reserve(std::distance(begin, end));
 
                     for(auto it = begin; it != end; ++it)
@@ -700,9 +707,9 @@ namespace hedge::db
                                 constexpr size_t stop_inserts_l0_threshold = 20;
                                 const auto threshold = stop_inserts_l0_threshold * (1UL << this->_cfg.num_partition_exponent);
                                 bool should_pressure = this->_pending_compacting_sst_in_l0_count > threshold;
-                                if(should_pressure && !this->_compaction_backpressure.load(std::memory_order::relaxed)) // Avoid unnecessary stores
+                                if(should_pressure && !this->_compaction_backpressure.ref().load(std::memory_order::relaxed)) // Avoid unnecessary stores
                                 {
-                                    this->_compaction_backpressure.store(true, std::memory_order::release);
+                                    this->_compaction_backpressure.ref().store(true, std::memory_order::release);
                                     this->_compaction_backpressure.notify_all();
                                 }
                             }
@@ -719,8 +726,9 @@ namespace hedge::db
 
                         if(!OPTIMIZE_FOR_SPACE_AMP || (level == 0) || (level != last_level))
                         {
-                            auto compaction_executor_idx = this->_compactor_executor_id++ % this->_compation_executor_pool.size();
-                            this->_compation_executor_pool[compaction_executor_idx]->submit_io_task(run_tasks_in_sequence(std::move(tasks)));
+                            // auto compaction_executor_idx = this->_compactor_executor_id++ % this->_compation_executor_pool.size();
+                            // this->_compation_executor_pool[compaction_executor_idx]->submit_io_task(run_tasks_in_sequence(std::move(tasks)));
+                            tmc::post(*this->_compaction_pool, run_tasks_in_sequence(std::move(tasks)));
                         }
                         else
                         {
@@ -732,10 +740,7 @@ namespace hedge::db
 
             if(OPTIMIZE_FOR_SPACE_AMP)
             {
-                std::ranges::shuffle(last_level_tasks, gen);
-                std::uniform_int_distribution<size_t> rand_executor_dist(0, this->_compation_executor_pool.size() - 1);
-
-                this->_compation_executor_pool[rand_executor_dist(gen)]->submit_io_task(run_tasks_in_sequence(std::move(last_level_tasks)));
+                tmc::post(*this->_compaction_pool, run_tasks_in_sequence(std::move(last_level_tasks)));
             }
 
             // Return immediately — tasks complete independently
@@ -747,7 +752,6 @@ namespace hedge::db
 
     void sst_manager::trigger_compaction(bool compact_all)
     {
-
         constexpr size_t max_in_flight_compaction_triggers = 16;
 
         if(!compact_all && this->_compaction_jobs_in_flight.load(std::memory_order::relaxed) >= max_in_flight_compaction_triggers)
@@ -756,19 +760,35 @@ namespace hedge::db
         this->_compaction_jobs_in_flight.fetch_add(1, std::memory_order::relaxed);
 
         // compact_all=false: non-blocking — submit compaction job, set promise immediately
-        this->_compaction_worker.submit(
-            [this, compact_all]()
-            {
-                auto maybe_stats = this->_compaction_job_size_tiered(compact_all);
-                if(!maybe_stats)
-                    this->_logger.log("Compaction job failed: ", maybe_stats.error().to_string());
-                this->_compaction_jobs_in_flight.fetch_sub(1, std::memory_order::relaxed);
-            });
+        auto make_compaction_job = [](sst_manager* sst_manager, bool compact_all) -> tmc::task<void>
+        {
+            if(!sst_manager->_compaction_braid.has_value())
+                sst_manager->_compaction_braid.emplace();
+
+            co_await tmc::resume_on(*sst_manager->_compaction_braid);
+
+            auto maybe_stats = sst_manager->_compaction_job_size_tiered(compact_all);
+            if(!maybe_stats)
+                sst_manager->_logger.log("Compaction job failed: ", maybe_stats.error().to_string());
+            sst_manager->_compaction_jobs_in_flight.fetch_sub(1, std::memory_order::relaxed);
+        };
+
+        tmc::post(*this->_compaction_pool, make_compaction_job(this, compact_all));
     }
 
     void sst_manager::wait_for_compactions_to_finish()
     {
-        this->_compaction_worker.wait_for_all_jobs();
+
+        auto make_wait_job = [](sst_manager* sst_manager) -> tmc::task<void>
+        {
+            if(!sst_manager->_compaction_braid.has_value())
+                sst_manager->_compaction_braid.emplace();
+
+            co_await tmc::resume_on(*sst_manager->_compaction_braid);
+        };
+
+        tmc::post_waitable(*this->_compaction_pool, make_wait_job(this)).wait();
+
         // Wait for all in-flight self-completing tasks on executor pool
         std::unique_lock lk(this->_pending_compactions_mutex);
         this->_pending_compactions_cv.wait(lk, [this]()

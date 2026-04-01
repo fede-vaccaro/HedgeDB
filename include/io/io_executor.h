@@ -15,17 +15,24 @@ namespace hedge::io
         uint32_t _n_threads;
         std::vector<std::unique_ptr<io_ctx>> _ctxs;
         tmc::ex_cpu _ex;
+        std::atomic_bool _initialized{false};
+        std::string name_prefix;
 
     public:
-        explicit io_executor(uint32_t n_threads, uint32_t queue_depth);
+        explicit io_executor(uint32_t n_threads, uint32_t queue_depth, std::optional<std::string> name = std::nullopt);
+
+        io_executor() = default;
+        io_executor& init(uint32_t n_threads, uint32_t queue_depth, std::optional<std::string> name = std::nullopt);
 
         [[nodiscard]] uint32_t num_threads() const
         {
+            assert(this->_initialized);
             return this->_n_threads;
         }
 
         [[nodiscard]] uint32_t queue_depth() const
         {
+            assert(this->_initialized);
             return this->_queue_depth;
         }
 
@@ -36,6 +43,14 @@ namespace hedge::io
 
         ~io_executor();
     };
+
+    void set_thread_affinity(std::pair<int32_t, int32_t> cpu_range);
+
+    inline void set_thread_affinity(int32_t tid)
+    {
+        set_thread_affinity({tid, tid});
+    }
+
 } // namespace hedge::io
 
 template <>

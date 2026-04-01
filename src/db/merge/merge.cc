@@ -114,7 +114,7 @@ namespace hedge::db
                                config.try_reading_from_cache ? cache : nullptr);
         }
 
-        [[maybe_unused]] size_t filtered_keys = 0; // TODO FIX: this was used for an assert that is currently disabled
+        [[maybe_unused]] size_t filtered_keys = 0;
         size_t bytes_written = 0;
 
         // Meta-index entries collected during the merge
@@ -377,15 +377,19 @@ namespace hedge::db
 
         assert(check_every_buf_is_eof(rbufs_begin, rbufs_end) && "LHS reader not at EOF after merge");
 
-        [[maybe_unused]] auto check_key_count_matches = [&write_buffer, filtered_keys](rolling_buffer2* rbufs_begin, rolling_buffer2* rbufs_end)
+        [[maybe_unused]] auto check_key_count_matches = [&write_buffer, filtered_keys, &dedup](rolling_buffer2* rbufs_begin, rolling_buffer2* rbufs_end)
         {
             size_t total_keys = 0;
             for(auto* it = rbufs_begin; it < rbufs_end; ++it)
                 total_keys += it->index().size();
 
-            if(total_keys != (write_buffer.indexed_kv() - filtered_keys))
+            size_t expected = write_buffer.indexed_kv() + dedup.deduplicated_keys() + filtered_keys;
+            if(total_keys != expected)
             {
-                std::cout << "Total keys from buffers: " << total_keys << " does not match indexed keys: " << write_buffer.indexed_kv() << "\n";
+                std::cout << "Total keys from buffers: " << total_keys
+                          << " does not match indexed keys: " << write_buffer.indexed_kv()
+                          << " + deduplicated: " << dedup.deduplicated_keys()
+                          << " + filtered: " << filtered_keys << "\n";
                 return false;
             }
 
@@ -500,7 +504,11 @@ namespace hedge::db
         merged_meta_index.shrink_to_fit();
 
         if(config.fdatasync_output)
-            co_await hedge::io::fdatasync(output_file.fd());
+        {
+            int32_t res = co_await hedge::io::fdatasync(output_file.fd());
+            if(res < 0)
+                co_return hedge::error("Failed to fdatasync merged file: " + std::string(strerror(-res)));
+        }
 
         if(!output_file.has_direct_access())
             posix_fadvise(output_file.fd(), 0, 0, POSIX_FADV_RANDOM);

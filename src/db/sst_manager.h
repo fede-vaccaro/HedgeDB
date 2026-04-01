@@ -8,20 +8,19 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
-#include <unordered_set>
 #include <span>
+#include <unordered_set>
 #include <vector>
 
 #include <error.hpp>
 #include <logger.h>
 
-#include "async/io_executor.h"
-#include "async/task.h"
-#include "async/worker.h"
 #include "cache.h"
+#include "io/io_executor.h"
 #include "sst.h"
+#include "tmc/atomic_condvar.hpp"
+#include "tmc/ex_braid.hpp"
 #include "types.h"
-#include "wait_group.h"
 
 namespace hedge::db
 {
@@ -37,7 +36,7 @@ namespace hedge::db
             size_t max_merge_width;
             double bucket_ratio;
             size_t compaction_read_ahead_size_bytes;
-            size_t compaction_io_workers;
+            size_t _compaction_io_workers;
             bool use_odirect_for_indices;
             std::filesystem::path indices_path;
         };
@@ -45,16 +44,18 @@ namespace hedge::db
         sst_manager() = default;
 
         explicit sst_manager(const config& cfg,
+                             std::shared_ptr<io::io_executor> compaction_pool,
                              std::shared_ptr<sharded_page_cache> page_cache);
 
         static hedge::expected<std::unique_ptr<sst_manager>> load(const config& cfg,
-                                                                   std::shared_ptr<sharded_page_cache> page_cache);
+                                                                  std::shared_ptr<io::io_executor> compaction_pool,
+                                                                  std::shared_ptr<sharded_page_cache> page_cache);
 
         // Called by memtable flush callback
-        void push_indices(std::vector<sst> new_indices);
+        tmc::task<void> push_new_indices(std::vector<sst> new_indices);
 
         // SST lookup for the read path
-        async::task<expected<value_t>> lookup_async(const key_t& key, size_t matching_partition_id);
+        tmc::task<expected<value_t>> lookup_async(const key_t& key, size_t matching_partition_id);
 
         // Compaction control
         void trigger_compaction(bool compact_all);
@@ -65,7 +66,7 @@ namespace hedge::db
         void print_tree_structure() const;
 
         // Backpressure flag (read by memtable/database)
-        std::atomic_bool& compaction_backpressure() { return _compaction_backpressure; }
+        auto& compaction_backpressure() { return _compaction_backpressure; }
 
         // Flush iteration counter (shared with memtable for SST naming)
         std::atomic_size_t& flush_iteration() { return _flush_iteration; }
@@ -109,11 +110,11 @@ namespace hedge::db
         std::atomic_size_t _flush_iteration{0};
         sorted_indices_map_t _sorted_indices;
 
-        std::vector<std::shared_ptr<async::executor_context>> _compation_executor_pool{};
+        std::shared_ptr<io::io_executor> _compaction_pool;
+        std::optional<tmc::ex_braid> _compaction_braid;
+
         size_t _compactor_executor_id{0};
         std::atomic_size_t _compaction_jobs_in_flight{0};
-
-        async::worker _compaction_worker = async::worker("compact-wrk");
 
         std::shared_ptr<sharded_page_cache> _page_cache;
 
@@ -122,7 +123,7 @@ namespace hedge::db
         size_t _pending_compacting_sst_count{0};
         std::condition_variable _pending_compactions_cv;
 
-        alignas(64) std::atomic_bool _compaction_backpressure{false};
+        alignas(64) tmc::atomic_condvar<bool> _compaction_backpressure{false};
 
         logger _logger{"sst_manager"};
 
@@ -141,16 +142,16 @@ namespace hedge::db
             std::vector<compaction_args> results;
         };
 
-        async::task<> _make_self_completing_compaction_task(size_t level, std::vector<sst_ptr_t> inputs, size_t merge_width);
+        tmc::task<void> _make_self_completing_compaction_task(size_t level, std::vector<sst_ptr_t> inputs, size_t merge_width);
 
         static std::string _serialize_levels(const partition_t& levels);
 
         static hedge::expected<partition_t> _deserialize_levels(std::string_view content,
-                                                                 const std::filesystem::path& dir_path,
-                                                                 size_t max_num_levels,
-                                                                 bool use_odirect);
+                                                                const std::filesystem::path& dir_path,
+                                                                size_t max_num_levels,
+                                                                bool use_odirect);
 
-        async::task<hedge::status> _persist_partition_state(uint16_t partition_id);
+        tmc::task<hedge::status> _persist_partition_state(uint16_t partition_id);
 
         hedge::expected<compaction_stats> _compaction_job_size_tiered(bool compact_all);
 

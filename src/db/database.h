@@ -15,16 +15,13 @@
 #include <shared_mutex>
 #include <sys/types.h> // POSIX types, consider if needed or include specific headers like <fcntl.h> if used
 
-#include "async/io_executor.h"
-#include "async/task.h"
-#include "async/worker.h"
 #include "cache.h"
 #include "memtable.h"
 #include "sst.h"
 #include "sst_manager.h"
+#include "tmc/task.hpp"
 #include "types.h"
 #include "value_table.h"
-#include "wait_group.h"
 
 namespace hedge::db
 {
@@ -111,13 +108,10 @@ namespace hedge::db
         std::vector<std::unique_ptr<thread_write_buffer>> _write_buffers;
 
         // Memtable & flushes
-        memtable _memtable;
+        std::optional<memtable> _memtable;
 
         // --- SST management and compaction ---
         std::unique_ptr<sst_manager> _sst_manager;
-
-        // --- Background Workers ---
-        async::worker _value_table_worker{}; ///< Worker thread for instantiating new value tables
 
         // Index page cache
         std::shared_ptr<sharded_page_cache> _page_cache;
@@ -137,7 +131,7 @@ namespace hedge::db
          * @param executor The I/O executor context for disk operations.
          * @return An async task resolving to an expected containing the value (byte_buffer_t) or an error.
          */
-        async::task<expected<byte_buffer_t>> get_async(const key_t& key);
+        tmc::task<expected<byte_buffer_t>> get_async(const key_t& key);
 
         /**
          * @brief Asynchronously inserts or updates a key-value pair (by copying value).
@@ -148,7 +142,7 @@ namespace hedge::db
          * @param executor The I/O executor context.
          * @return An async task resolving to a status indicating success or failure.
          */
-        async::task<hedge::status> put_async(const key_t& key, const byte_buffer_t& value);
+        tmc::task<hedge::status> put_async(const key_t& key, const byte_buffer_t& value);
 
         /**
          * @brief Asynchronously inserts a batch of small key-value pairs (values < 512 bytes).
@@ -156,9 +150,7 @@ namespace hedge::db
          * @param entries Span of key-value pairs to insert.
          * @return An async task resolving to a status indicating success or failure.
          */
-        async::task<hedge::status> put_batch_async(std::span<const std::pair<key_t, byte_buffer_t>> entries);
-
-        hedge::status put(const key_t& key, const byte_buffer_t& value);
+        tmc::task<hedge::status> put_batch_async(std::span<const std::pair<key_t, byte_buffer_t>> entries);
 
         /**
          * @brief Asynchronously marks a key as deleted.
@@ -169,7 +161,7 @@ namespace hedge::db
          * @param executor The I/O executor context.
          * @return An async task resolving to a status indicating success or failure (e.g., key not found).
          */
-        async::task<hedge::status> remove_async(const key_t& key);
+        tmc::task<hedge::status> remove_async(const key_t& key);
 
         void trigger_compaction(bool compact_all);
 
@@ -240,7 +232,7 @@ namespace hedge::db
          * @param executor The I/O executor for potential sorted_index lookups.
          * @return An async task resolving to an expected containing the pair {value_ptr, value_table_ptr} or an error (e.g., KEY_NOT_FOUND, DELETED).
          */
-        async::task<expected<value_t>> _find_value(const key_t& key);
+        tmc::task<expected<value_t>> _find_value(const key_t& key);
 
         std::shared_ptr<value_table> _find_value_table_by_id(uint32_t id);
 

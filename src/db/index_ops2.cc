@@ -639,22 +639,23 @@ namespace hedge::db
 
             auto path = base_path / dir_prefix / with_extension(file_prefix, std::format(".{:06}", flush_iteration));
 
-            tmc::post(flush_executor, flush_partition_task(
-                                          std::move(path),
-                                          range.begin,
-                                          range.end,
-                                          range.count,
-                                          range.sum_key_value_lengths,
-                                          range.partition_id,
-                                          flush_iteration,
-                                          cache,
-                                          use_odirect,
-                                          &results_mutex,
-                                          &results,
-                                          &errors,
-                                          &latch,
-                                          fdatasync_ssts),
-                0, thread_hint++ % thread_count);
+            tmc::post(flush_executor,
+                      flush_partition_task(
+                          std::move(path),
+                          range.begin,
+                          range.end,
+                          range.count,
+                          range.sum_key_value_lengths,
+                          range.partition_id,
+                          flush_iteration,
+                          cache,
+                          use_odirect,
+                          &results_mutex,
+                          &results,
+                          &errors,
+                          &latch,
+                          fdatasync_ssts),
+                      0, thread_hint++ % thread_count);
 
             range_count++;
         }

@@ -10,8 +10,6 @@
 #include "db/sst.h"
 #include "io/io_ctx.h"
 #include "io/io_requests.hpp"
-#include "io_executor.h"
-#include "mailbox_impl.h"
 #include "page_aligned_buffer.h"
 #include "types.h"
 #include "utils.h"
@@ -36,7 +34,7 @@ namespace hedge::fs
     template <typename FILE>
     std::vector<typename file_reader2<FILE>::awaitable_from_cache_or_fs_t> file_reader2<FILE>::next(const std::shared_ptr<db::sharded_page_cache>& /*cache*/)
     {
-        prof::counter_guard counter_guard(prof::get<"file_reader_next">());
+        // prof::counter_guard counter_guard(prof::get<"file_reader_next">());
 
         // if(cache == nullptr)
         return this->_next_no_cache();

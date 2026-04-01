@@ -7,7 +7,6 @@
 #include "db/block.h"
 #include "db/sst.h"
 #include "fs/file_reader2.h"
-#include "io_executor.h"
 
 namespace hedge::db
 {
@@ -113,8 +112,6 @@ namespace hedge::db
             // Submit new requests
             if(!this->_reader.is_eof())
                 this->_pending_reads = this->_reader.next(cache);
-
-            co_await async::this_thread_executor()->yield();
 
             co_return hedge::ok();
         }

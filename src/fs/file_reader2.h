@@ -7,8 +7,6 @@
 #include "cache.h"
 #include "fs.hpp"
 #include "io/io_ctx.h"
-#include "mailbox.h"
-#include "mailbox_impl.h"
 #include "page_aligned_buffer.h"
 
 /*

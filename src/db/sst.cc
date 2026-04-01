@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "db/block.h"
+#include "io/io_ctx.h"
 #include "io/io_requests.hpp"
 #include "perf_counter.h"
 #include "sst.h"
@@ -35,21 +36,26 @@ namespace hedge::db
         read_buffer_pool()
         {
             // TODO: migrate to io_ctx (queue_depth / register_page_buffers)
-            constexpr size_t n = 256;
+            const size_t num_bufs = io::io_ctx::this_thread_ctx->queue_depth() * 2;
 
             buffers_t buffer_vec;
-            buffer_vec.reserve(n);
+            buffer_vec.reserve(num_bufs);
 
-            for(size_t i = 0; i < n; ++i)
+            std::vector<uint8_t*> buffer_ptrs;
+            buffer_ptrs.reserve(num_bufs);
+
+            for(size_t i = 0; i < num_bufs; ++i)
             {
                 auto* buf_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, PAGE_SIZE_IN_BYTES));
                 if(buf_ptr == nullptr)
                     throw std::runtime_error("Bould not allocate buffer");
 
                 buffer_vec.emplace_back(buffer_t(buf_ptr, std::free), static_cast<int32_t>(i));
+                buffer_ptrs.push_back(buf_ptr);
             }
 
             this->_buffers = std::stack<tagged_buffer, buffers_t>(std::move(buffer_vec));
+            io::io_ctx::this_thread_ctx->register_page_buffers(buffer_ptrs);
         }
 
         std::optional<tagged_buffer> try_pop()
@@ -297,6 +303,7 @@ namespace hedge::db
                 {
                     tbuf = std::move(buf_from_pool.value());
                     page_ptr = tbuf.buf.get();
+                    tbuf.idx = -1;
                 }
                 else
                 {

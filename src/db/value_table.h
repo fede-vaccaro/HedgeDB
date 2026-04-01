@@ -10,9 +10,8 @@
 
 #include <error.hpp>
 
-#include "async/io_executor.h"
-#include "async/task.h"
 #include "fs/fs.hpp"
+#include "tmc/task.hpp"
 #include "types.h"
 #include "utils.h"
 
@@ -165,7 +164,7 @@ namespace hedge::db
          * @return `async::task<expected<hedge::value_ptr_t>>` resolving to the `value_ptr_t` pointing
          * to the newly written entry, or an error if the write fails.
          */
-        async::task<expected<hedge::value_ptr_t>> write_async(const key_t& key, const std::vector<uint8_t>& value, const write_reservation& reservation);
+        tmc::task<expected<hedge::value_ptr_t>> write_async(const key_t& key, const std::vector<uint8_t>& value, const write_reservation& reservation);
 
         /**
          * @brief Asynchronously reads a value entry (header + data) from a specific offset and size.
@@ -176,7 +175,7 @@ namespace hedge::db
          * @return `async::task<expected<output_file>>` resolving to the read data (`output_file`) or an error
          * (e.g., `errc::DELETED` if the flag is set and not skipped, I/O errors, validation errors).
          */
-        async::task<expected<output_file>> read_async(size_t file_offset, size_t file_size, bool skip_delete_check = false);
+        tmc::task<expected<output_file>> read_async(size_t file_offset, size_t file_size, bool skip_delete_check = false);
 
         /**
          * @brief Factory function to create a new, empty value table file.
@@ -236,7 +235,7 @@ namespace hedge::db
             return this->_reference_table != nullptr;
         }
 
-        async::task<status> flush(const std::shared_ptr<async::executor_context>& executor);
+        tmc::task<status> flush();
         expected<value_ptr_t> write(const key_t& key, const std::vector<uint8_t>& value);
         expected<output_file> try_read(value_ptr_t value_ptr);
     };

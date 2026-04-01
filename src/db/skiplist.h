@@ -116,6 +116,6 @@ namespace hedge::db
         }
     };
 
-    using skiplist_t = folly::ConcurrentSkipList<memtable_entry, memtable_cmp, StdArenaAllocator<uint8_t>>;
+    using skiplist_t = folly::ConcurrentSkipList<memtable_entry, memtable_cmp, std::allocator<uint8_t>>;
 
 } // namespace hedge::db

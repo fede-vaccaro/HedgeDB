@@ -16,6 +16,7 @@
 #include <tmc/sync.hpp>
 
 #include "io_requests_impl.h"
+#include "types.h"
 
 using namespace std::string_literals;
 
@@ -47,6 +48,7 @@ namespace hedge::io
         std::unordered_map<size_t, io_callback> _in_flight;
         uint32_t _queue_depth;
         size_t _req_id;
+        std::vector<iovec> _registered_page_buffers;
 
     public:
         inline static thread_local io_ctx* this_thread_ctx = nullptr;
@@ -82,6 +84,22 @@ namespace hedge::io
         [[nodiscard]] const io_uring* uring() const
         {
             return &this->_uring;
+        }
+
+        void register_page_buffers(const std::vector<uint8_t*>& buffers)
+        {
+            this->_registered_page_buffers.resize(buffers.size());
+            size_t c = 0;
+            for(auto& io_vec : this->_registered_page_buffers)
+            {
+                io_vec.iov_base = buffers[c];
+                io_vec.iov_len = PAGE_SIZE_IN_BYTES;
+                c++;
+            }
+
+            auto res = io_uring_register_buffers(&this->_uring, this->_registered_page_buffers.data(), buffers.size());
+            if(res < 0)
+                throw std::runtime_error("io_uring_register_buffers failed: " + std::string(strerror(-res)));
         }
 
         size_t reap_cq()

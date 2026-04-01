@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -17,11 +16,8 @@
 #include <utility>
 
 #include "async/spinlock.h"
-#include "io_executor.h"
 #include "types.h"
 #include "utils.h"
-
-#include "perf_counter.h"
 
 namespace hedge::db
 {
@@ -87,8 +83,6 @@ namespace hedge::db
             std::atomic_uint64_t flags{0};
             async::spinlock waiters_mutex{};
 
-            using coro_frame_t = std::pair<async::task<>, std::coroutine_handle<>>;
-            std::list<coro_frame_t> waiters{}; // root task and this continuation
             page_tag key{};
         };
 

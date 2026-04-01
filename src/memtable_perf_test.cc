@@ -99,41 +99,15 @@ make_put_task(hedge::db::memtable* mt, size_t tid, size_t N, size_t N_EXECUTORS)
 // main
 // ---------------------------------------------------------------------------
 constexpr size_t N = 50'000'000;
-constexpr size_t N_EXECUTORS = 12;
+constexpr size_t N_EXECUTORS = 8;
 constexpr uint32_t QD = 64;
 constexpr size_t FLUSH_THREADS = 4;
 
 int main()
 {
     // --- Main threadpool (runs put_async coroutines) ---
-    std::vector<std::unique_ptr<hedge::io::io_ctx>> main_io_ctxs(N_EXECUTORS);
-    tmc::ex_cpu main_pool;
-    main_pool.set_thread_count(N_EXECUTORS);
-    main_pool.set_thread_init_hook([&main_io_ctxs](size_t id)
-                                   {
-                                       main_io_ctxs[id] = std::make_unique<hedge::io::io_ctx>(QD);
-                                       hedge::io::io_ctx::set_thread_local(main_io_ctxs[id].get()); });
-    main_pool.set_thread_teardown_hook([](size_t)
-                                       { hedge::io::io_ctx::set_thread_local(nullptr); });
-    main_pool.set_thread_post_run_hook([&main_io_ctxs](size_t tid) -> bool
-                                { return main_io_ctxs[tid]->submit_and_wait(); });
-    main_pool.init();
-
-    // --- Flush threadpool (runs SST write coroutines during flush) ---
-    std::vector<std::unique_ptr<hedge::io::io_ctx>> flush_io_ctxs(FLUSH_THREADS);
-    tmc::ex_cpu flush_pool;
-    flush_pool.set_thread_count(FLUSH_THREADS)
-        .set_thread_init_hook(
-            [&flush_io_ctxs](size_t id)
-            {
-                flush_io_ctxs[id] = std::make_unique<hedge::io::io_ctx>(QD);
-                hedge::io::io_ctx::set_thread_local(flush_io_ctxs[id].get());
-            })
-        .set_thread_teardown_hook([](size_t)
-                                  { hedge::io::io_ctx::set_thread_local(nullptr); })
-        .set_thread_post_run_hook([&flush_io_ctxs](size_t tid) -> bool
-                           { return flush_io_ctxs[tid]->submit_and_wait(); });
-    flush_pool.init();
+    auto main_pool = std::make_shared<hedge::io::io_executor>(N_EXECUTORS, QD);
+    auto flusher_pool = std::make_shared<hedge::io::io_executor>(FLUSH_THREADS, QD / 2);
 
     // --- Memtable setup ---
     hedge::db::memtable_config cfg;
@@ -142,7 +116,7 @@ int main()
     cfg.use_odirect = true;
     cfg.use_wal = true;
     cfg.num_writer_threads = N_EXECUTORS;
-    cfg.flush_io_workers = FLUSH_THREADS;
+    // cfg.flush_io_workers = FLUSH_THREADS;
 
     static std::atomic_size_t flush_epoch{0};
 
@@ -154,6 +128,7 @@ int main()
         /*num_partition_exponent=*/4,
         /*indices_path=*/"/tmp/indices_test",
         &flush_epoch,
+        flusher_pool,
         /*push_new_indices=*/[](std::vector<hedge::db::sst> /**/) {},
         /*trigger_compaction_callback=*/[] {},
         /*page_cache=*/nullptr);
@@ -165,7 +140,7 @@ int main()
     futures.reserve(N_EXECUTORS);
     for(size_t tid = 0; tid < N_EXECUTORS; ++tid)
     {
-        futures.push_back(tmc::post_waitable(main_pool,
+        futures.push_back(tmc::post_waitable(*main_pool,
                                              make_put_task(&mt, tid, N, N_EXECUTORS),
                                              0, tid));
     }

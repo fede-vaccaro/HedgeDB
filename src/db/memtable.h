@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cassert>
 #include <condition_variable>
+#include <cstdint>
 #include <future>
 #include <map>
 #include <memory>
@@ -20,7 +21,9 @@
 #include "skiplist.h"
 #include "sst.h"
 #include "tmc/atomic_condvar.hpp"
+#include "tmc/ex_braid.hpp"
 #include "tmc/ex_cpu_st.hpp"
+#include "tmc/mutex.hpp"
 #include "tmc/semaphore.hpp"
 #include "tmc/task.hpp"
 #include "types.h"
@@ -40,7 +43,7 @@ namespace hedge::db
         bool auto_compaction = true;
         bool use_odirect = true;
         size_t num_writer_threads = 256; // (quite) safe upper bound
-        size_t flush_io_workers = 4;
+        // size_t flush_io_workers = 4;
         bool use_wal = true;
         /* bool use_fsync = false; // NOT IMPLEMENTED */
         bool fdatasync_flushed_sst = true;
@@ -49,20 +52,19 @@ namespace hedge::db
 
     struct memtable_arena_holder
     {
-        single_buffer_arena_allocator arena_;
-        memtable_arena_holder(size_t budget) : arena_(budget) {}
+        single_buffer_arena_allocator _arena;
+        memtable_arena_holder(size_t budget) : _arena(budget) {}
     };
 
-    class memtable_impl3_t : private memtable_arena_holder, public skiplist_t
+    class memtable_impl3_t : public skiplist_t
     {
         using Accessor = skiplist_t::Accessor;
         Accessor _accessor;
         alignas(64) uint32_t seq_nr;
 
     public:
-        memtable_impl3_t(size_t budget)
-            : memtable_arena_holder(budget),
-              skiplist_t(24, StdArenaAllocator<uint8_t>(this->arena_)),
+        memtable_impl3_t(size_t /*budget*/)
+            : skiplist_t(24, std::allocator<uint8_t>{}),
               _accessor(this)
         {
         }
@@ -135,9 +137,9 @@ namespace hedge::db
 
         // DB state & callbacks
         std::atomic_size_t* _flush_epoch{};
-        std::function<void(std::vector<sst>)> _push_new_indices;
+        std::function<tmc::task<void>(std::vector<sst>)> _push_new_indices;
         std::function<void()> _trigger_compaction_callback;
-        std::atomic_bool* _compaction_backpressure{};
+        tmc::atomic_condvar<bool>* _compaction_backpressure{};
 
         // Page cache
         std::shared_ptr<db::sharded_page_cache> _cache{};
@@ -152,16 +154,16 @@ namespace hedge::db
         alignas(64) std::atomic<rw_sync_table_ptr_t> _pipelined_table;
 
         // Pending flushes
-        static constexpr size_t MAX_PENDING_FLUSHES = 4;
+        static constexpr size_t MAX_PENDING_FLUSHES = 8;
         alignas(64) std::atomic_size_t _table_switch_epoch;
         alignas(64) mutable std::shared_mutex _pending_flushes_mutex;
         tmc::semaphore _pending_flush_slots{MAX_PENDING_FLUSHES};
         std::condition_variable_any _pending_flushes_cv_sync;
         std::map<size_t, rw_sync_table_ptr_t> _pending_flushes;
         std::unique_ptr<tmc::ex_cpu_st> _flusher;
-        std::thread _table_maker;
+        std::optional<tmc::ex_braid> _braid;
         std::atomic_bool _running{true};
-        std::unique_ptr<io::io_executor> _flush_executors;
+        std::shared_ptr<io::io_executor> _flush_executor;
         logger _logger;
 
     public:
@@ -173,10 +175,11 @@ namespace hedge::db
                  size_t num_partition_exponent,
                  std::filesystem::path indices_path,
                  std::atomic_size_t* flush_epoch_ptr,
-                 std::function<void(std::vector<sst>)> push_new_indices,
+                 std::shared_ptr<io::io_executor> flusher_executor,
+                 std::function<tmc::task<void>(std::vector<sst>)> push_new_indices,
                  std::function<void()> compaction_callback,
                  std::shared_ptr<db::sharded_page_cache> page_cache,
-                 std::atomic_bool* compaction_backpressure = nullptr);
+                 tmc::atomic_condvar<bool>* compaction_backpressure = nullptr);
 
         ~memtable();
 
@@ -185,8 +188,6 @@ namespace hedge::db
         tmc::task<hedge::status> put_batch_async(
             std::span<const std::pair<key_t, std::vector<uint8_t>>> entries,
             hedge::value_type value_type);
-
-        hedge::status put_sync(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type);
 
         std::optional<value_t> get(const key_t& key) const;
 
@@ -200,7 +201,7 @@ namespace hedge::db
         }
 
     private:
-        hedge::status _append_to_wal(int32_t fd, uint32_t seq_nr, const key_t& key, std::span<const uint8_t> value);
+        tmc::task<hedge::status> _append_to_wal(int32_t fd, uint32_t seq_nr, const key_t& key, std::span<const uint8_t> value);
 
         [[nodiscard]] std::shared_ptr<rw_sync_table_t> _make_memtable() const;
 
@@ -218,7 +219,7 @@ namespace hedge::db
             std::span<const std::span<const uint8_t>> value_spans);
 
         tmc::task<bool> _flush(rw_sync_table_ptr_t expected_table);
-        bool _flush_sync(rw_sync_table_ptr_t expected_table);
+        tmc::task<void> _flush_inner(size_t curr_flush_epoch, rw_sync_table_ptr_t memtable_to_flush);
     };
 
 } // namespace hedge::db

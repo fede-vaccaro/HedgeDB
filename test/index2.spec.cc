@@ -10,13 +10,13 @@
 
 #include <gtest/gtest.h>
 
-#include "async/io_executor.h"
 #include "async/wait_group.h"
-#include "cache.h"
 #include "db/index_ops.h"
 #include "db/memtable.h" // For memtable_impl3_t
 #include "db/sst.h"
+#include "io/io_executor.h"
 #include "single_buffer_arena_allocator.h"
+#include "tmc/ex_cpu.hpp"
 #include "types.h"
 #include "utils.h"
 
@@ -32,14 +32,13 @@ std::string to_hex_string(const hedge::key_t& key)
     return ss.str();
 }
 
-struct sst_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, bool, hedge::value_type>>
+struct sst_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, hedge::value_type>>
 {
     void SetUp() override
     {
         this->N_KEYS = std::get<0>(GetParam());
         this->NUM_PARTITION_EXPONENT = std::get<1>(GetParam());
-        this->USE_CACHE = std::get<2>(GetParam());
-        this->VALUE_TYPE = std::get<3>(GetParam());
+        this->VALUE_TYPE = std::get<2>(GetParam());
 
         this->_keys.reserve(this->N_KEYS);
 
@@ -51,16 +50,12 @@ struct sst_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, boo
             std::filesystem::create_directories(this->_base_path);
         }
 
-        this->_executor = hedge::async::executor_context::make_new(128);
+        this->_executor = std::make_unique<hedge::io::io_executor>(4, 128);
     }
 
     void TearDown() override
     {
-        if(this->_executor)
-        {
-            this->_executor->shutdown();
-            this->_executor.reset();
-        }
+        this->_executor.reset();
     }
 
     hedge::key_t generate_key(size_t length)
@@ -126,10 +121,9 @@ struct sst_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, boo
                                     const hedge::db::sst& sst,
                                     std::shared_ptr<hedge::async::wait_group> wg,
                                     sst_test& test_instance,
-                                    std::atomic<size_t>& found_count,
-                                    std::shared_ptr<hedge::db::sharded_page_cache> cache = nullptr) -> hedge::async::task<void>
+                                    std::atomic<size_t>& found_count) -> tmc::task<void>
     {
-        auto lookup = co_await sst.lookup_async(key, cache);
+        auto lookup = co_await sst.lookup_async(key, nullptr);
 
         if(!lookup.has_value())
         {
@@ -184,11 +178,10 @@ struct sst_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, boo
 
     size_t N_KEYS = 2000000;
     size_t NUM_PARTITION_EXPONENT = 0;
-    bool USE_CACHE = false;
     hedge::value_type VALUE_TYPE = hedge::value_type::UNDEFINED;
     std::vector<hedge::key_t> _keys;
     std::string _base_path = "/tmp/hh/test_index2";
-    std::shared_ptr<hedge::async::executor_context> _executor{};
+    std::unique_ptr<hedge::io::io_executor> _executor{};
 
     static constexpr size_t TEST_VALUE_SIZE = 100; // Fixed size for simplicity
 
@@ -201,13 +194,6 @@ struct sst_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, boo
 
 TEST_P(sst_test, test_flush_and_lookup_16b_keys)
 {
-    std::shared_ptr<hedge::db::sharded_page_cache> cache = nullptr;
-    if(this->USE_CACHE)
-    {
-        constexpr auto CACHE_MAX_SIZE = 64 * 1024 * 1024;
-        cache = std::make_shared<hedge::db::sharded_page_cache>(CACHE_MAX_SIZE, 1);
-    }
-
     auto memtable = hedge::db::memtable_impl3_t{1024 * 1024 * 128};
 
     std::cout << "Generating " << this->N_KEYS << " keys..." << std::endl;
@@ -223,13 +209,15 @@ TEST_P(sst_test, test_flush_and_lookup_16b_keys)
     std::cout << "Keys generated." << std::endl;
 
     auto t0 = std::chrono::high_resolution_clock::now();
-    auto result = hedge::db::index_ops::flush_mem_index2(
+    auto result = hedge::db::index_ops::flush_mem_index2_parallel(
         this->_base_path,
         &memtable,
         this->NUM_PARTITION_EXPONENT,
         0, // flush_iteration
-        cache,
-        false // use_odirect
+        nullptr,
+        false, // use_odirect
+        this->_executor->ex(),
+        false // fdatasync_ssts
     );
     auto t1 = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
@@ -270,7 +258,7 @@ TEST_P(sst_test, test_flush_and_lookup_16b_keys)
         auto it = sst_map.find(partition_id);
         if(it != sst_map.end())
         {
-            this->_executor->submit_io_task(lookup_task_factory(j, key, *it->second, query_wg, *this, found_count, cache));
+            tmc::post(*this->_executor, lookup_task_factory(j, key, *it->second, query_wg, *this, found_count), 0, j % this->_executor->num_threads());
         }
         else
         {
@@ -309,9 +297,9 @@ TEST_P(sst_test, test_flush_and_lookup_16b_keys)
 
     auto negative_lookup_task_factory = [&](const hedge::key_t& key,
                                             const hedge::db::sst& sst,
-                                            std::shared_ptr<hedge::async::wait_group> wg) -> hedge::async::task<void>
+                                            std::shared_ptr<hedge::async::wait_group> wg) -> tmc::task<void>
     {
-        auto lookup = co_await sst.lookup_async(key, cache);
+        auto lookup = co_await sst.lookup_async(key, nullptr);
 
         if(lookup.has_value())
         {
@@ -323,13 +311,14 @@ TEST_P(sst_test, test_flush_and_lookup_16b_keys)
 
     t0 = std::chrono::high_resolution_clock::now();
 
-    for(const auto& key : negative_keys)
+    for(size_t j = 0; j < negative_keys.size(); ++j)
     {
+        const auto& key = negative_keys[j];
         size_t partition_id = hedge::find_partition_prefix_for_key(key, partition_key_prefix_range);
         auto it = sst_map.find(partition_id);
         if(it != sst_map.end())
         {
-            this->_executor->submit_io_task(negative_lookup_task_factory(key, *it->second, query_wg));
+            tmc::post(*this->_executor, negative_lookup_task_factory(key, *it->second, query_wg), 0, j % this->_executor->num_threads());
         }
         else
         {
@@ -357,13 +346,6 @@ TEST_P(sst_test, test_flush_and_lookup_16b_keys)
 
 TEST_P(sst_test, test_flush_and_lookup_variable_keys)
 {
-    std::shared_ptr<hedge::db::sharded_page_cache> cache = nullptr;
-    if(this->USE_CACHE)
-    {
-        constexpr auto CACHE_MAX_SIZE = 128 * 1024 * 1024;
-        cache = std::make_shared<hedge::db::sharded_page_cache>(CACHE_MAX_SIZE, 1);
-    }
-
     auto memtable = hedge::db::memtable_impl3_t{1024 * 1024 * 128};
 
     std::cout << "Generating " << this->N_KEYS << " keys with variable length..." << std::endl;
@@ -379,13 +361,15 @@ TEST_P(sst_test, test_flush_and_lookup_variable_keys)
     std::cout << "Keys generated." << std::endl;
 
     auto t0 = std::chrono::high_resolution_clock::now();
-    auto result = hedge::db::index_ops::flush_mem_index2(
+    auto result = hedge::db::index_ops::flush_mem_index2_parallel(
         this->_base_path,
         &memtable,
         this->NUM_PARTITION_EXPONENT,
         0, // flush_iteration
-        cache,
-        false // use_odirect
+        nullptr,
+        false, // use_odirect
+        this->_executor->ex(),
+        false // fdatasync_ssts
     );
     auto t1 = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
@@ -425,7 +409,7 @@ TEST_P(sst_test, test_flush_and_lookup_variable_keys)
         auto it = sst_map.find(partition_id);
         if(it != sst_map.end())
         {
-            this->_executor->submit_io_task(lookup_task_factory(j, key, *it->second, query_wg, *this, found_count, cache));
+            tmc::post(*this->_executor, lookup_task_factory(j, key, *it->second, query_wg, *this, found_count), 0, j % this->_executor->num_threads());
         }
         else
         {
@@ -448,13 +432,6 @@ TEST_P(sst_test, test_flush_and_lookup_variable_keys)
 
 TEST_P(sst_test, test_load_from_disk)
 {
-    std::shared_ptr<hedge::db::sharded_page_cache> cache = nullptr;
-    if(this->USE_CACHE)
-    {
-        constexpr auto CACHE_MAX_SIZE = 64 * 1024 * 1024;
-        cache = std::make_shared<hedge::db::sharded_page_cache>(CACHE_MAX_SIZE, 1);
-    }
-
     auto memtable = hedge::db::memtable_impl3_t{1024 * 1024 * 128};
 
     for(size_t j = 0; j < this->N_KEYS; ++j)
@@ -464,12 +441,14 @@ TEST_P(sst_test, test_load_from_disk)
         memtable.insert(this->_keys.back(), buffer);
     }
 
-    auto result = hedge::db::index_ops::flush_mem_index2(
+    auto result = hedge::db::index_ops::flush_mem_index2_parallel(
         this->_base_path,
         &memtable,
         this->NUM_PARTITION_EXPONENT,
         0,
-        cache,
+        nullptr,
+        false,
+        this->_executor->ex(),
         false);
 
     ASSERT_TRUE(result.has_value()) << "Flush failed: " << result.error().to_string();
@@ -504,7 +483,7 @@ TEST_P(sst_test, test_load_from_disk)
         auto it = loaded_ssts.find(partition_id);
         if(it != loaded_ssts.end())
         {
-            this->_executor->submit_io_task(lookup_task_factory(j, key, it->second, query_wg, *this, found_count, cache));
+            tmc::post(*this->_executor, lookup_task_factory(j, key, it->second, query_wg, *this, found_count), 0, j % this->_executor->num_threads());
         }
         else
         {
@@ -534,13 +513,15 @@ TEST_P(sst_test, test_flush_succeeds)
         memtable.insert(key, buffer);
     }
 
-    auto result = hedge::db::index_ops::flush_mem_index2(
+    auto result = hedge::db::index_ops::flush_mem_index2_parallel(
         this->_base_path,
         &memtable,
         this->NUM_PARTITION_EXPONENT,
         0,       // flush_iteration
         nullptr, // cache
-        false    // use_odirect
+        false,   // use_odirect
+        this->_executor->ex(),
+        false    // fdatasync_ssts
     );
 
     ASSERT_TRUE(result.has_value()) << "Flush failed with error: " << result.error().to_string();
@@ -552,15 +533,13 @@ INSTANTIATE_TEST_SUITE_P(
     testing::Combine(
         testing::Values(1'000, 10'000, 200'000, 500'000),
         testing::Values(0, 1, 4, 10),
-        testing::Bool(),                                                                   // Use cache or not
-        testing::Values(hedge::value_type::VALUE_PTR, hedge::value_type::IN_PLACE_VALUE)), // Test using both value pointers and in-place values
+        testing::Values(hedge::value_type::VALUE_PTR, hedge::value_type::IN_PLACE_VALUE)),
 
     [](const testing::TestParamInfo<sst_test::ParamType>& info)
     {
         auto num_keys = std::get<0>(info.param);
         auto num_partitions = 1 << std::get<1>(info.param);
-        auto use_cache = std::get<2>(info.param);
-        auto value_type = std::get<3>(info.param);
-        std::string name = "N_" + std::to_string(num_keys) + "_P_" + std::to_string(num_partitions) + (use_cache ? "_CACHE" : "_NOCACHE") + (value_type == hedge::value_type::VALUE_PTR ? "_VALUE_PTR" : "_IN_PLACE_VALUE");
+        auto value_type = std::get<2>(info.param);
+        std::string name = "N_" + std::to_string(num_keys) + "_P_" + std::to_string(num_partitions) + (value_type == hedge::value_type::VALUE_PTR ? "_VALUE_PTR" : "_IN_PLACE_VALUE");
         return name;
     });

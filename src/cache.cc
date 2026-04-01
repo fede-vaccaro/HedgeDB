@@ -1,14 +1,8 @@
-#include "io_executor.h"
-#include "perf_counter.h"
-#include "types.h"
-#include "utils.h"
 #include <atomic>
 #include <cassert>
-#include <coroutine>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -18,6 +12,8 @@
 #include <utility>
 
 #include "cache.h"
+#include "types.h"
+#include "utils.h"
 
 namespace hedge::db
 {
@@ -88,19 +84,19 @@ namespace hedge::db
         this->_frame->flags.fetch_or(PAGE_FLAG_READY);
 
         // Resume waiters
-        using waiter_container_t = decltype(_metadata::waiters);
-        waiter_container_t waiters;
-        {
-            std::lock_guard lk(this->_frame->waiters_mutex);
-            waiters = std::exchange(this->_frame->waiters, waiter_container_t{});
-        }
+        // using waiter_container_t = decltype(_metadata::waiters);
+        // waiter_container_t waiters;
+        // {
+        //     std::lock_guard lk(this->_frame->waiters_mutex);
+        //     waiters = std::exchange(this->_frame->waiters, waiter_container_t{});
+        // }
 
-        if(!waiters.empty())
-        {
-            prof::get<"resumed_count">().add(waiters.size(), 0);
-            for(auto& [task, continuation] : waiters)
-                async::this_thread_executor()->transfer_task(std::move(task), continuation);
-        }
+        // if(!waiters.empty())
+        // {
+        //     prof::get<"resumed_count">().add(waiters.size(), 0);
+        //     for(auto& [task, continuation] : waiters)
+        //         async::this_thread_executor()->transfer_task(std::move(task), continuation);
+        // }
 
         // Release pin: must happen AFTER setting READY to prevent eviction
         // while the page is transitioning but before refcount drops.
@@ -127,15 +123,15 @@ namespace hedge::db
             {
                 this->_frame->flags.fetch_or(PAGE_FLAG_READY);
 
-                using waiter_container_t = decltype(_metadata::waiters);
-                waiter_container_t waiters;
-                {
-                    std::lock_guard lk(this->_frame->waiters_mutex);
-                    waiters = std::exchange(this->_frame->waiters, waiter_container_t{});
-                }
+                // using waiter_container_t = decltype(_metadata::waiters);
+                // waiter_container_t waiters;
+                // {
+                // std::lock_guard lk(this->_frame->waiters_mutex);
+                // waiters = std::exchange(this->_frame->waiters, waiter_container_t{});
+                // }
 
-                for(auto& [task, continuation] : waiters)
-                    async::this_thread_executor()->transfer_task(std::move(task), continuation);
+                // for(auto& [task, continuation] : waiters)
+                // async::this_thread_executor()->transfer_task(std::move(task), continuation);
 
                 this->_frame->flags.fetch_sub(1);
             }
@@ -333,7 +329,7 @@ namespace hedge::db
             if(curr_is_not_referenced && curr_is_not_recently_used && frame.flags.compare_exchange_strong(curr, desired))
             {
                 // std::cout << "spins: " << spins << "\n";
-                prof::get<"cache_find_frame_spins">().add(spins);
+                // prof::get<"cache_find_frame_spins">().add(spins);
                 return cur_pos;
             }
 
@@ -342,7 +338,7 @@ namespace hedge::db
 
             if(++spins == 32) // Max spins
             {
-                prof::get<"cache_find_frame_spins">().add(spins);
+                // prof::get<"cache_find_frame_spins">().add(spins);
                 return std::nullopt;
             }
         }

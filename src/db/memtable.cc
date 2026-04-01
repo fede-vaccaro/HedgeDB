@@ -17,9 +17,14 @@
 #include "generator.h"
 #include "index_ops.h"
 #include "io/io_executor.h"
+#include "io/io_requests.hpp"
 #include "key.h"
 #include "memtable.h"
+#include "tmc/atomic_condvar.hpp"
+#include "tmc/aw_resume_on.hpp"
+#include "tmc/ex_braid.hpp"
 #include "tmc/ex_cpu_st.hpp"
+#include "tmc/spawn.hpp"
 #include "tmc/sync.hpp"
 #include "types.h"
 
@@ -131,10 +136,11 @@ namespace hedge::db
                        size_t num_partition_exponent,
                        std::filesystem::path indices_path,
                        std::atomic_size_t* flush_epoch_ptr,
-                       std::function<void(std::vector<sst>)> push_new_indices,
+                       std::shared_ptr<io::io_executor> flusher_executor,
+                       std::function<tmc::task<void>(std::vector<sst>)> push_new_indices,
                        std::function<void()> trigger_compaction_callback,
                        std::shared_ptr<db::sharded_page_cache> page_cache,
-                       std::atomic_bool* compaction_backpressure)
+                       tmc::atomic_condvar<bool>* compaction_backpressure)
         : _cfg(cfg),
           _num_partition_exponent(num_partition_exponent),
           _indices_path(std::move(indices_path)),
@@ -145,10 +151,11 @@ namespace hedge::db
           _cache(std::move(page_cache)),
           _wal_epoch(cfg.starting_wal_epoch),
           _flusher(std::make_unique<tmc::ex_cpu_st>()),
+          _flush_executor(std::move(flusher_executor)),
           _logger("memtable")
     {
         this->_flusher->init();
-        this->_flush_executors = std::make_unique<io::io_executor>(this->_cfg.flush_io_workers, 32);
+        // this->_flush_executors = std::make_unique<io::io_executor>(this->_cfg.flush_io_workers, 32);
 
         this->_table.ref()
             .store(this->_make_memtable());
@@ -160,9 +167,6 @@ namespace hedge::db
         this->_running.store(false, std::memory_order::relaxed);
         this->_pipelined_table.store(nullptr, std::memory_order::relaxed);
         this->_pipelined_table.notify_one();
-
-        if(this->_table_maker.joinable())
-            this->_table_maker.join();
     }
 
     std::shared_ptr<memtable::rw_sync_table_t> memtable::_make_memtable() const
@@ -172,12 +176,12 @@ namespace hedge::db
             this->_indices_path,
             this->_cfg.use_wal,
             const_cast<std::atomic_size_t*>(&this->_wal_epoch)->fetch_add(1, std::memory_order::relaxed),
-            this->_cfg.memory_budget_cap * 2,
+            this->_cfg.memory_budget_cap,
             this->_cfg.num_writer_threads,
             this->_cfg.memory_budget_cap);
     }
 
-    hedge::status memtable::_append_to_wal(int32_t fd, uint32_t seq_nr, const key_t& key, std::span<const uint8_t> value)
+    tmc::task<hedge::status> memtable::_append_to_wal(int32_t fd, uint32_t seq_nr, const key_t& key, std::span<const uint8_t> value)
     {
         uint8_t encoded_key_size = hedge::encode_key_size(key.size());
         auto value_size = static_cast<uint16_t>(value.size());
@@ -208,6 +212,7 @@ namespace hedge::db
         const size_t expected_bytes = sizeof(uint32_t) + sizeof(uint8_t) + key.size() + sizeof(uint16_t) + value.size();
 
         int32_t res = pwritev2(fd, wal_entry.data(), wal_entry.size(), -1 /* File is opened with O_APPEND */, 0);
+        // int32_t res = co_await io::writev(fd, wal_entry.data(), wal_entry.size(), -1);
         // auto res = co_await async::this_thread_executor()->submit_request(async::writev_request{
         //     .fd = fd,
         //     .iovecs = wal_entry.data(),
@@ -216,12 +221,12 @@ namespace hedge::db
         // });
 
         if(res < 0)
-            return hedge::error("could not write into wal: " + std::string(strerror(errno)));
+            co_return hedge::error("could not write into wal: " + std::string(strerror(errno)));
 
         if(size_t(res) != expected_bytes)
-            return hedge::error("partial write into wal: " + std::to_string(res) + " != " + std::to_string(expected_bytes));
+            co_return hedge::error("partial write into wal: " + std::to_string(res) + " != " + std::to_string(expected_bytes));
 
-        return hedge::ok();
+        co_return hedge::ok();
     }
 
     tmc::task<hedge::status> memtable::put_async(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type)
@@ -290,82 +295,7 @@ namespace hedge::db
             if(!this->_cfg.use_wal)
                 co_return hedge::ok();
 
-            co_return this->_append_to_wal(memtable->per_thread_wals[THIS_THREAD_IDX].fd(), seq_nr, key, value_span);
-        }
-    }
-
-    hedge::status memtable::put_sync(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type)
-    {
-        // Loading from an atomic shared every time is slow AF
-        // Basically a thread-local cache
-        thread_local std::shared_ptr<rw_sync_table_t> local_memtable_ref = this->_table.ref().load(std::memory_order::relaxed);
-
-        static std::atomic_size_t THREADS{0};
-        thread_local std::atomic_size_t THIS_THREAD_IDX = THREADS.fetch_add(1, std::memory_order::relaxed);
-        auto insert_attempts = 0UL;
-
-        while(true)
-        {
-
-            // Using modulo to map the thread index to the number of available counters.
-            // THIS_THREAD_IDX is a monotonic counter, so this handles the case where
-            // the number of lifetime threads exceeds the number of writer slots.
-            auto memtable = local_memtable_ref->acquire_writer(THIS_THREAD_IDX % this->_cfg.num_writer_threads);
-
-            if(!memtable) [[unlikely]] // The memtable has been frozen (from the flusher), try loading the new one
-            {
-                auto t = this->_table.ref().load(std::memory_order::relaxed);
-                if(t == local_memtable_ref) // Backpressure
-                {
-
-                    constexpr size_t ATTEMPTS_BEFORE_BACKPRESSURE = 8;
-
-                    if(insert_attempts++ < ATTEMPTS_BEFORE_BACKPRESSURE)
-                    {
-                        folly::detail::asm_volatile_pause();
-                    }
-                    else
-                    {
-                        BACKPRESSURE.fetch_add(1, std::memory_order::relaxed);
-                        this->_table.ref().wait(t, std::memory_order::relaxed);
-                    }
-                    continue;
-                }
-
-                local_memtable_ref = t;
-                insert_attempts = 0;
-                continue;
-            }
-
-            // auto value_span = memtable->value_arena.allocate(value.size() + 1);
-            constexpr size_t alignment = std::atomic_ref<std::span<const uint8_t>>::required_alignment;
-            auto* value_ptr = memtable->value_arenas[THIS_THREAD_IDX % this->_cfg.num_writer_threads]->allocate_many(value.size() + 1, alignment);
-            // bool ok = !value_span.empty(); // nullptr means out of memory budget
-            bool ok = value_ptr != nullptr; // nullptr means out of memory budget
-            std::span<uint8_t> value_span(value_ptr, value.size() + 1);
-            uint32_t seq_nr;
-
-            if(ok)
-            {
-                value_span[0] = static_cast<uint8_t>(value_type);
-                std::memcpy(value_span.data() + 1, value.data(), value.size());
-                std::tie(ok, seq_nr) = memtable->insert(key, value_span); // returns false if memtable run out of memory (budget)
-            }
-
-            if(!ok || memtable->bytes_written.fetch_add(key.size() + value.size() + 1, std::memory_order_relaxed) > this->_cfg.memory_budget_cap) [[unlikely]]
-            {
-                bool ok = this->_flush_sync(local_memtable_ref);
-                if(!ok)
-                    std::this_thread::yield();
-
-                continue;
-            }
-
-            // OK
-            if(!this->_cfg.use_wal)
-                return hedge::ok();
-
-            return this->_append_to_wal(memtable->per_thread_wals[THIS_THREAD_IDX].fd(), seq_nr, key, value_span);
+            co_return co_await this->_append_to_wal(memtable->per_thread_wals[THIS_THREAD_IDX].fd(), seq_nr, key, value_span);
         }
     }
 
@@ -569,14 +499,17 @@ namespace hedge::db
 
         if(num_pending_flushes > 0)
         {
-            // The executor processes jobs in FIFO order; so when the future is set,
-            // every flush submitted before this point will be done
-            tmc::post(*this->_flusher, [promise_ptr]() mutable
-                      { promise_ptr->set_value(); });
+            tmc::post_waitable(
+                *this->_flusher,
+                [](auto* this_) -> tmc::task<void>
+                {
+                    co_await tmc::resume_on(*this_->_braid);
+                    co_return;
+                }(this))
+                .wait();
         }
         else
         {
-            promise_ptr->set_value();
         }
 
         return future;
@@ -606,9 +539,7 @@ namespace hedge::db
 
             {
                 std::unique_lock lk(this->_pending_flushes_mutex);
-
                 rw_sync_table_ptr_t next_in_pipeline = this->_pipelined_table.exchange(nullptr);
-
                 memtable_to_flush = this->_table.ref().exchange(next_in_pipeline, std::memory_order::relaxed);
                 this->_pending_flushes.insert({curr_flush_epoch, memtable_to_flush});
             }
@@ -621,63 +552,10 @@ namespace hedge::db
             this->_pipelined_table.store(this->_make_memtable(), std::memory_order_relaxed);
 
             // Launch flush job on the flusher executor
-            tmc::post(*this->_flusher,
-                      [this, curr_flush_epoch, memtable_to_flush]()
-                      {
-                          auto t0 = std::chrono::high_resolution_clock::now();
-
-                          while(memtable_to_flush->any_active_writer()) // Wait until every writer is done with the object
-                              std::this_thread::yield();
-
-                          auto partitioned_sorted_indices = index_ops::flush_mem_index2_parallel(
-                              this->_indices_path,
-                              memtable_to_flush.get()->ptr(),
-                              this->_num_partition_exponent,
-                              curr_flush_epoch,
-                              this->_cache,
-                              this->_cfg.use_odirect,
-                              this->_flush_executors->ex(),
-                              this->_cfg.fdatasync_flushed_sst);
-
-                          if(!partitioned_sorted_indices.has_value())
-                          {
-                              this->_logger.log("could not flush memtable: ", partitioned_sorted_indices.error().to_string());
-                              this->_pending_flush_slots.release();
-                              return;
-                          }
-
-                          std::vector<fs::file> wals;
-
-                          {
-                              std::unique_lock lk(this->_pending_flushes_mutex);
-                              this->_push_new_indices(std::move(partitioned_sorted_indices.value()));
-                              auto it = this->_pending_flushes.find(curr_flush_epoch);
-                              assert(it->second == memtable_to_flush);
-                              wals = std::move(it->second->ptr()->per_thread_wals);
-                              this->_pending_flushes.erase(it);
-                          }
-
-                          // Release the flush slot so the next flush can proceed
-                          this->_pending_flush_slots.release();
-
-                          bool under_pressure = this->_compaction_backpressure && this->_compaction_backpressure->load(std::memory_order::relaxed);
-                          if(under_pressure)
-                          {
-                              this->_logger.log("Flush completed for epoch ", curr_flush_epoch, " but compaction backpressure is active, waiting...");
-                              this->_compaction_backpressure->wait(true, std::memory_order::relaxed);
-                          }
-
-                          if(this->_cfg.auto_compaction)
-                              this->_trigger_compaction_callback();
-
-                          std::ranges::for_each(wals, [](fs::file& wal)
-                                                { std::filesystem::remove(wal.path()); });
-                          wals.clear();
-
-                          auto t1 = std::chrono::high_resolution_clock::now();
-                          [[maybe_unused]] auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-                          [[maybe_unused]] double throughput = (double)memtable_to_flush->ptr()->size() / (duration.count() / 1'000'000.0);
-                      });
+            tmc::spawn(this->_flush_inner(curr_flush_epoch, memtable_to_flush))
+                .with_priority(0)
+                .run_on(*this->_flusher)
+                .detach();
 
             // Release mutex
             this->_flush_mutex.store(false);
@@ -687,111 +565,74 @@ namespace hedge::db
         co_return false;
     }
 
-    bool memtable::_flush_sync(rw_sync_table_ptr_t expected_table)
+    tmc::task<void> memtable::_flush_inner(size_t curr_flush_epoch, rw_sync_table_ptr_t memtable_to_flush)
     {
-        bool expected = false;
+        if(!this->_braid.has_value())
+            this->_braid.emplace();
 
-        // Only one thread can enter here
-        if(this->_flush_mutex.compare_exchange_strong(expected, true))
+        co_await tmc::resume_on(*this->_braid);
+
+        // std::cout << "curr_flush_epoch: " << curr_flush_epoch << "\n";
+
+        auto t0 = std::chrono::high_resolution_clock::now();
+
+        while(memtable_to_flush->any_active_writer()) // Wait until every writer is done with the object
+            std::this_thread::yield();
+
+        auto partitioned_sorted_indices = index_ops::flush_mem_index2_parallel(
+            this->_indices_path,
+            memtable_to_flush.get()->ptr(),
+            this->_num_partition_exponent,
+            curr_flush_epoch,
+            this->_cache,
+            this->_cfg.use_odirect,
+            this->_flush_executor->ex(),
+            this->_cfg.fdatasync_flushed_sst);
+
+        if(!partitioned_sorted_indices.has_value())
         {
-            // Guard: if the table was already swapped by a concurrent flush, bail out
-            if(this->_table.ref().load(std::memory_order::relaxed) != expected_table)
-            {
-                this->_flush_mutex.store(false);
-                return false;
-            }
-
-            size_t curr_flush_epoch = this->_flush_epoch->fetch_add(1, std::memory_order::relaxed);
-            rw_sync_table_ptr_t memtable_to_flush{};
-
-            expected_table->freeze_writes();
-
-            {
-                std::unique_lock lk(this->_pending_flushes_mutex);
-
-                this->_pending_flushes_cv_sync.wait(lk, [this]()
-                                                    { return this->_pending_flushes.size() < MAX_PENDING_FLUSHES; });
-
-                rw_sync_table_ptr_t next_in_pipeline = this->_pipelined_table.exchange(nullptr);
-
-                memtable_to_flush = this->_table.ref().exchange(next_in_pipeline, std::memory_order::relaxed);
-                this->_pending_flushes.insert({curr_flush_epoch, memtable_to_flush});
-            }
-
-            this->_table.notify_all();
-
-            // Publish new memtable to readers
-            this->_table_switch_epoch.fetch_add(1, std::memory_order::release);
-
-            this->_pipelined_table.store(this->_make_memtable(), std::memory_order_relaxed);
-
-            // Launch flush job
-            tmc::post(*this->_flusher,
-                      [this, curr_flush_epoch, memtable_to_flush]()
-                      {
-                          auto t0 = std::chrono::high_resolution_clock::now();
-
-                          while(memtable_to_flush->any_active_writer()) // Wait until every writer is done with the object
-                              std::this_thread::yield();
-
-                          auto partitioned_sorted_indices = index_ops::flush_mem_index2_parallel(
-                              this->_indices_path,
-                              memtable_to_flush.get()->ptr(),
-                              this->_num_partition_exponent,
-                              curr_flush_epoch,
-                              this->_cache,
-                              this->_cfg.use_odirect,
-                              this->_flush_executors->ex(),
-                              this->_cfg.fdatasync_flushed_sst);
-
-                          if(!partitioned_sorted_indices.has_value())
-                          {
-                              this->_logger.log("could not flush memtable: ", partitioned_sorted_indices.error().to_string());
-                              return;
-                          }
-
-                          bool should_notify_flush = false;
-
-                          std::vector<fs::file> wals;
-
-                          {
-                              std::unique_lock lk(this->_pending_flushes_mutex);
-                              this->_push_new_indices(std::move(partitioned_sorted_indices.value()));
-                              auto it = this->_pending_flushes.find(curr_flush_epoch);
-                              assert(it->second == memtable_to_flush);
-                              wals = std::move(it->second->ptr()->per_thread_wals);
-                              this->_pending_flushes.erase(it);
-                              should_notify_flush = this->_pending_flushes.size() <= MAX_PENDING_FLUSHES / 2;
-                          }
-
-                          if(should_notify_flush)
-                              this->_pending_flushes_cv_sync.notify_all();
-
-                          bool under_pressure = this->_compaction_backpressure && this->_compaction_backpressure->load(std::memory_order::relaxed);
-                          if(under_pressure)
-                          {
-                              this->_logger.log("Flush completed for epoch ", curr_flush_epoch, " but compaction backpressure is active, waiting...");
-                              this->_compaction_backpressure->wait(true, std::memory_order::relaxed);
-                          }
-
-                          if(this->_cfg.auto_compaction)
-                              this->_trigger_compaction_callback();
-
-                          std::ranges::for_each(wals, [](fs::file& wal)
-                                                { std::filesystem::remove(wal.path()); });
-                          wals.clear();
-
-                          auto t1 = std::chrono::high_resolution_clock::now();
-                          [[maybe_unused]] auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-                          [[maybe_unused]] double throughput = (double)memtable_to_flush->ptr()->size() / (duration.count() / 1'000'000.0);
-                      });
-
-            // Release mutex
-            this->_flush_mutex.store(false);
-            return true;
+            this->_logger.log("could not flush memtable: ", partitioned_sorted_indices.error().to_string());
+            this->_pending_flush_slots.release();
+            co_return;
         }
 
-        return false;
+        std::vector<fs::file> wals;
+
+        tmc::task<void> persist_indices{};
+
+        {
+            std::unique_lock lk(this->_pending_flushes_mutex);
+            persist_indices = this->_push_new_indices(std::move(partitioned_sorted_indices.value()));
+            auto it = this->_pending_flushes.find(curr_flush_epoch);
+            assert(it->second == memtable_to_flush);
+            wals = std::move(it->second->ptr()->per_thread_wals);
+            this->_pending_flushes.erase(it);
+        }
+
+        // Avoids co_awaiting while holding lock
+        co_await std::move(persist_indices);
+
+        // Release the flush slot so the next flush can proceed
+        co_await this->_pending_flush_slots.co_release();
+
+        bool under_pressure = (this->_compaction_backpressure != nullptr) && this->_compaction_backpressure->ref().load(std::memory_order::relaxed);
+        if(under_pressure)
+        {
+            this->_logger.log("Flush completed for epoch ", curr_flush_epoch, " but compaction backpressure is active, waiting...");
+            co_await this->_compaction_backpressure->await(false);
+        }
+
+        if(this->_cfg.auto_compaction)
+            this->_trigger_compaction_callback();
+
+        std::ranges::for_each(wals, [](const fs::file& wal)
+                              { std::filesystem::remove(wal.path()); });
+        wals.clear();
+
+        auto t1 = std::chrono::high_resolution_clock::now();
+        [[maybe_unused]] auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+        [[maybe_unused]] double throughput = (double)memtable_to_flush->ptr()->size() / (duration.count() / 1'000'000.0);
+        co_return;
     }
 
     hedge::status memtable::replay_wal()

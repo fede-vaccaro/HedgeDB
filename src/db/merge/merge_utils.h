@@ -226,6 +226,7 @@ namespace hedge::db
     {
         std::optional<merge_entry_t> _to_be_checked_item{};
         std::optional<merge_entry_t> _ready_item{};
+        size_t _deduplicated_keys{0};
 
     public:
         merge_iterator2() = default;
@@ -236,14 +237,19 @@ namespace hedge::db
             {
                 this->_to_be_checked_item = std::move(new_item);
             }
-            else if(this->_to_be_checked_item->key != new_item.key) // If the new item's key is different from the buffered item's key...
+            else if(this->_to_be_checked_item->key != new_item.key)
             {
-                // ...it means the key group for `this->_to_be_checked_item` is complete.
-                // Move the completed item to `this->_ready_item` using std::exchange,
-                // and store the `new_item` as the start of the next potential key group.
                 this->_ready_item = std::exchange(this->_to_be_checked_item, std::move(new_item));
             }
+            else
+            {
+                // Duplicate key: keep the existing one (from the newer SST, which was pushed first
+                // due to heap ordering by epoch), discard the older duplicate.
+                ++this->_deduplicated_keys;
+            }
         }
+
+        [[nodiscard]] size_t deduplicated_keys() const { return this->_deduplicated_keys; }
 
         /**
          * @brief Checks if an item is finalized and ready to be popped.

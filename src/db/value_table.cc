@@ -9,10 +9,8 @@
 #include <memory>
 #include <sys/mman.h>
 
-#include "async/io_executor.h"
-#include "async/mailbox_impl.h"
-
 #include "db/value_table.h"
+#include "io/io_requests.hpp"
 #include "fs/fs.hpp"
 #include "key.h"
 #include "types.h"
@@ -66,7 +64,7 @@ namespace hedge::db
         });
     }
 
-    async::task<expected<hedge::value_ptr_t>> value_table::write_async(const key_t& key, const std::vector<uint8_t>& value, const value_table::write_reservation& reservation)
+    tmc::task<expected<hedge::value_ptr_t>> value_table::write_async(const key_t& key, const std::vector<uint8_t>& value, const value_table::write_reservation& reservation)
     {
         const size_t total_size = sizeof(file_header) + key.size() + value.size();
 
@@ -99,18 +97,13 @@ namespace hedge::db
                 .iov_base = buffer.get(),
                 .iov_len = aligned_size};
 
-            auto write_res = co_await async::this_thread_executor()->submit_request(async::writev_request{
-                .fd = this->fd(),
-                .iovecs = &iov,
-                .iovecs_count = 1,
-                .offset = reservation.offset,
-            });
+            int32_t write_result = co_await hedge::io::writev(this->fd(), &iov, 1, reservation.offset);
 
-            if(write_res.error_code != 0)
-                co_return hedge::error(std::format("Failed to write value to value table (path: {}): {}", this->path().string(), strerror(-write_res.error_code)));
+            if(write_result < 0)
+                co_return hedge::error(std::format("Failed to write value to value table (path: {}): {}", this->path().string(), strerror(-write_result)));
 
-            if(write_res.bytes_written != aligned_size)
-                co_return hedge::error(std::format("Failed to write value to value table (path: {}): expected {}, got {}", this->path().string(), aligned_size, write_res.bytes_written));
+            if(static_cast<size_t>(write_result) != aligned_size)
+                co_return hedge::error(std::format("Failed to write value to value table (path: {}): expected {}, got {}", this->path().string(), aligned_size, write_result));
 
             co_return hedge::value_ptr_t(
                 reservation.offset,
@@ -135,18 +128,13 @@ namespace hedge::db
                 .iov_base = const_cast<uint8_t*>(value.data()),
                 .iov_len = value.size()}};
 
-        auto write_value_response = co_await async::this_thread_executor()->submit_request(async::writev_request{
-            .fd = this->fd(),
-            .iovecs = iovecs.data(),
-            .iovecs_count = iovecs.size(),
-            .offset = reservation.offset,
-        });
+        int32_t write_result = co_await hedge::io::writev(this->fd(), iovecs.data(), iovecs.size(), reservation.offset);
 
-        if(write_value_response.error_code != 0)
-            co_return hedge::error(std::format("Failed to write value to value table (path: {}): {}", this->path().string(), strerror(-write_value_response.error_code)));
+        if(write_result < 0)
+            co_return hedge::error(std::format("Failed to write value to value table (path: {}): {}", this->path().string(), strerror(-write_result)));
 
-        if(write_value_response.bytes_written != total_size)
-            co_return hedge::error(std::format("Failed to write value to value table (path: {}): expected {}, got {}", this->path().string(), total_size, write_value_response.bytes_written));
+        if(static_cast<size_t>(write_result) != total_size)
+            co_return hedge::error(std::format("Failed to write value to value table (path: {}): expected {}, got {}", this->path().string(), total_size, write_result));
 
         co_return hedge::value_ptr_t(
             reservation.offset,
@@ -154,7 +142,7 @@ namespace hedge::db
             this->_unique_id);
     }
 
-    async::task<expected<output_file>> value_table::read_async(size_t file_offset, size_t total_file_size, bool /* skip_delete_check */)
+    tmc::task<expected<output_file>> value_table::read_async(size_t file_offset, size_t total_file_size, bool /* skip_delete_check */)
     {
         if(file_offset + total_file_size > this->_current_offset)
         {
@@ -190,26 +178,21 @@ namespace hedge::db
 
             auto data = buffer_t(data_ptr, std::free);
 
-            auto read_response = co_await async::this_thread_executor()->submit_request(async::read_request{
-                .fd = this->fd(),
-                .data = data.get(),
-                .off = page_offset,
-                .len = page_aligned_size,
-            });
+            int32_t read_result = co_await hedge::io::read(this->fd(), data.get(), page_aligned_size, page_offset);
 
-            if(read_response.error_code != 0)
+            if(read_result < 0)
             {
                 co_return hedge::error(std::format("Failed to read file from value table (path: {}): {}",
                                                    this->path().string(),
-                                                   strerror(-read_response.error_code)));
+                                                   strerror(-read_result)));
             }
 
-            if(read_response.bytes_read != page_aligned_size)
+            if(static_cast<size_t>(read_result) != page_aligned_size)
             {
                 co_return hedge::error(std::format("Failed to read file from value table (path: {}): expected {}, got {}",
                                                    this->path().string(),
-                                                   total_file_size,
-                                                   read_response.bytes_read));
+                                                   page_aligned_size,
+                                                   read_result));
             }
 
             // Todo: Reader class for consuming bytes from a buffer
@@ -251,26 +234,21 @@ namespace hedge::db
                     .iov_base = static_cast<void*>(key_value_buffer.data()),
                     .iov_len = key_value_size}};
 
-            auto read_response = co_await async::this_thread_executor()->submit_request(async::unaligned_readv_request{
-                .fd = this->fd(),
-                .iovecs = iovecs.data(),
-                .iovecs_count = iovecs.size(),
-                .offset = file_offset,
-            });
+            int32_t read_result = co_await hedge::io::readv(this->fd(), iovecs.data(), iovecs.size(), file_offset);
 
-            if(read_response.error_code != 0)
+            if(read_result < 0)
             {
                 co_return hedge::error(std::format("Failed to read file from value table (path: {}): {}",
                                                    this->path().string(),
-                                                   strerror(-read_response.error_code)));
+                                                   strerror(-read_result)));
             }
 
-            if(read_response.bytes_read != total_file_size)
+            if(static_cast<size_t>(read_result) != total_file_size)
             {
                 co_return hedge::error(std::format("Failed to read file from value table (path: {}): expected {}, got {}",
                                                    this->path().string(),
                                                    total_file_size,
-                                                   read_response.bytes_read));
+                                                   read_result));
             }
 
             if(total_file_size != sizeof(header) + header.key_size + header.value_size)
@@ -346,7 +324,7 @@ namespace hedge::db
         return std::shared_ptr<value_table>(new value_table{id, TABLE_MAX_SIZE_BYTES, std::move(file_desc.value())});
     }
 
-    async::task<status> thread_write_buffer::flush(const std::shared_ptr<async::executor_context>& /* executor */)
+    tmc::task<status> thread_write_buffer::flush()
     {
         // TODO: Test write with io_uring
         // Although, the other writes should be blocked if a fiber is flushing

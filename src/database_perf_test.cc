@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <random>
@@ -20,12 +21,13 @@
 #include <vector>
 #include <xxh64.hpp>
 
-#include "async/io_executor.h"
-#include "async/task.h"
-#include "async/wait_group.h"
 #include "db/database.h"
 #include "db/memtable.h"
+#include "io/static_pool.h"
 #include "perf_counter.h"
+#include "tmc/fork_group.hpp"
+#include "tmc/sync.hpp"
+#include "tmc/task.hpp"
 
 namespace hedge::db
 {
@@ -73,6 +75,12 @@ int main(int argc, char* argv[])
     using namespace hedge::db;
     using clk = std::chrono::high_resolution_clock;
 
+    // Init static threadpool
+    constexpr size_t NUM_THREADS = 12;
+    constexpr uint32_t QD = 64;
+
+    auto& pool = hedge::io::static_pool::instance().init(NUM_THREADS, QD, "io-pool");
+
     // --- CLI args ---
     size_t N_KEYS = 300'000'000;
     size_t PAYLOAD_SIZE = 100;
@@ -118,8 +126,6 @@ int main(int argc, char* argv[])
               << std::endl;
 
     // --- Init ---
-    async::executor_pool::init_static_pool(12, 64);
-
     const std::filesystem::path base_path = "/tmp/db_perf";
 
     db_config config;
@@ -167,30 +173,27 @@ int main(int argc, char* argv[])
     // =========================================================================
     if(!readonly)
     {
-        auto wg = async::wait_group::make_shared();
-        wg->set(N_KEYS);
-
-        auto make_put_task = [&](size_t i) -> async::task<void>
+        auto make_put_task = [&](size_t tid) -> tmc::task<void>
         {
-            auto key = make_key(i);
-            const auto& value = values[value_slot(i)];
-            auto status = co_await db->put_async(key, value);
-            if(!status)
-                std::cerr << "put error at i=" << i << ": " << status.error().to_string() << std::endl;
-            wg->decr();
+            for(size_t i = tid; i < N_KEYS; i += NUM_THREADS)
+            {
+                auto key = make_key(i);
+                const auto& value = values[value_slot(i)];
+                auto status = co_await db->put_async(key, value);
+                if(!status)
+                    std::cerr << "put error at i=" << i << ": " << status.error().to_string() << std::endl;
+            }
         };
-
-        constexpr size_t NUM_WRITERS = 12;
-        std::vector<std::shared_ptr<async::executor_context>> writers = async::executor_pool::static_pool().executors();
-        writers.resize(NUM_WRITERS);
 
         auto t0 = clk::now();
 
-        for(size_t i = 0; i < N_KEYS; ++i)
-        {
-            writers[i % NUM_WRITERS]->submit_io_task(make_put_task(i));
-        }
-        wg->wait();
+        std::vector<std::future<void>> futures;
+        futures.reserve(NUM_THREADS);
+        for(size_t tid = 0; tid < NUM_THREADS; ++tid)
+            futures.push_back(tmc::post_waitable(pool, make_put_task(tid), 0, tid));
+
+        for(auto& f : futures)
+            f.get();
 
         auto t0_finish_writing = clk::now();
 
@@ -219,57 +222,65 @@ int main(int argc, char* argv[])
         db->wait_for_compactions_to_finish();
     }
 
-    // instantiate the executors for the read phase before the write phase completes, to overlap executor startup with compactions
-
     // =========================================================================
     // Read phase (cold + warm)
     // =========================================================================
     {
         std::cout << "\nWaiting before starting read phase..." << std::endl;
-        // std::this_thread::sleep_for(std::chrono::seconds(60)); // give some time for the system to settle after the write phase and compactions
     }
 
     size_t read_count = std::min(N_KEYS, size_t{10'000'000});
-    // size_t read_count = N_KEYS;
 
     for(int pass = 0; pass < 2; ++pass)
     {
         std::cout << "\n--- Read phase " << (pass == 0 ? "(cold)" : "(warm)") << " ---" << std::endl;
         std::cout << "Reading " << read_count << " keys." << std::endl;
 
-        auto wg = async::wait_group::make_shared();
-        wg->set(read_count);
         std::atomic_size_t errors{0};
 
-        auto make_get_task = [&](size_t idx) -> async::task<void>
+        auto make_get_task = [&](size_t tid) -> tmc::task<void>
         {
-            auto key = make_key(idx);
+            auto fg = tmc::fork_group();
+            auto semaphore = tmc::semaphore(io::static_pool::instance().queue_depth());
 
-            auto maybe_value = co_await db->get_async(key);
-            if(!maybe_value)
+            auto make_task = [](size_t idx, const auto& db, tmc::semaphore& s, bool readonly, auto& errors, const auto& values) -> tmc::task<void>
             {
-                errors++;
-                wg->decr();
-                co_return;
+                auto key = make_key(idx);
+
+                auto maybe_value = co_await db->get_async(key);
+                if(!maybe_value)
+                {
+                    std::cout << "get error at idx=" << idx << ": " << maybe_value.error().to_string() << std::endl;
+                    errors++;
+                    s.release();
+                    co_return;
+                }
+
+                if(!readonly && maybe_value.value() != values.at(value_slot(idx)))
+                    errors++;
+
+                s.release();
+            };
+
+            for(size_t idx = tid; idx < read_count; idx += NUM_THREADS)
+            {
+                co_await semaphore;
+                fg.fork(make_task(idx, db, semaphore, readonly, errors, values));
             }
 
-            if(!readonly && maybe_value.value() != values.at(value_slot(idx)))
-                errors++;
-
-            wg->decr();
+            co_await std::move(fg);
         };
 
-        constexpr size_t NUM_READERS = 12;
-        std::vector<std::shared_ptr<async::executor_context>> readers = async::executor_pool::static_pool().executors();
-        readers.resize(NUM_READERS);
-
         auto t0 = clk::now();
-        for(size_t i = 0; i < read_count; ++i)
-        {
-            readers[i % NUM_READERS]->submit_io_task(make_get_task(i));
-        }
 
-        wg->wait();
+        std::vector<std::future<void>> futures;
+        futures.reserve(NUM_THREADS);
+        for(size_t tid = 0; tid < NUM_THREADS; ++tid)
+            futures.push_back(tmc::post_waitable(pool, make_get_task(tid), 0, tid));
+
+        for(auto& f : futures)
+            f.get();
+
         auto t1 = clk::now();
 
         double elapsed_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
