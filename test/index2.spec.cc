@@ -2,21 +2,17 @@
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
-#include <limits>
 #include <random>
-#include <ranges>
 #include <sstream>
 #include <vector>
 
 #include <gtest/gtest.h>
 
-#include "async/wait_group.h"
 #include "db/index_ops.h"
 #include "db/memtable.h" // For memtable_impl3_t
 #include "db/sst.h"
 #include "io/io_executor.h"
 #include "single_buffer_arena_allocator.h"
-#include "tmc/ex_cpu.hpp"
 #include "types.h"
 #include "utils.h"
 
@@ -32,7 +28,7 @@ std::string to_hex_string(const hedge::key_t& key)
     return ss.str();
 }
 
-struct sst_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, hedge::value_type>>
+struct range_scan_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, hedge::value_type>>
 {
     void SetUp() override
     {
@@ -119,8 +115,7 @@ struct sst_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, hed
     static auto lookup_task_factory(size_t j,
                                     const hedge::key_t& key,
                                     const hedge::db::sst& sst,
-                                    std::shared_ptr<hedge::async::wait_group> wg,
-                                    sst_test& test_instance,
+                                    range_scan_test& test_instance,
                                     std::atomic<size_t>& found_count) -> tmc::task<void>
     {
         auto lookup = co_await sst.lookup_async(key, nullptr);
@@ -142,8 +137,6 @@ struct sst_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, hed
                 std::cerr << "Value mismatch for key: " << to_hex_string(key) << '\n';
             }
         }
-
-        wg->decr();
     };
 
     std::span<uint8_t> generate_value(hedge::single_buffer_arena_allocator& arena, size_t seed, hedge::value_type type)
@@ -192,7 +185,7 @@ struct sst_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, hed
     hedge::single_buffer_arena_allocator arena{1024 * 1024 * 128};
 };
 
-TEST_P(sst_test, test_flush_and_lookup_16b_keys)
+TEST_P(range_scan_test, test_flush_and_lookup_16b_keys)
 {
     auto memtable = hedge::db::memtable_impl3_t{1024 * 1024 * 128};
 
@@ -209,18 +202,20 @@ TEST_P(sst_test, test_flush_and_lookup_16b_keys)
     std::cout << "Keys generated." << std::endl;
 
     auto t0 = std::chrono::high_resolution_clock::now();
-    auto result = hedge::db::index_ops::flush_mem_index2_parallel(
-        this->_base_path,
-        &memtable,
-        this->NUM_PARTITION_EXPONENT,
-        0, // flush_iteration
-        nullptr,
-        false, // use_odirect
-        this->_executor->ex(),
-        false // fdatasync_ssts
-    );
+    auto result_future = tmc::post_waitable(*_executor, hedge::db::index_ops::flush_mem_index2_parallel(
+                                                            this->_base_path,
+                                                            &memtable,
+                                                            this->NUM_PARTITION_EXPONENT,
+                                                            0, // flush_iteration
+                                                            nullptr,
+                                                            false, // use_odirect
+                                                            this->_executor->ex(),
+                                                            false // fdatasync_ssts
+                                                            ));
     auto t1 = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+    auto result = result_future.get();
 
     if(!result)
     {
@@ -235,21 +230,17 @@ TEST_P(sst_test, test_flush_and_lookup_16b_keys)
     ASSERT_FALSE(ssts.empty());
 
     // Prepare lookup
-    auto query_wg = hedge::async::wait_group::make_shared();
-    query_wg->set(this->_keys.size());
-
     std::atomic<size_t> found_count{0};
 
     std::cout << "Reading back keys..." << std::endl;
     t0 = std::chrono::high_resolution_clock::now();
     std::map<uint16_t, const hedge::db::sst*> sst_map;
     for(const auto& sst : ssts)
-    {
         sst_map[sst.upper_bound()] = &sst;
-    }
 
     size_t partition_key_prefix_range = (1 << 16) / (1 << this->NUM_PARTITION_EXPONENT);
 
+    std::vector<std::future<void>> lookup_futures;
     for(size_t j = 0; j < this->_keys.size(); ++j)
     {
         const auto& key = this->_keys[j];
@@ -258,15 +249,13 @@ TEST_P(sst_test, test_flush_and_lookup_16b_keys)
         auto it = sst_map.find(partition_id);
         if(it != sst_map.end())
         {
-            tmc::post(*this->_executor, lookup_task_factory(j, key, *it->second, query_wg, *this, found_count), 0, j % this->_executor->num_threads());
-        }
-        else
-        {
-            query_wg->decr();
+            auto f = tmc::post_waitable(*this->_executor, lookup_task_factory(j, key, *it->second, *this, found_count), 0, j % this->_executor->num_threads());
+            lookup_futures.emplace_back(std::move(f));
         }
     }
 
-    query_wg->wait();
+    for(auto& f : lookup_futures)
+        f.get();
 
     t1 = std::chrono::high_resolution_clock::now();
     duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
@@ -292,12 +281,10 @@ TEST_P(sst_test, test_flush_and_lookup_16b_keys)
 
     std::cout << "Verifying " << num_negative_keys << " non-existent keys..." << std::endl;
 
-    query_wg->set(negative_keys.size());
     std::atomic<size_t> unexpected_found_count{0};
 
     auto negative_lookup_task_factory = [&](const hedge::key_t& key,
-                                            const hedge::db::sst& sst,
-                                            std::shared_ptr<hedge::async::wait_group> wg) -> tmc::task<void>
+                                            const hedge::db::sst& sst) -> tmc::task<void>
     {
         auto lookup = co_await sst.lookup_async(key, nullptr);
 
@@ -306,10 +293,11 @@ TEST_P(sst_test, test_flush_and_lookup_16b_keys)
             unexpected_found_count.fetch_add(1, std::memory_order_relaxed);
             std::cerr << "Unexpectedly found key: " << to_hex_string(key) << '\n';
         }
-        wg->decr();
     };
 
     t0 = std::chrono::high_resolution_clock::now();
+
+    std::vector<std::future<void>> negative_lookup_futures;
 
     for(size_t j = 0; j < negative_keys.size(); ++j)
     {
@@ -318,16 +306,16 @@ TEST_P(sst_test, test_flush_and_lookup_16b_keys)
         auto it = sst_map.find(partition_id);
         if(it != sst_map.end())
         {
-            tmc::post(*this->_executor, negative_lookup_task_factory(key, *it->second, query_wg), 0, j % this->_executor->num_threads());
-        }
-        else
-        {
-            // If partition doesn't exist, key definitely doesn't exist in our index
-            query_wg->decr();
+
+            auto f = tmc::post_waitable(*this->_executor, negative_lookup_task_factory(key, *it->second), 0, j % this->_executor->num_threads());
+            negative_lookup_futures.emplace_back(std::move(f));
         }
     }
 
-    query_wg->wait();
+    for(auto& f : negative_lookup_futures)
+    {
+        f.get();
+    }
 
     t1 = std::chrono::high_resolution_clock::now();
     duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
@@ -344,7 +332,7 @@ TEST_P(sst_test, test_flush_and_lookup_16b_keys)
     }
 }
 
-TEST_P(sst_test, test_flush_and_lookup_variable_keys)
+TEST_P(range_scan_test, test_flush_and_lookup_variable_keys)
 {
     auto memtable = hedge::db::memtable_impl3_t{1024 * 1024 * 128};
 
@@ -361,16 +349,18 @@ TEST_P(sst_test, test_flush_and_lookup_variable_keys)
     std::cout << "Keys generated." << std::endl;
 
     auto t0 = std::chrono::high_resolution_clock::now();
-    auto result = hedge::db::index_ops::flush_mem_index2_parallel(
-        this->_base_path,
-        &memtable,
-        this->NUM_PARTITION_EXPONENT,
-        0, // flush_iteration
-        nullptr,
-        false, // use_odirect
-        this->_executor->ex(),
-        false // fdatasync_ssts
-    );
+    auto result = tmc::post_waitable(*_executor, hedge::db::index_ops::flush_mem_index2_parallel(
+                                                     this->_base_path,
+                                                     &memtable,
+                                                     this->NUM_PARTITION_EXPONENT,
+                                                     0, // flush_iteration
+                                                     nullptr,
+                                                     false, // use_odirect
+                                                     this->_executor->ex(),
+                                                     false // fdatasync_ssts
+                                                     ))
+                      .get();
+
     auto t1 = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
 
@@ -387,9 +377,6 @@ TEST_P(sst_test, test_flush_and_lookup_variable_keys)
     ASSERT_FALSE(ssts.empty());
 
     // Prepare lookup
-    auto query_wg = hedge::async::wait_group::make_shared();
-    query_wg->set(this->_keys.size());
-
     std::atomic<size_t> found_count{0};
 
     std::cout << "Reading back keys..." << std::endl;
@@ -402,6 +389,8 @@ TEST_P(sst_test, test_flush_and_lookup_variable_keys)
 
     size_t partition_key_prefix_range = (1 << 16) / (1 << this->NUM_PARTITION_EXPONENT);
 
+    std::vector<std::future<void>> lookup_futures;
+
     for(size_t j = 0; j < this->_keys.size(); ++j)
     {
         const auto& key = this->_keys[j];
@@ -409,15 +398,13 @@ TEST_P(sst_test, test_flush_and_lookup_variable_keys)
         auto it = sst_map.find(partition_id);
         if(it != sst_map.end())
         {
-            tmc::post(*this->_executor, lookup_task_factory(j, key, *it->second, query_wg, *this, found_count), 0, j % this->_executor->num_threads());
-        }
-        else
-        {
-            query_wg->decr();
+            auto f = tmc::post_waitable(*this->_executor, lookup_task_factory(j, key, *it->second, *this, found_count), 0, j % this->_executor->num_threads());
+            lookup_futures.emplace_back(std::move(f));
         }
     }
 
-    query_wg->wait();
+    for(auto& f : lookup_futures)
+        f.get();
 
     t1 = std::chrono::high_resolution_clock::now();
     duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
@@ -430,7 +417,7 @@ TEST_P(sst_test, test_flush_and_lookup_variable_keys)
     ASSERT_EQ(found_count.load(), this->_keys.size());
 }
 
-TEST_P(sst_test, test_load_from_disk)
+TEST_P(range_scan_test, test_load_from_disk)
 {
     auto memtable = hedge::db::memtable_impl3_t{1024 * 1024 * 128};
 
@@ -441,15 +428,16 @@ TEST_P(sst_test, test_load_from_disk)
         memtable.insert(this->_keys.back(), buffer);
     }
 
-    auto result = hedge::db::index_ops::flush_mem_index2_parallel(
-        this->_base_path,
-        &memtable,
-        this->NUM_PARTITION_EXPONENT,
-        0,
-        nullptr,
-        false,
-        this->_executor->ex(),
-        false);
+    auto result = tmc::post_waitable(*_executor, hedge::db::index_ops::flush_mem_index2_parallel(
+                                                     this->_base_path,
+                                                     &memtable,
+                                                     this->NUM_PARTITION_EXPONENT,
+                                                     0,
+                                                     nullptr,
+                                                     false,
+                                                     this->_executor->ex(),
+                                                     false))
+                      .get();
 
     ASSERT_TRUE(result.has_value()) << "Flush failed: " << result.error().to_string();
 
@@ -470,11 +458,11 @@ TEST_P(sst_test, test_load_from_disk)
     }
 
     // Lookup all keys in loaded SSTs
-    auto query_wg = hedge::async::wait_group::make_shared();
-    query_wg->set(this->_keys.size());
     std::atomic<size_t> found_count{0};
 
     size_t partition_key_prefix_range = (1 << 16) / (1 << this->NUM_PARTITION_EXPONENT);
+
+    std::vector<std::future<void>> lookup_futures;
 
     for(size_t j = 0; j < this->_keys.size(); ++j)
     {
@@ -483,20 +471,18 @@ TEST_P(sst_test, test_load_from_disk)
         auto it = loaded_ssts.find(partition_id);
         if(it != loaded_ssts.end())
         {
-            tmc::post(*this->_executor, lookup_task_factory(j, key, it->second, query_wg, *this, found_count), 0, j % this->_executor->num_threads());
-        }
-        else
-        {
-            query_wg->decr();
+            auto f = tmc::post_waitable(*this->_executor, lookup_task_factory(j, key, it->second, *this, found_count), 0, j % this->_executor->num_threads());
+            lookup_futures.push_back(std::move(f));
         }
     }
 
-    query_wg->wait();
+    for(auto& f : lookup_futures)
+        f.get();
 
     ASSERT_EQ(found_count.load(), this->_keys.size());
 }
 
-TEST_P(sst_test, test_flush_succeeds)
+TEST_P(range_scan_test, test_flush_succeeds)
 {
     auto memtable = hedge::db::memtable_impl3_t{1024 * 1024 * 128};
 
@@ -513,29 +499,30 @@ TEST_P(sst_test, test_flush_succeeds)
         memtable.insert(key, buffer);
     }
 
-    auto result = hedge::db::index_ops::flush_mem_index2_parallel(
-        this->_base_path,
-        &memtable,
-        this->NUM_PARTITION_EXPONENT,
-        0,       // flush_iteration
-        nullptr, // cache
-        false,   // use_odirect
-        this->_executor->ex(),
-        false    // fdatasync_ssts
-    );
+    auto result = tmc::post_waitable(*_executor, hedge::db::index_ops::flush_mem_index2_parallel(
+                                                     this->_base_path,
+                                                     &memtable,
+                                                     this->NUM_PARTITION_EXPONENT,
+                                                     0,       // flush_iteration
+                                                     nullptr, // cache
+                                                     false,   // use_odirect
+                                                     this->_executor->ex(),
+                                                     false // fdatasync_ssts
+                                                     ))
+                      .get();
 
     ASSERT_TRUE(result.has_value()) << "Flush failed with error: " << result.error().to_string();
 }
 
 INSTANTIATE_TEST_SUITE_P(
     test_suite,
-    sst_test,
+    range_scan_test,
     testing::Combine(
         testing::Values(1'000, 10'000, 200'000, 500'000),
         testing::Values(0, 1, 4, 10),
         testing::Values(hedge::value_type::VALUE_PTR, hedge::value_type::IN_PLACE_VALUE)),
 
-    [](const testing::TestParamInfo<sst_test::ParamType>& info)
+    [](const testing::TestParamInfo<range_scan_test::ParamType>& info)
     {
         auto num_keys = std::get<0>(info.param);
         auto num_partitions = 1 << std::get<1>(info.param);

@@ -5,8 +5,7 @@
 
 #include <error.hpp>
 
-#include "fs/file_reader.h"
-#include "mailbox_impl.h"
+#include "perf_counter.h"
 #include "types.h"
 #include "utils.h"
 
@@ -220,6 +219,7 @@ namespace hedge::db
     {
         key_t key;
         value_buffer_t value;
+        uint64_t epoch;
     };
 
     class merge_iterator2

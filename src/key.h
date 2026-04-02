@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <compare>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
@@ -265,6 +266,11 @@ namespace hedge
             return static_cast<std::span<uint8_t>>(*this);
         }
 
+        auto operator<=>(const key& other) const
+        {
+            return static_cast<std::string_view>(*this) <=> static_cast<std::string_view>(other);
+        }
+
         bool operator==(const key& other) const
         {
             return static_cast<std::string_view>(*this) == static_cast<std::string_view>(other);
@@ -283,6 +289,11 @@ namespace hedge
         bool operator<=(const key& other) const
         {
             return static_cast<std::string_view>(*this) <= static_cast<std::string_view>(other);
+        }
+
+        bool operator>=(const key& other) const
+        {
+            return static_cast<std::string_view>(*this) >= static_cast<std::string_view>(other);
         }
 
         [[nodiscard]] uint8_t* data()

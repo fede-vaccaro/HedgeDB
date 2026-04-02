@@ -444,4 +444,26 @@ namespace hedge::db
         return page_id;
     }
 
+    std::optional<page_range> sst::find_range(std::optional<key_t> lower, std::optional<key_t> upper) const
+    {
+        size_t first = 0;
+        if(lower)
+        {
+            auto id = _find_page_id(*lower);
+            if(!id)
+                return std::nullopt;
+            first = *id;
+        }
+
+        size_t last = this->_meta_index.size() - 1;
+        if(upper)
+        {
+            auto id = _find_page_id(*upper);
+            if(id)
+                last = *id;
+        }
+
+        return page_range{.first_page_id = first, .last_page_id = last};
+    }
+
 } // namespace hedge::db

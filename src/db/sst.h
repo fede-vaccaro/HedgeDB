@@ -64,6 +64,12 @@ namespace hedge::db
         }
     }
 
+    struct page_range
+    {
+        size_t first_page_id;
+        size_t last_page_id; ///< Inclusive.
+    };
+
     class sst : public fs::file
     {
         // Allow index_ops to access private members for operations like merging/saving.
@@ -108,6 +114,8 @@ namespace hedge::db
         [[nodiscard]] size_t epoch() const { return this->_footer.epoch; }
 
         [[nodiscard]] const sst_footer& footer() const { return this->_footer; }
+
+        [[nodiscard]] std::optional<page_range> find_range(std::optional<key_t> lower, std::optional<key_t> upper) const;
 
         void stats() const;
 
@@ -158,5 +166,10 @@ namespace hedge::db
 
         [[nodiscard]] tmc::task<hedge::status> _load_page_async(size_t offset, uint8_t* data_ptr, int32_t buf_index) const;
     };
+
+    // Typedefs related to LSM-tree hierarchies
+    using sst_ptr_t = std::shared_ptr<hedge::db::sst>;
+    using level_t = std::vector<sst_ptr_t>;
+    using partition_t = std::vector<level_t>;
 
 } // namespace hedge::db

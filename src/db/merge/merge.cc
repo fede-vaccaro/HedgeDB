@@ -210,7 +210,10 @@ namespace hedge::db
         auto heap_item_t_comparator = [](const heap_item_t& lhs, const heap_item_t& rhs)
         {
             // Cpp heap is a max-heap by default, we need a min-heap
-            return !(lhs.first.key < rhs.first.key);
+            auto cmp = lhs.first.key <=> rhs.first.key;
+            if(cmp != 0)
+                return cmp > 0; // min-heap by key
+            return lhs.first.epoch < rhs.first.epoch; // higher epoch pops first (newer wins)
         };
 
         std::vector<heap_item_t> key_heap;
@@ -231,6 +234,7 @@ namespace hedge::db
                 merge_entry_t new_keypair{
                     .key = rbuf->front().key(),
                     .value = rbuf->front().value(),
+                    .epoch = rbuf->index().epoch(),
                 };
 
                 rbuf->pop_front();
@@ -271,6 +275,7 @@ namespace hedge::db
                 merge_entry_t new_keypair{
                     .key = rbuf->front().key(),
                     .value = rbuf->front().value(),
+                    .epoch = rbuf->index().epoch(),
                 };
 
                 rbuf->pop_front();

@@ -20,6 +20,8 @@ namespace hedge
         DELETED,
         BUSY,
         BUFFER_FULL,
+        END_OF_SCAN,
+        SKIP,
     };
 
     class error

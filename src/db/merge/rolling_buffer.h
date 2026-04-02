@@ -54,7 +54,7 @@ namespace hedge::db
             this->_pending_reads = this->_reader.next(cache);
         }
 
-        // JUST FOR DEBUGGING
+        // Warning: unsafe
         [[nodiscard]] const db::sst& index() const
         {
             // cast to sst

@@ -610,11 +610,11 @@ namespace hedge::db
     static constexpr size_t FLUSH_BUF_PAGES = 512;
 
     tmc::task<hedge::expected<std::vector<sst>>> index_ops::flush_mem_index2_parallel(
-        const std::filesystem::path& base_path,
+        std::filesystem::path base_path,
         memtable_impl3_t* index,
         size_t num_partition_exponent,
         size_t flush_iteration,
-        const std::shared_ptr<db::sharded_page_cache>& cache,
+        std::shared_ptr<db::sharded_page_cache> cache,
         bool use_odirect,
         tmc::ex_cpu& flush_executor,
         bool fdatasync_ssts)

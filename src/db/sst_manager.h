@@ -17,6 +17,7 @@
 
 #include "cache.h"
 #include "io/io_executor.h"
+#include "scan_iterator.h"
 #include "sst.h"
 #include "tmc/atomic_condvar.hpp"
 #include "tmc/ex_braid.hpp"
@@ -57,6 +58,9 @@ namespace hedge::db
         // SST lookup for the read path
         tmc::task<expected<value_t>> lookup_async(const key_t& key, size_t matching_partition_id);
 
+        // Range scan: returns an iterator over deduplicated entries within [lower, upper]
+        hedge::expected<scan_iterator> range_iterator(std::optional<key_t> lower, std::optional<key_t> upper, size_t matching_partition_id, size_t read_ahead_size = 256 * 1024);
+
         // Compaction control
         void trigger_compaction(bool compact_all);
         void wait_for_compactions_to_finish();
@@ -89,10 +93,6 @@ namespace hedge::db
         };
 
     private:
-        using sst_ptr_t = std::shared_ptr<hedge::db::sst>;
-        using level_t = std::vector<sst_ptr_t>;
-        using partition_t = std::vector<level_t>;
-
         struct partition_state
         {
             alignas(64) mutable std::shared_mutex mutex;

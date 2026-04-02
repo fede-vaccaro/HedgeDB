@@ -15,6 +15,7 @@
 
 #include <error.hpp>
 
+#include "db/scan_iterator.h"
 #include "fs/fs.hpp"
 #include "index_ops.h"
 #include "io/io_executor.h"
@@ -318,6 +319,24 @@ namespace hedge::db
         co_return std::move(value_opt.value());
     }
 
+    hedge::expected<scan_iterator> sst_manager::range_iterator(std::optional<key_t> lower, std::optional<key_t> upper, size_t partition_prefix, size_t read_ahead_size)
+    {
+        partition_t partition;
+
+        {
+            auto sorted_indices_it = this->_sorted_indices.find(partition_prefix);
+
+            if(sorted_indices_it == this->_sorted_indices.end())
+                return hedge::error("Partition not found in sorted indices", errc::KEY_NOT_FOUND);
+
+            auto& state = *sorted_indices_it->second;
+            std::shared_lock lk(state.mutex);
+            partition = state.levels;
+        }
+
+        return scan_iterator::from_partition(partition, std::move(lower), std::move(upper), this->_page_cache, read_ahead_size);
+    }
+
     tmc::task<void> sst_manager::_make_self_completing_compaction_task(size_t level, std::vector<sst_ptr_t> inputs, size_t input_min_merge_width)
     {
         auto merge_config = hedge::db::index_ops::merge_config{
@@ -462,10 +481,10 @@ namespace hedge::db
         return parts;
     }
 
-    hedge::expected<sst_manager::partition_t> sst_manager::_deserialize_levels(std::string_view content,
-                                                                               const std::filesystem::path& dir_path,
-                                                                               size_t max_num_levels,
-                                                                               bool use_odirect)
+    hedge::expected<partition_t> sst_manager::_deserialize_levels(std::string_view content,
+                                                                  const std::filesystem::path& dir_path,
+                                                                  size_t max_num_levels,
+                                                                  bool use_odirect)
     {
         partition_t result(max_num_levels);
         size_t level_idx = 0;
