@@ -1,6 +1,9 @@
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 
 #include "cache.h"
+#include "db/memtable.h"
 #include "db/scan_iterator.h"
 #include "error.hpp"
 #include "sst.h"
@@ -10,38 +13,54 @@ namespace hedge::db
 {
 
     hedge::expected<scan_iterator> scan_iterator::from_partition(
-        const partition_t& partition,
+        memtable* memtable,
+        const partition_t* partition,
         std::optional<key_t> lower,
         std::optional<key_t> upper,
         std::shared_ptr<sharded_page_cache> cache,
         size_t read_ahead_size)
     {
 
-        // Collect SSTs that overlap with the range and compute their page ranges
+        memtable::snapshot snapshot;
+
+        if(memtable != nullptr)
+            snapshot = memtable->acquire_snapshot();
+
         std::vector<sst_ptr_t> matching_ssts;
         std::vector<page_range> ranges;
 
-        for(const auto& level : partition)
+        // Collect SSTs that overlap with the range and compute their page ranges
+        if(partition != nullptr)
         {
-            for(const auto& sst_ptr : level)
+            for(const auto& level : *partition)
             {
-                auto range = sst_ptr->find_range(lower, upper);
-                if(!range)
-                    continue;
+                for(const auto& sst_ptr : level)
+                {
+                    auto range = sst_ptr->find_range(lower, upper);
+                    if(!range)
+                        continue;
 
-                matching_ssts.push_back(sst_ptr);
-                ranges.push_back(*range);
+                    matching_ssts.push_back(sst_ptr);
+                    ranges.push_back(*range);
+
+                    // Pending memtables in flush might have overlapping keys with SSTs in L0
+                    auto sst_epoch = sst_ptr->epoch();
+
+                    // --> discard the memtables (to favour memory space)
+                    if(auto it = snapshot.pending_flushes.find(sst_epoch); it != snapshot.pending_flushes.end())
+                        snapshot.pending_flushes.erase(it);
+                }
             }
+
+            // Build rolling buffers for each matching SST
+            if(!matching_ssts.empty())
+                read_ahead_size = std::max(read_ahead_size / matching_ssts.size(), static_cast<size_t>(PAGE_SIZE_IN_BYTES));
+
+            read_ahead_size = hedge::ceil_page_align(read_ahead_size);
         }
 
-        // Build rolling buffers for each matching SST
-        if(!matching_ssts.empty())
-            read_ahead_size = std::max(read_ahead_size / matching_ssts.size(), static_cast<size_t>(PAGE_SIZE_IN_BYTES));
-
-        if(!is_page_aligned(read_ahead_size))
-            read_ahead_size = hedge::ceil_page_align(read_ahead_size);
-
-        auto rbufs = std::make_unique<rolling_buffer_set>(matching_ssts.size());
+        // Prepare rolling_buffers (readers)
+        auto rbufs = std::make_unique<sst_stream_set>(matching_ssts.size());
 
         for(size_t i = 0; i < matching_ssts.size(); ++i)
         {
@@ -61,6 +80,7 @@ namespace hedge::db
         }
 
         return scan_iterator{
+            std::move(snapshot),
             std::move(matching_ssts),
             std::move(rbufs),
             std::move(cache),
@@ -68,18 +88,29 @@ namespace hedge::db
             std::move(upper)};
     };
 
-    scan_iterator::scan_iterator(std::vector<sst_ptr_t> ssts,
-                                 std::unique_ptr<rolling_buffer_set> rbufs,
-                                 std::shared_ptr<sharded_page_cache> cache,
-                                 std::optional<key_t> lower,
-                                 std::optional<key_t> upper)
-        : _ssts(std::move(ssts)),
+    scan_iterator::scan_iterator(
+        memtable::snapshot snapshot,
+        std::vector<sst_ptr_t> ssts,
+        std::unique_ptr<sst_stream_set> rbufs,
+        std::shared_ptr<sharded_page_cache> cache,
+        std::optional<key_t> lower,
+        std::optional<key_t> upper)
+
+        : _memtable_snapshot(std::move(snapshot)),
+          _ssts(std::move(ssts)),
           _rbufs(std::move(rbufs)),
           _cache(std::move(cache)),
           _lower(std::move(lower)),
           _upper(std::move(upper))
     {
-        this->_heap.reserve(_ssts.size());
+        auto seq = this->_memtable_snapshot.seq_nr;
+        if(this->_memtable_snapshot.curr)
+            this->_mem_cursors.emplace_back(*this->_memtable_snapshot.curr->ptr(), this->_lower, this->_upper, std::numeric_limits<uint64_t>::max(), seq);
+
+        for(auto& [epoch, table_ptr] : this->_memtable_snapshot.pending_flushes)
+            this->_mem_cursors.emplace_back(*table_ptr->ptr(), this->_lower, this->_upper, epoch);
+
+        this->_heap.reserve(this->_ssts.size() + this->_mem_cursors.size());
     }
 
     tmc::task<hedge::status> scan_iterator::_refresh_buffers()
@@ -111,14 +142,27 @@ namespace hedge::db
                     co_return s;
             }
 
-            merge_entry_t entry{
-                .key = rbuf->front().key(),
-                .value = rbuf->front().value(),
-                .epoch = rbuf->index().epoch()};
+            scan_source_t src = rbuf;
+            auto maybe_entry = source_pop_entry(src);
+            if(!maybe_entry)
+                co_return maybe_entry.error();
+            auto& entry = maybe_entry.value();
+            this->_heap.push_back({std::move(entry), src, entry.epoch});
+            std::ranges::push_heap(this->_heap, scan_iterator::_heap_cmp());
+        }
 
-            rbuf->pop_front();
+        for(auto& mc : this->_mem_cursors)
+        {
+            if(mc.is_eof())
+                continue;
 
-            this->_heap.push_back({std::move(entry), rbuf, entry.epoch});
+            scan_source_t src = &mc;
+            auto maybe_entry = source_pop_entry(src);
+            if(!maybe_entry)
+                co_return maybe_entry.error();
+            auto& entry = maybe_entry.value();
+            auto ep = entry.epoch;
+            this->_heap.push_back({std::move(entry), src, ep});
             std::ranges::push_heap(this->_heap, scan_iterator::_heap_cmp());
         }
 
@@ -152,32 +196,29 @@ namespace hedge::db
                 co_return hedge::error("eof", errc::END_OF_SCAN);
 
             std::ranges::pop_heap(this->_heap, scan_iterator::_heap_cmp());
-            auto [keyvalue, rbuf, epoch] = std::move(this->_heap.back());
+            auto [keyvalue, source, epoch] = std::move(this->_heap.back());
             this->_heap.pop_back();
 
             this->_dedup.push(std::move(keyvalue));
 
-            // Refill heap from the source buffer
-            if(!rbuf->is_eof()) [[likely]]
+            // Refill heap from the source
+            if(!source_is_eof(source)) [[likely]]
             {
-                if(rbuf->buffer_empty()) [[unlikely]]
+                if(source_buffer_empty(source)) [[unlikely]]
                 {
                     auto s = co_await this->_refresh_buffers();
                     if(!s)
                         co_return hedge::error("Failed to refresh scan buffers: " + s.error().to_string());
                 }
 
-                if(!rbuf->is_eof() && !rbuf->buffer_empty())
+                if(!source_is_eof(source) && !source_buffer_empty(source))
                 {
-                    merge_entry_t new_entry{
-                        .key = rbuf->front().key(),
-                        .value = rbuf->front().value(),
-                        .epoch = rbuf->index().epoch(),
-                    };
-
-                    rbuf->pop_front();
-
-                    this->_heap.push_back({std::move(new_entry), rbuf, new_entry.epoch});
+                    auto maybe_new_entry = source_pop_entry(source);
+                    if(!maybe_new_entry) [[unlikely]]
+                        co_return maybe_new_entry.error();
+                    auto& new_entry = maybe_new_entry.value();
+                    auto ep = new_entry.epoch;
+                    this->_heap.push_back({std::move(new_entry), source, ep});
                     std::ranges::push_heap(this->_heap, scan_iterator::_heap_cmp());
                 }
             }

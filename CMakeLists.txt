@@ -55,11 +55,16 @@ endif()
 
 if (CMAKE_BUILD_TYPE MATCHES "Debug")
     message (STATUS "Building in Debug mode")
-    set(CMAKE_CXX_FLAGS "-O0 -g -fno-omit-frame-pointer -foptimize-sibling-calls -Wall -Wextra -Wpedantic -Werror")
+    set(CMAKE_CXX_FLAGS "-O0 -g -fno-omit-frame-pointer -foptimize-sibling-calls -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined")
 elseif (CMAKE_BUILD_TYPE MATCHES "Release")
     message (STATUS "Building in Release mode")
-    set(CMAKE_CXX_FLAGS "-O3 -g -fno-omit-frame-pointer")
+    set(CMAKE_CXX_FLAGS "-O2 -g -fno-omit-frame-pointer")
 endif()
+
+add_definitions(
+    -DTMC_PRIORITY_COUNT=5
+    -DTMC_USE_HWLOC
+)
 
 set(PUBLIC_INCLUDES 
     "include"
@@ -73,6 +78,8 @@ include_directories(PRIVATE "src")
 include_directories(PUBLIC ${tsl_robin_map_SOURCE_DIR}/include)
 include_directories(PUBLIC ${tsl_sparse_map_SOURCE_DIR}/include)
 include_directories(PUBLIC ${xxhashct_SOURCE_DIR})
+include_directories(PUBLIC "/home/federico/TooManyCooks/include")
+
 
 set(DB_SOURCES
     src/types.h
@@ -81,23 +88,19 @@ set(DB_SOURCES
     src/utils.h
     src/db/block.h
     src/db/block.cc
-    src/db/sorted_index.cc
-    src/db/sorted_index.h
     src/db/sst.h
     src/db/sst.cc
-    src/db/index_ops.cc
     src/db/index_ops2.cc
     src/db/qf.cc
     src/db/quotient_filter.cc
+    src/db/scan_iterator.cc
     src/db/merge/merge.cc
     src/db/index_ops.h
     src/db/memtable.h
     src/db/memtable.cc
     src/fs/fs.hpp
     src/fs/fs.cc
-    src/fs/file_reader.cc
     src/fs/file_reader2.cc
-    src/fs/file_reader.h
     src/db/value_table.cc
     src/db/value_table.h
     src/db/database.cc
@@ -109,10 +112,10 @@ set(DB_SOURCES
 )
 
 set(IO_EXECUTOR_SRCS 
+    src/io/static_pool.cc
+    src/io/io_executor.cc
+    src/async/tmc_defs.cc
     src/perf_counter.cc
-    src/async/io_executor.cc
-    src/async/mailbox_impl.cc
-    src/async/worker.cc
 )
 
 # executor_read_test.cc
@@ -125,7 +128,7 @@ target_link_libraries(skiplist_executor_test uring tcmalloc atomic)
 
 # memtable_perf_test — benchmarks executor + memtable::put() (adds rw_sync + value arenas)
 add_executable(memtable_perf_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/memtable_perf_test.cc)
-target_link_libraries(memtable_perf_test uring tcmalloc atomic)
+target_link_libraries(memtable_perf_test uring tcmalloc atomic hwloc)
 
 # memtable_perf_test_threads — same benchmark but using N plain std::threads instead of executors
 add_executable(memtable_perf_test_threads ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/memtable_perf_test_threads.cc)
@@ -133,7 +136,7 @@ target_link_libraries(memtable_perf_test_threads uring tcmalloc atomic)
 
 # database_perf_test — full database write+read benchmark (no gtest)
 add_executable(database_perf_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/database_perf_test.cc)
-target_link_libraries(database_perf_test uring tcmalloc atomic)
+target_link_libraries(database_perf_test uring tcmalloc atomic hwloc xxhash)
 
 # database_perf_test_threads — same benchmark but using N plain std::threads + sync_submit instead of executor task loop
 add_executable(database_perf_test_threads ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/database_perf_test_threads.cc)
@@ -141,7 +144,7 @@ target_link_libraries(database_perf_test_threads uring tcmalloc atomic)
 
 # database_perf_test_mixed — 50/50 mixed read+write benchmark
 add_executable(database_perf_test_mixed ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/database_perf_test_mixed.cc)
-target_link_libraries(database_perf_test_mixed uring tcmalloc atomic)
+target_link_libraries(database_perf_test_mixed uring tcmalloc atomic hwloc xxhash)
 
 # database_perf_test_mixed — 50/50 mixed read+write benchmark
 add_executable(database_perf_test_mixed_batch ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/database_perf_test_mixed_batch.cc)
@@ -158,7 +161,7 @@ target_link_libraries(index_test gtest gtest_main uring atomic)
 
 # index2 tests
 add_executable(index2_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index2.spec.cc)
-target_link_libraries(index2_test gtest gtest_main uring atomic)
+target_link_libraries(index2_test gtest gtest_main uring atomic hwloc)
 
 # parallel flush tests
 add_executable(index_test_parallel_flush ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_test.cc)
@@ -174,7 +177,7 @@ target_link_libraries(file_reader_test uring gtest gtest_main atomic)
 
 # paginated_view tests
 add_executable(file_reader2_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/file_reader2.spec.cc)
-target_link_libraries(file_reader2_test uring gtest gtest_main atomic)
+target_link_libraries(file_reader2_test uring gtest gtest_main atomic hwloc)
 
 # value_table tests
 set(VALUE_TABLE_TEST_SRCS 
@@ -213,30 +216,12 @@ target_link_libraries(database_test uring gtest gtest_main atomic tcmalloc tbb)
 
 # WAL replay tests
 add_executable(wal_replay_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/wal_replay.spec.cc)
-target_link_libraries(wal_replay_test uring gtest gtest_main atomic tcmalloc)
+target_link_libraries(wal_replay_test uring gtest gtest_main atomic tcmalloc hwloc xxhash)
 
 # skiplist tests
 add_executable(skiplist_test test/skiplist.spec.cc)
 target_link_libraries(skiplist_test gtest gtest_main)
 
-# # library TODO re-enable
-# add_library(hedgedb STATIC ${IO_EXECUTOR_SRCS} ${DB_SOURCES} src/api/api.cc)
-# target_link_libraries(hedgedb PRIVATE uring)
-# target_include_directories(hedgedb PUBLIC $<INSTALL_INTERFACE:${PUBLIC_INCLUDES}> $<BUILD_INTERFACE:${PUBLIC_INCLUDES}>)
-
-# # db api tests TODO re-enable
-# add_executable(db_api_test test/api.spec.cc)
-# target_link_libraries(db_api_test PUBLIC hedgedb gtest gtest_main)
-
-# # installation rules TODO re-enable
-# install(TARGETS hedgedb
-#     ARCHIVE 
-#     DESTINATION lib
-# )
-
-# btree tests
-add_executable(btree_test test/btree.spec.cc)
-target_link_libraries(btree_test gtest gtest_main tcmalloc atomic)
 
 # varint tests
 add_executable(varint_test test/varint.spec.cc)
@@ -250,10 +235,6 @@ target_link_libraries(key_test gtest gtest_main)
 add_executable(block_test src/db/block.cc test/block.spec.cc)
 target_link_libraries(block_test gtest gtest_main)
 
-
-# btree variant tests
-# add_executable(btree_variant_test test/btree_variant.spec.cc)
-# target_link_libraries(btree_variant_test gtest gtest_main tcmalloc atomic)
 
 # page_aligned_buffer tests
 add_executable(page_aligned_buffer_test test/page_aligned_buffer.spec.cc src/utils.cc)
@@ -274,7 +255,7 @@ target_link_libraries(single_buffer_arena_allocator_test gtest gtest_main)
 
 # debug test
 add_executable(index_merge ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_merge.spec.cc)
-target_link_libraries(index_merge gtest gtest_main uring atomic)
+target_link_libraries(index_merge gtest gtest_main uring atomic hwloc)
 
 # concurrent_skiplist tests
 add_executable(concurrent_skiplist_test test/concurrent_skiplist.spec.cc)
@@ -287,3 +268,7 @@ target_link_libraries(async_cond_var_test uring atomic tcmalloc)
 
 add_executable(async_cond_var_notify_test ${IO_EXECUTOR_SRCS} test/async_cond_var_notify_test.cc)
 target_link_libraries(async_cond_var_notify_test uring atomic tcmalloc)
+
+# range scan tests
+add_executable(range_scan_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/range_scan.spec.cc)
+target_link_libraries(range_scan_test gtest gtest_main uring atomic hwloc tcmalloc)

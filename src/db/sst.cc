@@ -6,14 +6,15 @@
 #include <utility>
 
 #include "db/block.h"
+#include "error.hpp"
 #include "io/io_ctx.h"
 #include "io/io_requests.hpp"
+#include "key.h"
 #include "perf_counter.h"
 #include "sst.h"
 #include "tmc/task.hpp"
 #include "types.h"
 #include "utils.h"
-#include "xxh64.hpp"
 
 namespace hedge::db
 {
@@ -354,6 +355,8 @@ namespace hedge::db
     hedge::expected<value_t> sst::_find_in_page(const key_t& key, const uint8_t* page)
     {
         block_decoder reader(page);
+        if(!reader.sanity_check())
+            return hedge::error("checksum mismatch for key " + hedge::to_hex_string(key));
 
         auto value = reader.find(key);
 

@@ -86,7 +86,7 @@ int main(int argc, char* argv[])
     // --- CLI args ---
     if(argc < 3)
     {
-        std::cerr << "Usage: " << argv[0] << " <N_LOADS> <N_OPS> [--compact-all] [--load] [--reload]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <N_LOADS> <N_OPS> [--compact-all] [--load] [--reload] [--range]" << std::endl;
         return 1;
     }
 
@@ -98,6 +98,7 @@ int main(int argc, char* argv[])
     bool flag_compact_all = false;
     bool flag_load_only = false;
     bool flag_reload = false;
+    bool flag_range = false;
     for(int i = 3; i < argc; ++i)
     {
         std::string arg = argv[i];
@@ -107,6 +108,8 @@ int main(int argc, char* argv[])
             flag_load_only = true;
         else if(arg == "--reload")
             flag_reload = true;
+        else if(arg == "--range")
+            flag_range = true;
         else
         {
             std::cerr << "Unknown flag: " << arg << std::endl;
@@ -126,10 +129,12 @@ int main(int argc, char* argv[])
         std::cout << "  --load";
     if(flag_reload)
         std::cout << "  --reload";
+    if(flag_range)
+        std::cout << "  --range";
     std::cout << std::endl;
 
     // --- Init ---
-    constexpr size_t NUM_WORKERS = 16;
+    constexpr size_t NUM_WORKERS = 12;
     constexpr uint32_t QD = 64;
 
     auto& pool = hedge::io::static_pool::instance()->init(NUM_WORKERS, QD, "io-pool");
@@ -345,6 +350,98 @@ int main(int argc, char* argv[])
         {
             std::cerr << "Read errors detected: " << read_errors.load() << std::endl;
             return 1;
+        }
+    }
+
+    // =========================================================================
+    // Range scan phase — measure scans/s for small, medium, and large ranges
+    // =========================================================================
+    if(flag_range && INITIAL_WRITES > 0)
+    {
+        struct scan_tier
+        {
+            const char* label;
+            size_t min_entries;
+            size_t max_entries;
+        };
+
+        constexpr std::array tiers = {
+            scan_tier{"small  (1 – 100)",       1,      100},
+            scan_tier{"medium (512 – 1024)",     512,    1024},
+            scan_tier{"large  (114688 – 131072)", 114688, 131072},
+        };
+
+        // Per-worker PRNG seeds
+        std::vector<uint64_t> scan_rng_seeds(NUM_WORKERS);
+        {
+            std::random_device rd;
+            for(auto& s : scan_rng_seeds)
+                s = (static_cast<uint64_t>(rd()) << 32) | rd();
+        }
+
+        const size_t N_SCANS = std::max(N_OPS, static_cast<size_t>(1000));
+
+        std::cout << "\n=== Range scan phase ===" << std::endl;
+
+        for(const auto& tier : tiers)
+        {
+            std::atomic_size_t scan_count{0};
+
+            auto do_scan = [](const auto& db, size_t lower_idx, size_t entries,
+                              std::atomic_size_t& count, tmc::semaphore& s) -> tmc::task<void>
+            {
+                auto lower = make_key(lower_idx);
+                auto maybe_it = db->scan(lower, std::nullopt);
+                if(!maybe_it)
+                {
+                    s.release();
+                    co_return;
+                }
+
+                auto it = std::move(maybe_it.value());
+                for(size_t i = 0; i < entries; ++i)
+                {
+                    auto maybe_kv = co_await it.next();
+                    if(!maybe_kv)
+                        break;
+                }
+
+                count.fetch_add(1, std::memory_order_relaxed);
+                s.release();
+            };
+
+            auto make_scan_task = [&](size_t tid) -> tmc::task<void>
+            {
+                auto fg = tmc::fork_group();
+                auto semaphore = tmc::semaphore(io::static_pool::instance()->queue_depth());
+                uint64_t rng = scan_rng_seeds[tid];
+
+                for(size_t op = tid; op < N_SCANS; op += NUM_WORKERS)
+                {
+                    co_await semaphore;
+                    size_t lower_idx = fast_rand(rng) % INITIAL_WRITES;
+                    size_t entries = tier.min_entries + (fast_rand(rng) % (tier.max_entries - tier.min_entries + 1));
+                    fg.fork(do_scan(db, lower_idx, entries, scan_count, semaphore));
+                }
+
+                co_await std::move(fg);
+            };
+
+            auto t0 = clk::now();
+
+            std::vector<std::future<void>> futures;
+            futures.reserve(NUM_WORKERS);
+            for(size_t tid = 0; tid < NUM_WORKERS; ++tid)
+                futures.push_back(tmc::post_waitable(pool, make_scan_task(tid), 0, tid));
+            for(auto& f : futures)
+                f.get();
+
+            auto t1 = clk::now();
+            double elapsed_s = std::chrono::duration<double>(t1 - t0).count();
+
+            std::cout << "\n--- " << tier.label << " (" << N_SCANS << " scans) ---" << std::endl;
+            std::cout << "Duration: " << elapsed_s * 1000.0 << " ms" << std::endl;
+            std::cout << "Throughput: " << static_cast<uint64_t>(scan_count.load() / elapsed_s) << " scans/s" << std::endl;
         }
     }
 

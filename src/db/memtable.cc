@@ -6,9 +6,10 @@
 #include <emmintrin.h>
 #include <filesystem>
 #include <future>
-#include <limits>
 #include <memory>
+#include <numeric>
 #include <ranges>
+#include <shared_mutex>
 #include <thread>
 #include <unistd.h>
 
@@ -16,6 +17,7 @@
 #include "error.hpp"
 #include "fs/fs.hpp"
 #include "generator.h"
+#include "hasher.h"
 #include "index_ops.h"
 #include "io/io_executor.h"
 #include "key.h"
@@ -31,12 +33,12 @@ namespace
     struct wal_entry
     {
         size_t epoch;
-        uint32_t seq_nr;
+        uint64_t seq_nr;
         hedge::key_t key;
         std::vector<uint8_t> value;
     };
 
-    hedge::async::generator<wal_entry> read_wal_file(const std::filesystem::path& path, size_t epoch)
+    hedge::async::generator<hedge::expected<wal_entry>> read_wal_file(const std::filesystem::path& path, size_t epoch)
     {
         auto maybe_file = hedge::fs::file::from_path(path, hedge::fs::file::open_mode::read_only, false);
         if(!maybe_file)
@@ -55,15 +57,18 @@ namespace
         size_t pos = 0;
         size_t end = static_cast<size_t>(bytes_read);
 
+        hedge::third_party::hasher64 hasher;
+
         while(pos < end)
         {
-            // Need at least: seq_nr(4) + encoded_key_size(1)
-            if(pos + sizeof(uint32_t) + sizeof(uint8_t) > end)
-                break;
+            // TODO: refactor
+            // Need at least: seq_nr(8) + encoded_key_size(1)
+            if(pos + sizeof(uint64_t) + sizeof(uint8_t) > end)
+                break; // TODO return error in these cases instead of silently stopping the replay
 
-            uint32_t seq_nr;
-            std::memcpy(&seq_nr, buffer.data() + pos, sizeof(uint32_t));
-            pos += sizeof(uint32_t);
+            uint64_t seq_nr;
+            std::memcpy(&seq_nr, buffer.data() + pos, sizeof(uint64_t));
+            pos += sizeof(uint64_t);
 
             uint8_t encoded_key_size = buffer[pos];
             pos += sizeof(uint8_t);
@@ -88,10 +93,37 @@ namespace
             std::vector<uint8_t> value(buffer.data() + pos, buffer.data() + pos + value_size);
             pos += value_size;
 
-            co_yield {.epoch = epoch,
-                      .seq_nr = seq_nr,
-                      .key = std::move(key),
-                      .value = std::move(value)};
+            uint32_t checksum;
+            if(pos + sizeof(uint32_t) > end)
+                break;
+
+            std::memcpy(&checksum, buffer.data() + pos, sizeof(uint32_t));
+            pos += sizeof(uint32_t);
+
+            // Recompute checksum and verify
+            hasher.update(&seq_nr, sizeof(uint64_t));
+            hasher.update(&encoded_key_size, sizeof(uint8_t));
+            hasher.update(key.data(), key.size());
+            hasher.update(&value_size, sizeof(uint16_t));
+            hasher.update(value.data(), value_size); // value only, without checksum
+
+            constexpr uint64_t MASK_32_BIT = (1ULL << 32) - 1;
+            auto computed_checksum = static_cast<uint32_t>(hasher.sum() & MASK_32_BIT);
+            if(checksum != computed_checksum)
+            {
+                co_yield hedge::error(
+                    "checksum mismatch for WAL entry with seq_nr " +
+                    std::to_string(seq_nr) +
+                    " in file " + path.string() +
+                    ": expected " + std::to_string(checksum) +
+                    ", computed " + std::to_string(computed_checksum));
+                break;
+            }
+
+            co_yield wal_entry{.epoch = epoch,
+                               .seq_nr = seq_nr,
+                               .key = std::move(key),
+                               .value = std::move(value)};
         }
     }
 } // anonymous namespace
@@ -99,18 +131,13 @@ namespace
 namespace hedge::db
 {
 
-    std::pair<bool, uint32_t> memtable_impl3_t::insert(const key_t& key, std::span<const uint8_t> value)
+    std::pair<bool, uint64_t> memtable_impl3_t::insert(const key_t& key, std::span<const uint8_t> value)
     {
         try
         {
-            auto res = this->_accessor.insert(memtable_entry(key, value));
-            if(!res.second)
-            {
-                // Key exists, update value
-                // value in memtable_entry is mutable
-                std::atomic_ref(res.first->value).store(value, std::memory_order_release);
-            }
-            return {true, std::atomic_ref<uint32_t>(this->seq_nr).fetch_add(1, std::memory_order::relaxed)};
+            auto seq = std::atomic_ref<uint64_t>(this->_seq_nr).fetch_add(1, std::memory_order::relaxed);
+            this->_accessor.insert(memtable_entry(key, seq, value));
+            return {true, seq};
         }
         catch(const std::bad_alloc&)
         {
@@ -121,12 +148,9 @@ namespace hedge::db
     std::optional<std::span<const uint8_t>> memtable_impl3_t::get(const key_t& key) const
     {
         Accessor acc(const_cast<memtable_impl3_t*>(this));
-        auto it = acc.find(memtable_entry(key, {}));
-        if(it != acc.end())
-        {
-            auto value = std::atomic_ref<std::span<const uint8_t>>(it->value);
-            return value.load(std::memory_order_acquire);
-        }
+        auto it = acc.lower_bound(memtable_entry(key, UINT64_MAX, {}));
+        if(it != acc.end() && it->_key == key)
+            return it->_value;
         return std::nullopt;
     }
 
@@ -180,17 +204,27 @@ namespace hedge::db
             this->_cfg.memory_budget_cap);
     }
 
-    tmc::task<hedge::status> memtable::_append_to_wal(int32_t fd, uint32_t seq_nr, const key_t& key, std::span<const uint8_t> value)
+    tmc::task<hedge::status> memtable::_append_to_wal(int32_t fd, uint64_t seq_nr, const key_t& key, std::span<const uint8_t> value)
     {
         uint8_t encoded_key_size = hedge::encode_key_size(key.size());
         auto value_size = static_cast<uint16_t>(value.size());
 
-        static_assert(sizeof(seq_nr) == sizeof(uint32_t));
+        static_assert(sizeof(seq_nr) == sizeof(uint64_t));
 
-        std::array<iovec, 5> wal_entry{
+        thread_local hedge::third_party::hasher64 hasher;
+        uint32_t checksum;
+
+        // WAL entry format is:
+        // 1. Seq Nr.
+        // 2. Key size
+        // 3. Key
+        // 4. Value size
+        // 5. Value
+        // 6. Checksum
+        std::array<iovec, 6> wal_entry{
             iovec{
                 .iov_base = &seq_nr,
-                .iov_len = sizeof(uint32_t)},
+                .iov_len = sizeof(uint64_t)},
             iovec{
                 .iov_base = &encoded_key_size,
                 .iov_len = sizeof(uint8_t),
@@ -206,22 +240,30 @@ namespace hedge::db
             iovec{
                 .iov_base = const_cast<uint8_t*>(value.data()),
                 .iov_len = value.size(),
+            },
+            iovec{
+                .iov_base = &checksum,
+                .iov_len = sizeof(uint32_t),
             }};
 
-        const size_t expected_bytes = sizeof(uint32_t) + sizeof(uint8_t) + key.size() + sizeof(uint16_t) + value.size();
+        // Compute checksum
+        for(size_t i = 0; i < wal_entry.size() - 1; ++i)
+            hasher.update(wal_entry[i].iov_base, wal_entry[i].iov_len);
+        constexpr uint64_t MASK_32_BIT = (1ULL << 32) - 1;
+        checksum = static_cast<uint32_t>(hasher.sum() & MASK_32_BIT);
+
+        auto compute_expected_bytes = [&wal_entry]
+        {
+            return std::accumulate(wal_entry.begin(), wal_entry.end(), size_t(0), [](size_t sum, const iovec& vec)
+                                   { return sum + vec.iov_len; });
+        };
 
         int32_t res = pwritev2(fd, wal_entry.data(), wal_entry.size(), -1 /* File is opened with O_APPEND */, 0);
-        // int32_t res = co_await io::writev(fd, wal_entry.data(), wal_entry.size(), -1);
-        // auto res = co_await async::this_thread_executor()->submit_request(async::writev_request{
-        //     .fd = fd,
-        //     .iovecs = wal_entry.data(),
-        //     .iovecs_count = static_cast<int>(wal_entry.size()),
-        //     .offset = size_t(-1), // File is opened with O_APPEND
-        // });
 
         if(res < 0)
             co_return hedge::error("could not write into wal: " + std::string(strerror(errno)));
 
+        auto expected_bytes = compute_expected_bytes();
         if(size_t(res) != expected_bytes)
             co_return hedge::error("partial write into wal: " + std::to_string(res) + " != " + std::to_string(expected_bytes));
 
@@ -273,7 +315,7 @@ namespace hedge::db
             // bool ok = !value_span.empty(); // nullptr means out of memory budget
             bool ok = value_ptr != nullptr; // nullptr means out of memory budget
             std::span<uint8_t> value_span(value_ptr, value.size() + 1);
-            uint32_t seq_nr;
+            uint64_t seq_nr;
 
             if(ok)
             {
@@ -315,13 +357,13 @@ namespace hedge::db
             const size_t base = i * IOVECS_PER_ENTRY;
             const auto& [key, _] = entries[i];
 
-            iovecs[base + 0] = {.iov_base = const_cast<uint32_t*>(&meta[i].seq_nr), .iov_len = sizeof(uint32_t)};
+            iovecs[base + 0] = {.iov_base = const_cast<uint64_t*>(&meta[i].seq_nr), .iov_len = sizeof(uint64_t)};
             iovecs[base + 1] = {.iov_base = const_cast<uint8_t*>(&meta[i].encoded_key_size), .iov_len = sizeof(uint8_t)};
             iovecs[base + 2] = {.iov_base = const_cast<uint8_t*>(key.data()), .iov_len = key.size()};
             iovecs[base + 3] = {.iov_base = const_cast<uint16_t*>(&meta[i].value_size), .iov_len = sizeof(uint16_t)};
             iovecs[base + 4] = {.iov_base = const_cast<uint8_t*>(value_spans[i].data()), .iov_len = value_spans[i].size()};
 
-            expected_bytes += sizeof(uint32_t) + sizeof(uint8_t) + key.size() + sizeof(uint16_t) + value_spans[i].size();
+            expected_bytes += sizeof(uint64_t) + sizeof(uint8_t) + key.size() + sizeof(uint16_t) + value_spans[i].size();
         }
 
         int32_t res = pwritev2(fd, iovecs.data(), static_cast<int>(n * IOVECS_PER_ENTRY), -1, 0);
@@ -332,109 +374,6 @@ namespace hedge::db
             return hedge::error("partial batch write into wal: " + std::to_string(res) + " != " + std::to_string(expected_bytes));
 
         return hedge::ok();
-    }
-
-    tmc::task<hedge::status> memtable::put_batch_async(
-        std::span<const std::pair<key_t, std::vector<uint8_t>>> entries,
-        hedge::value_type value_type)
-    {
-        thread_local std::shared_ptr<rw_sync_table_t> local_memtable_ref = this->_table.ref().load(std::memory_order::relaxed);
-
-        static std::atomic_size_t THREADS{0};
-        thread_local std::atomic_size_t THIS_THREAD_IDX = THREADS.fetch_add(1, std::memory_order::relaxed);
-        auto insert_attempts = 0UL;
-
-        const size_t n = entries.size();
-
-        while(true)
-        {
-            auto memtable = local_memtable_ref->acquire_writer(THIS_THREAD_IDX % this->_cfg.num_writer_threads);
-
-            if(!memtable) [[unlikely]]
-            {
-                auto t = this->_table.ref().load(std::memory_order::relaxed);
-                if(t == local_memtable_ref)
-                {
-                    constexpr size_t ATTEMPTS_BEFORE_BACKPRESSURE = 0;
-
-                    if(insert_attempts++ < ATTEMPTS_BEFORE_BACKPRESSURE)
-                    {
-                        folly::detail::asm_volatile_pause();
-                        continue;
-                    }
-
-                    BACKPRESSURE.fetch_add(1, std::memory_order::relaxed);
-                    co_await this->_table.await(local_memtable_ref);
-                    local_memtable_ref = this->_table.ref().load(std::memory_order::relaxed);
-                    insert_attempts = 0;
-                    continue;
-                }
-
-                local_memtable_ref = t;
-                insert_attempts = 0;
-                continue;
-            }
-
-            constexpr size_t alignment = std::atomic_ref<std::span<const uint8_t>>::required_alignment;
-            const size_t writer_idx = THIS_THREAD_IDX % this->_cfg.num_writer_threads;
-
-            std::array<uint32_t, 128> seq_nrs{};
-            std::array<std::span<const uint8_t>, 128> value_spans{};
-            size_t total_bytes = 0;
-            bool all_ok = true;
-
-            for(size_t i = 0; i < n; ++i)
-            {
-                const auto& [key, value] = entries[i];
-
-                auto* value_ptr = memtable->value_arenas[writer_idx]->allocate_many(value.size() + 1, alignment);
-                if(!value_ptr)
-                {
-                    all_ok = false;
-                    break;
-                }
-
-                std::span<uint8_t> value_span(value_ptr, value.size() + 1);
-                value_span[0] = static_cast<uint8_t>(value_type);
-                std::memcpy(value_span.data() + 1, value.data(), value.size());
-
-                auto [ok, seq_nr] = memtable->insert(key, value_span);
-                if(!ok)
-                {
-                    all_ok = false;
-                    break;
-                }
-
-                seq_nrs[i] = seq_nr;
-                value_spans[i] = value_span;
-                total_bytes += key.size() + value.size() + 1;
-            }
-
-            if(!all_ok || memtable->bytes_written.fetch_add(total_bytes, std::memory_order_relaxed) > this->_cfg.memory_budget_cap) [[unlikely]]
-            {
-                bool this_thread_flushed = co_await this->_flush(local_memtable_ref);
-                if(!this_thread_flushed)
-                    folly::detail::asm_volatile_pause();
-                continue;
-            }
-
-            if(!this->_cfg.use_wal)
-                co_return hedge::ok();
-
-            std::array<wal_batch_meta, 128> meta{};
-            for(size_t i = 0; i < n; ++i)
-            {
-                meta[i] = {
-                    .seq_nr = seq_nrs[i],
-                    .encoded_key_size = hedge::encode_key_size(entries[i].first.size()),
-                    .value_size = static_cast<uint16_t>(value_spans[i].size()),
-                };
-            }
-
-            co_return this->_append_batch_to_wal(
-                memtable->per_thread_wals[THIS_THREAD_IDX].fd(),
-                entries, meta, std::span(value_spans.data(), n));
-        }
     }
 
     std::optional<value_t> memtable::get(const key_t& key) const
@@ -662,7 +601,12 @@ namespace hedge::db
             auto gen = read_wal_file(wf.path, wf.epoch);
             for(auto& entry : gen)
             {
-                all_entries.push_back(std::move(entry));
+                if(!entry) [[unlikely]]
+                {
+                    this->_logger.log("Error reading WAL file ", wf.path, ": ", entry.error().to_string());
+                    continue;
+                }
+                all_entries.push_back(std::move(entry.value()));
             }
         }
 
@@ -724,5 +668,18 @@ namespace hedge::db
 
         return hedge::ok();
     }
+
+    memtable::snapshot memtable::acquire_snapshot()
+    {
+        auto curr_memtable = this->_table.ref().load(std::memory_order::relaxed);
+        size_t curr_seq_nr = curr_memtable->ptr()->seq_nr();
+
+        std::shared_lock lk(this->_pending_flushes_mutex);
+
+        return memtable::snapshot{
+            .seq_nr = curr_seq_nr,
+            .curr = std::move(curr_memtable),
+            .pending_flushes = this->_pending_flushes};
+    };
 
 } // namespace hedge::db

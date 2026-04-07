@@ -2,13 +2,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <string>
 #include <sys/types.h>
 #include <type_traits>
+
+#include <xxh64.hpp>
 
 #include "block.h"
 #include "db/varint.h"
 #include "error.hpp"
-
 namespace hedge::db
 {
 
@@ -37,6 +40,8 @@ namespace hedge::db
         requires std::is_unsigned_v<T>
     void _write_unsafe(T v, uint8_t** ptr)
     {
+        // Check alignment
+        assert(&v % alignof(v) == 0);
         **ptr = v;
         *ptr += sizeof(T);
     }
@@ -55,10 +60,17 @@ namespace hedge::db
         *ptr = updated;
     }
 
-    void _write_unsafe(uint8_t* src, size_t count, uint8_t** dest)
+    void _write_unsafe(const uint8_t* src, size_t count, uint8_t** dest)
     {
         std::memcpy(*dest, src, count);
         *dest += count;
+    }
+
+    uint32_t _checksum(const uint8_t* start, size_t n)
+    {
+        uint64_t checksum64 = xxh64::hash(reinterpret_cast<const char*>(start), n, BLOCK_CHECKSUM_SEED);
+        constexpr uint64_t UINT32_MASK = std::numeric_limits<uint32_t>::max(); // Keep the bottom 32 bits
+        return static_cast<uint32_t>(checksum64 & UINT32_MASK);
     }
 
     hedge::status block_encoder::_push_as_restart_key(std::span<const uint8_t> key, std::span<const uint8_t> value)
@@ -166,8 +178,6 @@ namespace hedge::db
         // this->_bytes_written count won't be increased as this space
         // has already been taken in account during insertion
 
-        this->_footer.kv_count = this->_kvs_count;
-
         // Write restart point offsets
         auto* end = this->_base + this->_cfg.block_size_in_bytes;
         this->_head = end -
@@ -181,8 +191,19 @@ namespace hedge::db
         // Copy restart count
         _write_unsafe<uint16_t>(this->_offsets.size(), &this->_head);
 
-        // Copy footer
-        _write_unsafe(reinterpret_cast<uint8_t*>(&this->_footer), sizeof(block_footer), &this->_head);
+        // Set footer
+        this->_footer.kv_count = this->_kvs_count;
+
+        // Copy footer (checksum escluded)
+        _write_unsafe(reinterpret_cast<uint8_t*>(&this->_footer), sizeof(block_footer) - sizeof(block_footer::checksum), &this->_head);
+
+        // Compute Checksum
+        const uint32_t checksum = _checksum(
+            this->_base,
+            this->_cfg.block_size_in_bytes - sizeof(block_footer::checksum));
+
+        // Write checksum
+        _write_unsafe(reinterpret_cast<const uint8_t*>(&checksum), sizeof(uint32_t), &this->_head);
 
         this->_committed = true;
         assert(this->_head == this->_base + this->_cfg.block_size_in_bytes);
@@ -322,6 +343,18 @@ namespace hedge::db
     {
         this->_base = new_base;
         this->_read_footer();
+    }
+
+    hedge::status block_decoder::sanity_check() const
+    {
+        const uint32_t checksum = _checksum(
+            this->_base,
+            this->_cfg.block_size_in_bytes - sizeof(block_footer::checksum));
+
+        if(checksum != this->_footer.checksum)
+            return hedge::error("checksum mismatch sum: " + std::to_string(checksum) + " footer: " + std::to_string(this->_footer.checksum));
+
+        return hedge::ok();
     }
 
     void block_decoder::_read_footer()

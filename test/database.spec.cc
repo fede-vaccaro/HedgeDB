@@ -164,7 +164,7 @@ namespace hedge::db
 
         db_config config;
         config.auto_compaction = true;
-        config.keys_in_mem_before_flush = this->MEMTABLE_CAPACITY;
+        config.memtable_budget_bytes = this->MEMTABLE_CAPACITY;
         config.compaction_read_ahead_size_bytes = 2 * 1024 * 1024;
         config.num_partition_exponent = 4;
         config.bucket_ratio = 1.50;

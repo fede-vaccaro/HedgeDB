@@ -11,11 +11,13 @@
 #include <gtest/gtest.h>
 
 #include "db/memtable.h"
+#include "error.hpp"
 #include "io/io_executor.h"
 #include "key.h"
 #include "tmc/fork_group.hpp"
 #include "tmc/semaphore.hpp"
 #include "tmc/sync.hpp"
+#include "tmc/task.hpp"
 #include "types.h"
 #include "xxh64.hpp"
 
@@ -48,11 +50,11 @@ namespace hedge::db
 
     struct wal_replay_test : public ::testing::Test
     {
-        inline static std::unique_ptr<hedge::io::io_executor> executor;
+        inline static std::shared_ptr<hedge::io::io_executor> executor;
 
         static void SetUpTestSuite()
         {
-            executor = std::make_unique<hedge::io::io_executor>(N_THREADS, QUEUE_DEPTH);
+            executor = std::make_shared<hedge::io::io_executor>(N_THREADS, QUEUE_DEPTH);
         }
 
         void SetUp() override
@@ -77,14 +79,22 @@ namespace hedge::db
         cfg.use_odirect = false;
         cfg.num_writer_threads = N_THREADS;
         cfg.use_wal = true;
-        cfg.flush_io_workers = 2;
 
         std::atomic_size_t flush_epoch{0};
         size_t wal_epoch;
 
         // Phase 1: Create memtable, write keys, drop without flushing
         {
-            memtable mt(cfg, 4, _indices_path, &flush_epoch, [](std::vector<sst> /*new_indices*/) {}, []() {}, nullptr);
+            memtable mt(
+                cfg,
+                4,
+                _indices_path,
+                &flush_epoch,
+                executor,
+                [](std::vector<sst> /*new_indices*/) -> tmc::task<void>
+                { co_return; },
+                []() {},
+                nullptr);
 
             auto make_put_task = [&mt]() -> tmc::task<void>
             {
@@ -128,7 +138,16 @@ namespace hedge::db
         // Phase 2: Create new memtable and replay WAL
         {
             cfg.starting_wal_epoch = wal_epoch;
-            memtable mt(cfg, 4, _indices_path, &flush_epoch, [](std::vector<sst> /*new_indices*/) {}, []() {}, nullptr);
+            memtable mt(
+                cfg,
+                4,
+                _indices_path,
+                &flush_epoch,
+                executor,
+                [](std::vector<sst> /*new_indices*/) -> tmc::task<void>
+                { co_return; },
+                []() {},
+                nullptr);
 
             auto wal_status = mt.replay_wal();
             ASSERT_TRUE(wal_status) << wal_status.error().to_string();

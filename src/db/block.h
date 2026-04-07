@@ -49,6 +49,8 @@ Block format:
 namespace hedge::db
 {
 
+    constexpr uint64_t BLOCK_CHECKSUM_SEED = 0x9E3779B97F4A7C15ULL;
+
     struct block_config
     {
         size_t block_size_in_bytes{PAGE_SIZE_IN_BYTES};
@@ -58,7 +60,8 @@ namespace hedge::db
     struct block_footer
     {
         uint16_t kv_count{};
-        std::array<uint8_t, 6> _footer_bytes; // Padding
+        uint16_t block_type{}; // unused
+        uint32_t checksum{};
     };
 
     template <typename T>
@@ -75,7 +78,6 @@ namespace hedge::db
             this->reserve(MAX_KEY_LEN * 2);
             this->assign(begin, end);
         }
-        
     };
 
     class block_encoder
@@ -208,6 +210,7 @@ namespace hedge::db
         block_decoder(const uint8_t* base, const block_config& cfg = {});
         std::span<const uint8_t> find(std::span<const uint8_t> key);
         void reset(const uint8_t* new_base);
+        [[nodiscard]] hedge::status sanity_check() const;
         void _read_footer();
 
         [[nodiscard]] block_iterator begin() const;
@@ -285,30 +288,42 @@ namespace hedge::db
 
     // buffer_decoder decodes the key values encoded in blocks from the configured buffer
     // Respect to the block_decoder it automatically switch to the next block when the current has been fully decoded
-    class buffer_decoder
+    class block_buffer_reader
     {
         const uint8_t* _next{};
         const uint8_t* _end{};
         block_decoder _block_decoder;
         block_iterator _block_it;
+        bool _skip_checksum{true};
 
     public:
-        buffer_decoder() = default;
-
-        buffer_decoder(const uint8_t* begin, const uint8_t* end)
-            : _next(begin + PAGE_SIZE_IN_BYTES),
-              _end(end),
-              _block_decoder(begin),
-              _block_it(_block_decoder.begin())
+        static hedge::expected<block_buffer_reader> make_new(const uint8_t* begin, const uint8_t* end)
         {
+            auto reader = block_buffer_reader{};
+            auto status = reader.reset(begin, end);
+            if(!status)
+                return status.error();
+            return reader;
         }
 
-        void reset(const uint8_t* begin, const uint8_t* end)
+        block_buffer_reader() = default;
+        explicit block_buffer_reader(bool skip_checksum) : _skip_checksum(skip_checksum) {}
+
+        [[nodiscard]] hedge::status reset(const uint8_t* begin, const uint8_t* end)
         {
             this->_next = begin + PAGE_SIZE_IN_BYTES;
             this->_end = end;
             this->_block_decoder.reset(begin);
             this->_block_it = this->_block_decoder.begin();
+
+            if(this->_skip_checksum)
+                return hedge::ok();
+
+            auto status = this->_block_decoder.sanity_check();
+            if(!status) [[unlikely]]
+                return status.error();
+
+            return hedge::ok();
         }
 
         const block_decoder& decoder()
@@ -316,10 +331,10 @@ namespace hedge::db
             return this->_block_decoder;
         }
 
-        buffer_decoder& operator++()
+        hedge::status next_block()
         {
-            if(++this->_block_it != this->_block_decoder.end()) // There are KV left -> continue
-                return *this;
+            if(++this->_block_it != this->_block_decoder.end()) [[likely]] // There are KV left -> continue
+                return hedge::ok();
 
             // Block fully read, move to the next block if any
             if(this->_next != this->_end)
@@ -327,9 +342,16 @@ namespace hedge::db
                 const auto* cur = this->_next;
                 this->_next += PAGE_SIZE_IN_BYTES;
                 this->_block_decoder.reset(cur);
+
+                if(!this->_skip_checksum)
+                {
+                    if(auto status = this->_block_decoder.sanity_check(); !status)
+                        return status;
+                }
+
                 this->_block_it = this->_block_decoder.begin();
             }
-            return *this;
+            return hedge::ok();
         }
 
         [[nodiscard]] const auto& it() const

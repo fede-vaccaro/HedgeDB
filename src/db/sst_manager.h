@@ -58,6 +58,9 @@ namespace hedge::db
         // SST lookup for the read path
         tmc::task<expected<value_t>> lookup_async(const key_t& key, size_t matching_partition_id);
 
+        // Returns a snapshot (copy) of the partition's level tree, or an error if the partition is not found
+        [[nodiscard]] hedge::expected<partition_t> partition_snapshot(size_t partition_id) const;
+
         // Range scan: returns an iterator over deduplicated entries within [lower, upper]
         hedge::expected<scan_iterator> range_iterator(std::optional<key_t> lower, std::optional<key_t> upper, size_t matching_partition_id, size_t read_ahead_size = 256 * 1024);
 

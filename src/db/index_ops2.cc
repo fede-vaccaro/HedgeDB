@@ -334,14 +334,14 @@ namespace hedge::db
         if(index->size() == 0)
             co_return;
 
-        size_t current_partition_id = hedge::find_partition_prefix_for_key(accessor.begin()->key, partition_key_prefix_range);
+        size_t current_partition_id = hedge::find_partition_prefix_for_key(accessor.begin()->_key, partition_key_prefix_range);
         auto range_begin = accessor.begin();
         size_t count = 0;
         size_t sum_kv_len = 0;
 
         for(auto it = accessor.begin(); it != accessor.end(); ++it)
         {
-            size_t part_id = hedge::find_partition_prefix_for_key(it->key, partition_key_prefix_range);
+            size_t part_id = hedge::find_partition_prefix_for_key(it->_key, partition_key_prefix_range);
 
             if(part_id != current_partition_id)
             {
@@ -359,7 +359,7 @@ namespace hedge::db
             }
 
             count++;
-            sum_kv_len += it->key.size() + it->value.size();
+            sum_kv_len += it->_key.size() + it->_value.size();
         }
 
         // Last partition
@@ -433,12 +433,17 @@ namespace hedge::db
             co_return hedge::ok();
         };
 
+        std::optional<key_t> prev_key;
         for(auto it = begin; it != end; ++it)
         {
-            if(qf.has_value())
-                qf->insert(xxh64::hash((const char*)it->key.data(), it->key.size(), 0xDEADBEEF));
+            if(prev_key && it->_key == *prev_key)
+                continue; // older MVCC version, skip
+            prev_key = it->_key;
 
-            auto s = write_buffer.write_item(it->key, it->value, meta_index, meta_index_bytes);
+            if(qf.has_value())
+                qf->insert(xxh64::hash((const char*)it->_key.data(), it->_key.size(), 0xDEADBEEF));
+
+            auto s = write_buffer.write_item(it->_key, it->_value, meta_index, meta_index_bytes);
             if(!s)
             {
                 // Buffer full — flush and retry
@@ -446,7 +451,7 @@ namespace hedge::db
                 if(!flush_result)
                     co_return flush_result.error();
 
-                auto retry = write_buffer.write_item(it->key, it->value, meta_index, meta_index_bytes);
+                auto retry = write_buffer.write_item(it->_key, it->_value, meta_index, meta_index_bytes);
                 if(!retry)
                     co_return hedge::error("Could not write item after flush");
             }

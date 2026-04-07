@@ -2,11 +2,13 @@
 
 #include <memory>
 #include <optional>
+#include <variant>
 #include <vector>
 
 #include <error.hpp>
 
 #include "cache.h"
+#include "memtable.h"
 #include "merge/merge_utils.h"
 #include "merge/rolling_buffer.h"
 #include "sst.h"
@@ -15,6 +17,38 @@
 
 namespace hedge::db
 {
+    using scan_source_t = std::variant<sst_stream*, memtable_cursor*>;
+
+    inline bool source_is_eof(const scan_source_t& s)
+    {
+        return std::visit([](auto* p)
+                          { return p->is_eof(); }, s);
+    }
+
+    inline bool source_buffer_empty(const scan_source_t& s)
+    {
+        return std::visit([](auto* p)
+                          { return p->buffer_empty(); }, s);
+    }
+
+    inline hedge::expected<merge_entry_t> source_pop_entry(const scan_source_t& s)
+    {
+        return std::visit(
+            [](auto* p) -> hedge::expected<merge_entry_t>
+            {
+                merge_entry_t e{
+                    .key = key_t{p->front().key()},
+                    .value = value_buffer_t{p->front().value()},
+                    .epoch = p->epoch()};
+                auto ok = p->pop_front();
+
+                if(!ok) [[unlikely]]
+                    return ok.error();
+
+                return e;
+            },
+            s);
+    }
 
     class scan_iterator
     {
@@ -23,12 +57,14 @@ namespace hedge::db
         struct heap_item_t
         {
             merge_entry_t entry;
-            rolling_buffer2* source;
+            scan_source_t source;
             size_t epoch;
         };
 
+        memtable::snapshot _memtable_snapshot;
         std::vector<sst_ptr_t> _ssts;
-        std::unique_ptr<rolling_buffer_set> _rbufs;
+        std::unique_ptr<sst_stream_set> _rbufs;
+        std::vector<memtable_cursor> _mem_cursors;
         std::shared_ptr<sharded_page_cache> _cache;
 
         std::optional<key_t> _lower;
@@ -57,11 +93,13 @@ namespace hedge::db
         tmc::task<hedge::expected<std::pair<key_t, value_t>>> _next_inner();
 
     public:
-        scan_iterator(std::vector<sst_ptr_t> ssts,
-                      std::unique_ptr<rolling_buffer_set> rbufs,
-                      std::shared_ptr<sharded_page_cache> cache,
-                      std::optional<key_t> lower,
-                      std::optional<key_t> upper);
+        scan_iterator(
+            memtable::snapshot snapshot,
+            std::vector<sst_ptr_t> ssts,
+            std::unique_ptr<sst_stream_set> rbufs,
+            std::shared_ptr<sharded_page_cache> cache,
+            std::optional<key_t> lower,
+            std::optional<key_t> upper);
 
         scan_iterator(scan_iterator&&) = default;
         scan_iterator& operator=(scan_iterator&&) = default;
@@ -72,11 +110,12 @@ namespace hedge::db
         [[nodiscard]] tmc::task<expected<std::pair<key_t, value_t>>> next();
 
         static hedge::expected<scan_iterator> from_partition(
-            const partition_t& partition,
+            memtable* memtable,
+            const partition_t* partition,
             std::optional<key_t> lower,
             std::optional<key_t> upper,
             std::shared_ptr<sharded_page_cache> cache = nullptr,
-            size_t read_ahead_size = 256 * 1024);
+            size_t read_ahead_size = 16 * 1024);
     };
 
 } // namespace hedge::db

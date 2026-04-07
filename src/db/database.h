@@ -150,14 +150,6 @@ namespace hedge::db
         tmc::task<hedge::status> put_async(const key_t& key, const byte_buffer_t& value);
 
         /**
-         * @brief Asynchronously inserts a batch of small key-value pairs (values < 512 bytes).
-         * All values are stored in-place in the memtable (no value table). Max 128 entries per batch.
-         * @param entries Span of key-value pairs to insert.
-         * @return An async task resolving to a status indicating success or failure.
-         */
-        tmc::task<hedge::status> put_batch_async(std::span<const std::pair<key_t, byte_buffer_t>> entries);
-
-        /**
          * @brief Asynchronously marks a key as deleted.
          * Finds the latest value_ptr for the key (memtable or sorted_index), marks it as deleted
          * (either in the value_table header or by adding a tombstone entry to memtable),
@@ -167,6 +159,12 @@ namespace hedge::db
          * @return An async task resolving to a status indicating success or failure (e.g., key not found).
          */
         tmc::task<hedge::status> remove_async(const key_t& key);
+
+        /**
+         * @brief Creates a scan iterator over [lower, upper) within a single partition.
+         * The partition is determined from the lower bound key (or upper if lower is nullopt).
+         */
+        [[nodiscard]] hedge::expected<scan_iterator> scan(std::optional<key_t> lower, std::optional<key_t> upper);
 
         void trigger_compaction(bool compact_all);
 

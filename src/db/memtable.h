@@ -60,7 +60,7 @@ namespace hedge::db
     {
         using Accessor = skiplist_t::Accessor;
         Accessor _accessor;
-        alignas(64) uint32_t seq_nr;
+        alignas(64) uint64_t _seq_nr;
 
     public:
         memtable_impl3_t(size_t /*budget*/)
@@ -69,11 +69,16 @@ namespace hedge::db
         {
         }
 
-        std::pair<bool, uint32_t> insert(const key_t& key, std::span<const uint8_t> value);
+        std::pair<bool, uint64_t> insert(const key_t& key, std::span<const uint8_t> value);
 
         std::optional<std::span<const uint8_t>> get(const key_t& key) const;
 
         Accessor accessor() { return Accessor(this); }
+
+        [[nodiscard]] uint64_t seq_nr() const
+        {
+            return std::atomic_ref<const uint64_t>(this->_seq_nr).load(std::memory_order::relaxed);
+        }
     };
 
     // Memtable for keys and pointers to values (any sub-type)
@@ -125,6 +130,11 @@ namespace hedge::db
 
     class memtable
     {
+    public:
+        using rw_sync_table_t = async::rw_sync<memtable_with_arena_t>;
+        using rw_sync_table_ptr_t = std::shared_ptr<rw_sync_table_t>;
+
+    private:
         memtable_config _cfg;
 
         // Shared stuff & params from ctor
@@ -141,9 +151,6 @@ namespace hedge::db
         std::shared_ptr<db::sharded_page_cache> _cache{};
 
         // Current memtable and pipelined
-        using rw_sync_table_t = async::rw_sync<memtable_with_arena_t>;
-        using rw_sync_table_ptr_t = std::shared_ptr<rw_sync_table_t>;
-
         alignas(64) tmc::atomic_condvar<rw_sync_table_ptr_t> _table{nullptr};
         alignas(64) std::atomic_bool _flush_mutex;
         alignas(64) std::atomic_size_t _wal_epoch;
@@ -178,13 +185,18 @@ namespace hedge::db
 
         tmc::task<hedge::status> put_async(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type);
 
-        tmc::task<hedge::status> put_batch_async(
-            std::span<const std::pair<key_t, std::vector<uint8_t>>> entries,
-            hedge::value_type value_type);
-
         std::optional<value_t> get(const key_t& key) const;
 
         std::future<void> wait_for_flush();
+
+        struct snapshot
+        {
+            uint64_t seq_nr;
+            rw_sync_table_ptr_t curr;
+            std::map<size_t, rw_sync_table_ptr_t> pending_flushes;
+        };
+
+        snapshot acquire_snapshot();
 
         hedge::status replay_wal();
 
@@ -194,13 +206,13 @@ namespace hedge::db
         }
 
     private:
-        tmc::task<hedge::status> _append_to_wal(int32_t fd, uint32_t seq_nr, const key_t& key, std::span<const uint8_t> value);
+        tmc::task<hedge::status> _append_to_wal(int32_t fd, uint64_t seq_nr, const key_t& key, std::span<const uint8_t> value);
 
         [[nodiscard]] std::shared_ptr<rw_sync_table_t> _make_memtable() const;
 
         struct wal_batch_meta
         {
-            uint32_t seq_nr;
+            uint64_t seq_nr;
             uint8_t encoded_key_size;
             uint16_t value_size;
         };

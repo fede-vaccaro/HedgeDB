@@ -177,6 +177,9 @@ namespace hedge::db
 
         // Test reader
         block_decoder reader(buffer.data(), cfg);
+        auto ok = reader.sanity_check();
+        ASSERT_TRUE(ok) << ok.error().to_string();
+
         block_iterator it = reader.begin();
 
         ASSERT_TRUE(span_cmpr(it.key(), key_0)) << "Key 0 mismatch: " << std::string(it.key().begin(), it.key().end()) << " vs " << key_0;
@@ -230,6 +233,8 @@ namespace hedge::db
 
         // Test reader
         block_decoder reader(buffer.data(), cfg);
+        auto ok = reader.sanity_check();
+        ASSERT_TRUE(ok) << ok.error().to_string();
 
         block_iterator it = reader.begin();
 
@@ -401,6 +406,9 @@ namespace hedge::db
 
         // Test reader
         block_decoder reader(buffer.data(), cfg);
+        auto ok = reader.sanity_check();
+        ASSERT_TRUE(ok) << ok.error().to_string();
+
         size_t idx = 0;
         for(auto it = reader.begin(); it != reader.end(); ++it)
         {

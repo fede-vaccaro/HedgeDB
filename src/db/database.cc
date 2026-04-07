@@ -49,8 +49,8 @@ namespace hedge::db
             db._indices_path,
             &db._sst_manager->flush_iteration(),
             // db._bg_pool,
-            io::static_pool::instance(),
-            // std::make_shared<io::io_executor>(config.flush_io_workers, 32, "flusher"),
+            // io::static_pool::instance(),
+            std::make_shared<io::io_executor>(config.flush_io_workers, 32, "flusher"),
             [&sst_mgr = *db._sst_manager](std::vector<sst> indices) -> tmc::task<void>
             { return sst_mgr.push_new_indices(std::move(indices)); },
             [&sst_mgr = *db._sst_manager]()
@@ -301,22 +301,6 @@ namespace hedge::db
         co_return co_await this->_memtable->put_async(key, maybe_write.value(), hedge::value_type::VALUE_PTR);
     }
 
-    tmc::task<hedge::status> database::put_batch_async(std::span<const std::pair<key_t, byte_buffer_t>> entries)
-    {
-        static constexpr size_t MAX_BATCH_SIZE = 128;
-
-        if(entries.size() > MAX_BATCH_SIZE)
-            co_return hedge::error("put_batch_async: batch size exceeds maximum of 128 entries");
-
-        for(const auto& [key, value] : entries)
-        {
-            if(value.size() >= 512)
-                co_return hedge::error("put_batch_async only supports values < 512 bytes");
-        }
-
-        co_return co_await this->_memtable->put_batch_async(entries, hedge::value_type::IN_PLACE_VALUE);
-    }
-
     tmc::task<expected<value_t>> database::_find_value(const key_t& key)
     {
         // prof::counter_guard guard(prof::get<"find_value_in_sst">());
@@ -403,6 +387,20 @@ namespace hedge::db
         size_t matching_partition_id = hedge::find_partition_prefix_for_key(key, partition_size); // Corrected type
 
         return matching_partition_id;
+    }
+
+    hedge::expected<scan_iterator> database::scan(std::optional<key_t> lower, std::optional<key_t> upper)
+    {
+        const key_t& bound_key = lower ? *lower : *upper;
+        size_t partition_id = this->_find_matching_partition_for_key(bound_key);
+
+        auto maybe_partition = this->_sst_manager->partition_snapshot(partition_id);
+        if(!maybe_partition)
+            return hedge::error(maybe_partition.error());
+
+        auto partition = std::move(maybe_partition.value());
+        memtable* mem = this->_memtable.has_value() ? &*this->_memtable : nullptr;
+        return scan_iterator::from_partition(mem, &partition, std::move(lower), std::move(upper), this->_page_cache);
     }
 
     tmc::task<hedge::status> database::remove_async(const key_t& /* key */)

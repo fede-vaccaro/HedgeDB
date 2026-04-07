@@ -147,7 +147,7 @@ TEST_P(RollingBufferTest, WriteAndReadBack)
 
         auto read_task = [&]() -> async::task<void>
         {
-            rolling_buffer2 rb(file, config, config.read_ahead_size, null_cache);
+            sst_stream rb(file, config, config.read_ahead_size, null_cache);
             size_t idx = 0;
 
             auto status = co_await rb.refresh(null_cache);

@@ -101,7 +101,7 @@ namespace hedge::db
 
         const size_t num_bufs = indices.size();
 
-        rolling_buffer_set rbufs(num_bufs);
+        sst_stream_set rbufs(num_bufs);
 
         for(const auto* index : indices)
         {
@@ -205,14 +205,14 @@ namespace hedge::db
 
         [[maybe_unused]] size_t iteration_count{0};
 
-        using heap_item_t = std::pair<merge_entry_t, rolling_buffer2*>; // Index entry + source buffer pointer
+        using heap_item_t = std::pair<merge_entry_t, sst_stream*>; // Index entry + source buffer pointer
 
         auto heap_item_t_comparator = [](const heap_item_t& lhs, const heap_item_t& rhs)
         {
             // Cpp heap is a max-heap by default, we need a min-heap
             auto cmp = lhs.first.key <=> rhs.first.key;
             if(cmp != 0)
-                return cmp > 0; // min-heap by key
+                return cmp > 0;                       // min-heap by key
             return lhs.first.epoch < rhs.first.epoch; // higher epoch pops first (newer wins)
         };
 
@@ -237,7 +237,9 @@ namespace hedge::db
                     .epoch = rbuf->index().epoch(),
                 };
 
-                rbuf->pop_front();
+                auto ok = rbuf->pop_front();
+                if(!ok) [[unlikely]]
+                    co_return ok.error();
 
                 key_heap.emplace_back(std::move(new_keypair), rbuf);
                 std::ranges::push_heap(key_heap, heap_item_t_comparator);
@@ -278,7 +280,9 @@ namespace hedge::db
                     .epoch = rbuf->index().epoch(),
                 };
 
-                rbuf->pop_front();
+                auto ok = rbuf->pop_front();
+                if(!ok) [[unlikely]]
+                    co_return ok.error();
 
                 key_heap.emplace_back(std::move(new_keypair), rbuf);
                 std::ranges::push_heap(key_heap, heap_item_t_comparator);
@@ -367,7 +371,7 @@ namespace hedge::db
                 co_return flush_result.error();
         }
 
-        [[maybe_unused]] auto check_every_buf_is_eof = [](rolling_buffer2* rbufs_begin, rolling_buffer2* rbufs_end)
+        [[maybe_unused]] auto check_every_buf_is_eof = [](sst_stream* rbufs_begin, sst_stream* rbufs_end)
         {
             for(auto* it = rbufs_begin; it < rbufs_end; ++it)
             {
@@ -382,7 +386,7 @@ namespace hedge::db
 
         assert(check_every_buf_is_eof(rbufs_begin, rbufs_end) && "LHS reader not at EOF after merge");
 
-        [[maybe_unused]] auto check_key_count_matches = [&write_buffer, filtered_keys, &dedup](rolling_buffer2* rbufs_begin, rolling_buffer2* rbufs_end)
+        [[maybe_unused]] auto check_key_count_matches = [&write_buffer, filtered_keys, &dedup](sst_stream* rbufs_begin, sst_stream* rbufs_end)
         {
             size_t total_keys = 0;
             for(auto* it = rbufs_begin; it < rbufs_end; ++it)

@@ -240,20 +240,24 @@ namespace hedge::db
         return spawn_persist(this, std::move(tasks));
     }
 
+    hedge::expected<partition_t> sst_manager::partition_snapshot(size_t partition_id) const
+    {
+        auto sorted_indices_it = this->_sorted_indices.find(partition_id);
+        if(sorted_indices_it == this->_sorted_indices.end())
+            return hedge::error("Partition not found in sorted indices", errc::KEY_NOT_FOUND);
+
+        auto& state = *sorted_indices_it->second;
+        std::shared_lock lk(state.mutex);
+        return state.levels;
+    }
+
     tmc::task<expected<value_t>> sst_manager::lookup_async(const key_t& key, size_t matching_partition_id)
     {
-        partition_t partition; // Local copy for safe iteration
+        auto maybe_partition = this->partition_snapshot(matching_partition_id);
+        if(!maybe_partition)
+            co_return hedge::error(maybe_partition.error());
 
-        {
-            auto sorted_indices_it = this->_sorted_indices.find(matching_partition_id);
-
-            if(sorted_indices_it == this->_sorted_indices.end())
-                co_return hedge::error("Key partition not found in sorted indices", errc::KEY_NOT_FOUND);
-
-            auto& state = *sorted_indices_it->second;
-            std::shared_lock lk(state.mutex);
-            partition = state.levels;
-        }
+        auto partition = std::move(maybe_partition.value());
 
         // Note: we are iterating in reverse order to check the newest indices first, as they are more likely to contain the key due to temporal locality.
 
@@ -319,22 +323,14 @@ namespace hedge::db
         co_return std::move(value_opt.value());
     }
 
-    hedge::expected<scan_iterator> sst_manager::range_iterator(std::optional<key_t> lower, std::optional<key_t> upper, size_t partition_prefix, size_t read_ahead_size)
+    hedge::expected<scan_iterator> sst_manager::range_iterator(std::optional<key_t> lower, std::optional<key_t> upper, size_t matching_partition_id, size_t read_ahead_size)
     {
-        partition_t partition;
+        auto maybe_partition = this->partition_snapshot(matching_partition_id);
+        if(!maybe_partition)
+            return hedge::error(maybe_partition.error());
 
-        {
-            auto sorted_indices_it = this->_sorted_indices.find(partition_prefix);
-
-            if(sorted_indices_it == this->_sorted_indices.end())
-                return hedge::error("Partition not found in sorted indices", errc::KEY_NOT_FOUND);
-
-            auto& state = *sorted_indices_it->second;
-            std::shared_lock lk(state.mutex);
-            partition = state.levels;
-        }
-
-        return scan_iterator::from_partition(partition, std::move(lower), std::move(upper), this->_page_cache, read_ahead_size);
+        auto partition = std::move(maybe_partition.value());
+        return scan_iterator::from_partition(nullptr, &partition, std::move(lower), std::move(upper), this->_page_cache, read_ahead_size);
     }
 
     tmc::task<void> sst_manager::_make_self_completing_compaction_task(size_t level, std::vector<sst_ptr_t> inputs, size_t input_min_merge_width)

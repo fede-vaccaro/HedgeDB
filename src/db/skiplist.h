@@ -93,18 +93,32 @@ namespace hedge::db
 
     struct memtable_entry
     {
-        key_t key;
-        alignas(std::atomic_ref<std::span<const uint8_t>>::required_alignment) mutable std::span<const uint8_t> value;
+        key_t _key;
+        uint64_t seq = 0;
+        std::span<const uint8_t> _value;
 
         memtable_entry() = default;
-        memtable_entry(key_t k, std::span<const uint8_t> v) : key(std::move(k)), value(v) {}
+        memtable_entry(key_t k, uint64_t s, std::span<const uint8_t> v) : _key(std::move(k)), seq(s), _value(v) {}
+
+        [[nodiscard]] std::span<const uint8_t> key() const
+        {
+            return this->_key;
+        }
+
+        [[nodiscard]] std::span<const uint8_t> value() const
+        {
+            return this->_value;
+        }
     };
 
     struct memtable_cmp
     {
         bool operator()(const memtable_entry& a, const memtable_entry& b) const
         {
-            return a.key < b.key;
+            auto cmp = a._key <=> b._key;
+            if(cmp != 0)
+                return cmp < 0;
+            return a.seq > b.seq; // higher seq = newer = comes first
         }
     };
 
