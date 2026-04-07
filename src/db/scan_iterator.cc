@@ -137,7 +137,7 @@ namespace hedge::db
 
             if(rbuf->buffer_empty())
             {
-                auto s = co_await this->_refresh_buffers();
+                auto s = co_await rbuf->refresh(this->_cache);
                 if(!s)
                     co_return s;
             }
@@ -206,9 +206,10 @@ namespace hedge::db
             {
                 if(source_buffer_empty(source)) [[unlikely]]
                 {
-                    auto s = co_await this->_refresh_buffers();
+                    auto* rbuf = std::get<sst_stream*>(source);
+                    auto s = co_await rbuf->refresh(this->_cache);
                     if(!s)
-                        co_return hedge::error("Failed to refresh scan buffers: " + s.error().to_string());
+                        co_return hedge::error("Failed to refresh scan buffer: " + s.error().to_string());
                 }
 
                 if(!source_is_eof(source) && !source_buffer_empty(source))

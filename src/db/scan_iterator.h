@@ -115,7 +115,7 @@ namespace hedge::db
             std::optional<key_t> lower,
             std::optional<key_t> upper,
             std::shared_ptr<sharded_page_cache> cache = nullptr,
-            size_t read_ahead_size = 16 * 1024);
+            size_t read_ahead_size = 32 * 1024);
     };
 
 } // namespace hedge::db
