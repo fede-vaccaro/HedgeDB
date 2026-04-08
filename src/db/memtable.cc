@@ -1,23 +1,18 @@
 #include <atomic>
-#include <bits/types/struct_iovec.h>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <emmintrin.h>
 #include <filesystem>
 #include <future>
 #include <memory>
-#include <numeric>
 #include <ranges>
 #include <shared_mutex>
 #include <thread>
-#include <unistd.h>
 
 #include "db/folly/concurrent_skip_list/micro_spin_lock.h"
 #include "error.hpp"
-#include "fs/fs.hpp"
-#include "generator.h"
-#include "hasher.h"
 #include "index_ops.h"
 #include "io/io_executor.h"
 #include "key.h"
@@ -27,106 +22,8 @@
 #include "tmc/ex_cpu_st.hpp"
 #include "tmc/spawn.hpp"
 #include "types.h"
+#include "wal.h"
 
-namespace
-{
-    struct wal_entry
-    {
-        size_t epoch;
-        uint64_t seq_nr;
-        hedge::key_t key;
-        std::vector<uint8_t> value;
-    };
-
-    hedge::async::generator<hedge::expected<wal_entry>> read_wal_file(const std::filesystem::path& path, size_t epoch)
-    {
-        auto maybe_file = hedge::fs::file::from_path(path, hedge::fs::file::open_mode::read_only, false);
-        if(!maybe_file)
-            co_return;
-
-        auto& file = maybe_file.value();
-        size_t file_size = file.file_size();
-        if(file_size == 0)
-            co_return;
-
-        std::vector<uint8_t> buffer(file_size);
-        ssize_t bytes_read = ::pread(file.fd(), buffer.data(), file_size, 0);
-        if(bytes_read <= 0)
-            co_return;
-
-        size_t pos = 0;
-        size_t end = static_cast<size_t>(bytes_read);
-
-        hedge::third_party::hasher64 hasher;
-
-        while(pos < end)
-        {
-            // TODO: refactor
-            // Need at least: seq_nr(8) + encoded_key_size(1)
-            if(pos + sizeof(uint64_t) + sizeof(uint8_t) > end)
-                break; // TODO return error in these cases instead of silently stopping the replay
-
-            uint64_t seq_nr;
-            std::memcpy(&seq_nr, buffer.data() + pos, sizeof(uint64_t));
-            pos += sizeof(uint64_t);
-
-            uint8_t encoded_key_size = buffer[pos];
-            pos += sizeof(uint8_t);
-
-            size_t key_size = hedge::decode_key_size(encoded_key_size);
-            if(key_size > hedge::MAX_KEY_LEN || pos + key_size > end)
-                break;
-
-            hedge::key_t key(buffer.data() + pos, key_size);
-            pos += key_size;
-
-            if(pos + sizeof(uint16_t) > end)
-                break;
-
-            uint16_t value_size;
-            std::memcpy(&value_size, buffer.data() + pos, sizeof(uint16_t));
-            pos += sizeof(uint16_t);
-
-            if(pos + value_size > end)
-                break;
-
-            std::vector<uint8_t> value(buffer.data() + pos, buffer.data() + pos + value_size);
-            pos += value_size;
-
-            uint32_t checksum;
-            if(pos + sizeof(uint32_t) > end)
-                break;
-
-            std::memcpy(&checksum, buffer.data() + pos, sizeof(uint32_t));
-            pos += sizeof(uint32_t);
-
-            // Recompute checksum and verify
-            hasher.update(&seq_nr, sizeof(uint64_t));
-            hasher.update(&encoded_key_size, sizeof(uint8_t));
-            hasher.update(key.data(), key.size());
-            hasher.update(&value_size, sizeof(uint16_t));
-            hasher.update(value.data(), value_size); // value only, without checksum
-
-            constexpr uint64_t MASK_32_BIT = (1ULL << 32) - 1;
-            auto computed_checksum = static_cast<uint32_t>(hasher.sum() & MASK_32_BIT);
-            if(checksum != computed_checksum)
-            {
-                co_yield hedge::error(
-                    "checksum mismatch for WAL entry with seq_nr " +
-                    std::to_string(seq_nr) +
-                    " in file " + path.string() +
-                    ": expected " + std::to_string(checksum) +
-                    ", computed " + std::to_string(computed_checksum));
-                break;
-            }
-
-            co_yield wal_entry{.epoch = epoch,
-                               .seq_nr = seq_nr,
-                               .key = std::move(key),
-                               .value = std::move(value)};
-        }
-    }
-} // anonymous namespace
 
 namespace hedge::db
 {
@@ -204,72 +101,6 @@ namespace hedge::db
             this->_cfg.memory_budget_cap);
     }
 
-    tmc::task<hedge::status> memtable::_append_to_wal(int32_t fd, uint64_t seq_nr, const key_t& key, std::span<const uint8_t> value)
-    {
-        uint8_t encoded_key_size = hedge::encode_key_size(key.size());
-        auto value_size = static_cast<uint16_t>(value.size());
-
-        static_assert(sizeof(seq_nr) == sizeof(uint64_t));
-
-        thread_local hedge::third_party::hasher64 hasher;
-        uint32_t checksum;
-
-        // WAL entry format is:
-        // 1. Seq Nr.
-        // 2. Key size
-        // 3. Key
-        // 4. Value size
-        // 5. Value
-        // 6. Checksum
-        std::array<iovec, 6> wal_entry{
-            iovec{
-                .iov_base = &seq_nr,
-                .iov_len = sizeof(uint64_t)},
-            iovec{
-                .iov_base = &encoded_key_size,
-                .iov_len = sizeof(uint8_t),
-            },
-            iovec{
-                .iov_base = const_cast<uint8_t*>(key.data()),
-                .iov_len = key.size(),
-            },
-            iovec{
-                .iov_base = &value_size,
-                .iov_len = sizeof(uint16_t),
-            },
-            iovec{
-                .iov_base = const_cast<uint8_t*>(value.data()),
-                .iov_len = value.size(),
-            },
-            iovec{
-                .iov_base = &checksum,
-                .iov_len = sizeof(uint32_t),
-            }};
-
-        // Compute checksum
-        for(size_t i = 0; i < wal_entry.size() - 1; ++i)
-            hasher.update(wal_entry[i].iov_base, wal_entry[i].iov_len);
-        constexpr uint64_t MASK_32_BIT = (1ULL << 32) - 1;
-        checksum = static_cast<uint32_t>(hasher.sum() & MASK_32_BIT);
-
-        auto compute_expected_bytes = [&wal_entry]
-        {
-            return std::accumulate(wal_entry.begin(), wal_entry.end(), size_t(0), [](size_t sum, const iovec& vec)
-                                   { return sum + vec.iov_len; });
-        };
-
-        int32_t res = pwritev2(fd, wal_entry.data(), wal_entry.size(), -1 /* File is opened with O_APPEND */, 0);
-
-        if(res < 0)
-            co_return hedge::error("could not write into wal: " + std::string(strerror(errno)));
-
-        auto expected_bytes = compute_expected_bytes();
-        if(size_t(res) != expected_bytes)
-            co_return hedge::error("partial write into wal: " + std::to_string(res) + " != " + std::to_string(expected_bytes));
-
-        co_return hedge::ok();
-    }
-
     tmc::task<hedge::status> memtable::put_async(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type)
     {
         // Loading from an atomic shared every time is slow AF
@@ -336,44 +167,8 @@ namespace hedge::db
             if(!this->_cfg.use_wal)
                 co_return hedge::ok();
 
-            co_return co_await this->_append_to_wal(memtable->per_thread_wals[THIS_THREAD_IDX].fd(), seq_nr, key, value_span);
+            co_return memtable->_wal->append(THIS_THREAD_IDX % this->_cfg.num_writer_threads, seq_nr, key, value_span);
         }
-    }
-
-    hedge::status memtable::_append_batch_to_wal(
-        int32_t fd,
-        std::span<const std::pair<key_t, std::vector<uint8_t>>> entries,
-        std::span<const wal_batch_meta> meta,
-        std::span<const std::span<const uint8_t>> value_spans)
-    {
-        constexpr size_t IOVECS_PER_ENTRY = 5;
-        const size_t n = entries.size();
-
-        std::array<iovec, 128 * IOVECS_PER_ENTRY> iovecs;
-        size_t expected_bytes = 0;
-
-        for(size_t i = 0; i < n; ++i)
-        {
-            const size_t base = i * IOVECS_PER_ENTRY;
-            const auto& [key, _] = entries[i];
-
-            iovecs[base + 0] = {.iov_base = const_cast<uint64_t*>(&meta[i].seq_nr), .iov_len = sizeof(uint64_t)};
-            iovecs[base + 1] = {.iov_base = const_cast<uint8_t*>(&meta[i].encoded_key_size), .iov_len = sizeof(uint8_t)};
-            iovecs[base + 2] = {.iov_base = const_cast<uint8_t*>(key.data()), .iov_len = key.size()};
-            iovecs[base + 3] = {.iov_base = const_cast<uint16_t*>(&meta[i].value_size), .iov_len = sizeof(uint16_t)};
-            iovecs[base + 4] = {.iov_base = const_cast<uint8_t*>(value_spans[i].data()), .iov_len = value_spans[i].size()};
-
-            expected_bytes += sizeof(uint64_t) + sizeof(uint8_t) + key.size() + sizeof(uint16_t) + value_spans[i].size();
-        }
-
-        int32_t res = pwritev2(fd, iovecs.data(), static_cast<int>(n * IOVECS_PER_ENTRY), -1, 0);
-        if(res < 0)
-            return hedge::error("could not write batch into wal: " + std::string(strerror(errno)));
-
-        if(static_cast<size_t>(res) != expected_bytes)
-            return hedge::error("partial batch write into wal: " + std::to_string(res) + " != " + std::to_string(expected_bytes));
-
-        return hedge::ok();
     }
 
     std::optional<value_t> memtable::get(const key_t& key) const
@@ -515,8 +310,6 @@ namespace hedge::db
             co_return;
         }
 
-        std::vector<fs::file> wals;
-
         tmc::task<void> persist_indices{};
 
         {
@@ -524,7 +317,6 @@ namespace hedge::db
             persist_indices = this->_push_new_indices(std::move(partitioned_sorted_indices.value()));
             auto it = this->_pending_flushes.find(curr_flush_epoch);
             assert(it->second == memtable_to_flush);
-            wals = std::move(it->second->ptr()->per_thread_wals);
             this->_pending_flushes.erase(it);
             this->_pending_flushes_cv_sync.notify_all();
         }
@@ -545,9 +337,8 @@ namespace hedge::db
         if(this->_cfg.auto_compaction)
             this->_trigger_compaction_callback();
 
-        std::ranges::for_each(wals, [](const fs::file& wal)
-                              { std::filesystem::remove(wal.path()); });
-        wals.clear();
+        if(auto& w = memtable_to_flush->ptr()->_wal; w.has_value())
+            w->remove();
 
         auto t1 = std::chrono::high_resolution_clock::now();
         [[maybe_unused]] auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
@@ -557,116 +348,28 @@ namespace hedge::db
 
     hedge::status memtable::replay_wal()
     {
-        if(!std::filesystem::exists(this->_indices_path))
-            return hedge::ok();
-
-        // Collect non-empty WAL files with their epochs
-        struct wal_file_info
-        {
-            std::filesystem::path path;
-            size_t epoch;
-        };
-
-        std::vector<wal_file_info> wal_files;
-
-        for(const auto& entry : std::filesystem::directory_iterator(this->_indices_path))
-        {
-            if(!entry.is_regular_file())
-                continue;
-
-            auto fname = entry.path().filename().string();
-            if(!fname.starts_with("wal."))
-                continue;
-
-            // Skip empty files (belong to freshly created memtable)
-            if(entry.file_size() == 0)
-                continue;
-
-            auto last_dot = fname.rfind('.');
-            if(last_dot == std::string::npos)
-                continue;
-
-            size_t epoch = std::stoull(fname.substr(last_dot + 1));
-            wal_files.push_back({entry.path(), epoch});
-        }
-
-        if(wal_files.empty())
-            return hedge::ok();
-
-        // Collect all entries from all WAL files
-        std::vector<wal_entry> all_entries;
-
-        for(auto& wf : wal_files)
-        {
-            auto gen = read_wal_file(wf.path, wf.epoch);
-            for(auto& entry : gen)
-            {
-                if(!entry) [[unlikely]]
-                {
-                    this->_logger.log("Error reading WAL file ", wf.path, ": ", entry.error().to_string());
-                    continue;
-                }
-                all_entries.push_back(std::move(entry.value()));
-            }
-        }
-
-        if(all_entries.empty())
-        {
-            // Delete WAL files even if they had no valid entries
-            for(auto& wf : wal_files)
-            {
-                auto f = fs::file::from_path(wf.path, fs::file::open_mode::read_only, false);
-                if(f)
-                    std::filesystem::remove(f.value().path());
-            }
-            return hedge::ok();
-        }
-
-        // Sort by (epoch, seq_nr) for chronological order
-        std::sort(all_entries.begin(), all_entries.end(),
-                  [](const wal_entry& a, const wal_entry& b)
-                  {
-                      if(a.epoch != b.epoch)
-                          return a.epoch < b.epoch;
-                      return a.seq_nr < b.seq_nr;
-                  });
-
-        // Insert into current memtable
         auto table_ptr = this->_table.ref().load(std::memory_order::relaxed);
-        auto* memtable = table_ptr->ptr();
+        auto* mt = table_ptr->ptr();
 
         constexpr size_t alignment = std::atomic_ref<std::span<const uint8_t>>::required_alignment;
-
         size_t replayed = 0;
 
-        for(auto& entry : all_entries)
-        {
-            auto* value_ptr = memtable->value_arenas[0]->allocate_many(entry.value.size(), alignment);
-            if(value_ptr == nullptr)
+        return wal::replay(
+            this->_indices_path,
+            [&](const key_t& key, std::span<const uint8_t> value) -> bool
             {
-                this->_logger.log("WAL replay: arena exhausted after ", replayed, " entries");
-                break;
-            }
-
-            std::memcpy(value_ptr, entry.value.data(), entry.value.size());
-            std::span<const uint8_t> value_span(value_ptr, entry.value.size());
-
-            memtable->insert(entry.key, value_span);
-
-            ++replayed;
-        }
-
-        this->_logger.log("WAL replay: replayed ", replayed, " entries from ", wal_files.size(), " WAL files");
-
-        // Delete replayed WAL files
-        for(auto& wf : wal_files)
-        {
-            auto f = fs::file::from_path(wf.path, fs::file::open_mode::read_only, false);
-            if(f)
-                std::filesystem::remove(f.value().path());
-        }
-
-        return hedge::ok();
+                auto* ptr = mt->value_arenas[0]->allocate_many(value.size(), alignment);
+                if(!ptr)
+                {
+                    this->_logger.log("WAL replay: arena exhausted after ", replayed, " entries");
+                    return false;
+                }
+                std::memcpy(ptr, value.data(), value.size());
+                mt->insert(key, {ptr, value.size()});
+                ++replayed;
+                return true;
+            },
+            this->_logger);
     }
 
     memtable::snapshot memtable::acquire_snapshot()

@@ -34,6 +34,9 @@ namespace hedge::db
 
     void database::_init_memtable(database& db, const db_config& config)
     {
+        auto flush_executor =
+            config.flush_io_workers > 0 ? std::make_shared<io::io_executor>(config.flush_io_workers, 32, "flusher") : io::static_pool::instance();
+
         db._memtable.emplace(
             memtable_config{
                 .max_inserts_cap = config.memtable_budget_bytes,
@@ -41,16 +44,13 @@ namespace hedge::db
                 .auto_compaction = config.auto_compaction,
                 .use_odirect = config.use_odirect_for_indices,
                 .num_writer_threads = io::static_pool::instance()->num_threads(),
-                // .flush_io_workers = config.flush_io_workers,
                 .use_wal = !config.disable_wal,
                 .max_pending_flushes = config.max_pending_flushes,
             },
             config.num_partition_exponent,
             db._indices_path,
             &db._sst_manager->flush_iteration(),
-            // db._bg_pool,
-            // io::static_pool::instance(),
-            std::make_shared<io::io_executor>(config.flush_io_workers, 32, "flusher"),
+            flush_executor,
             [&sst_mgr = *db._sst_manager](std::vector<sst> indices) -> tmc::task<void>
             { return sst_mgr.push_new_indices(std::move(indices)); },
             [&sst_mgr = *db._sst_manager]()
@@ -67,7 +67,7 @@ namespace hedge::db
         db->_indices_path = base_path / "indices";
         db->_values_path = base_path / "values";
         db->_config = config;
-        db->_bg_pool = std::make_shared<io::io_executor>(config.compaction_io_workers, 32, "bg");
+        db->_bg_pool = config.compaction_io_workers > 0 ? std::make_shared<io::io_executor>(config.compaction_io_workers, 32, "bg") : io::static_pool::instance();
 
         if(auto status = _validate_config(config); !status)
             return status.error();

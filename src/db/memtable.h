@@ -26,6 +26,7 @@
 #include "tmc/semaphore.hpp"
 #include "tmc/task.hpp"
 #include "types.h"
+#include "wal.h"
 
 namespace tmc
 {
@@ -87,8 +88,7 @@ namespace hedge::db
     {
         alignas(64) std::atomic_size_t bytes_written{0};
         std::vector<std::unique_ptr<hedge::db::arena_allocator<uint8_t, false>>> value_arenas; // one per writer thread, not shared between threads
-        // single_buffer_arena_allocator value_arena; // single arena for values, shared between threads with atomic allocation
-        std::vector<hedge::fs::file> per_thread_wals;
+        std::optional<wal> _wal;
 
         memtable_with_arena_t(const std::filesystem::path& base_path,
                               bool use_wal,
@@ -96,34 +96,19 @@ namespace hedge::db
                               size_t memtable_memory_budget,
                               size_t n_threads,
                               size_t value_memory_budget)
-            : memtable_impl3_t(memtable_memory_budget) /*, value_arena(value_memory_budget)*/
+            : memtable_impl3_t(memtable_memory_budget)
         {
             value_arenas.reserve(n_threads);
             for(auto i = 0UL; i < n_threads; ++i)
-            {
                 value_arenas.emplace_back(std::make_unique<hedge::db::arena_allocator<uint8_t, false>>(value_memory_budget));
-            }
 
-            if(!use_wal)
-                return;
-
-            per_thread_wals.reserve(n_threads);
-            for(auto i = 0U; i < n_threads; ++i)
+            if(use_wal)
             {
-                const auto initial_wal_size = static_cast<size_t>((static_cast<double>(value_memory_budget) / n_threads));
-                const auto wal_path = std::format("wal.t{}.{}", i, flush_iteration);
-                auto maybe_wal =
-                    fs::file::from_path(base_path / wal_path,
-                                        fs::file::open_mode::write_append_new,
-                                        false,
-                                        std::nullopt);
-
-                if(!maybe_wal.has_value())
-                    throw std::runtime_error("could not open wal " + (base_path / wal_path).string() + " : " + maybe_wal.error().to_string());
-
-                fallocate(maybe_wal.value().fd(), FALLOC_FL_KEEP_SIZE, 0, initial_wal_size); // ignore res
-
-                per_thread_wals.emplace_back(std::move(maybe_wal.value()));
+                this->_wal.emplace(wal::config{
+                    .base_path = base_path,
+                    .epoch = flush_iteration,
+                    .n_threads = n_threads,
+                    .file_size_hint = value_memory_budget / n_threads});
             }
         }
     };
@@ -206,22 +191,7 @@ namespace hedge::db
         }
 
     private:
-        tmc::task<hedge::status> _append_to_wal(int32_t fd, uint64_t seq_nr, const key_t& key, std::span<const uint8_t> value);
-
         [[nodiscard]] std::shared_ptr<rw_sync_table_t> _make_memtable() const;
-
-        struct wal_batch_meta
-        {
-            uint64_t seq_nr;
-            uint8_t encoded_key_size;
-            uint16_t value_size;
-        };
-
-        hedge::status _append_batch_to_wal(
-            int32_t fd,
-            std::span<const std::pair<key_t, std::vector<uint8_t>>> entries,
-            std::span<const wal_batch_meta> meta,
-            std::span<const std::span<const uint8_t>> value_spans);
 
         tmc::task<bool> _flush(rw_sync_table_ptr_t expected_table);
         tmc::task<void> _flush_inner(size_t curr_flush_epoch, rw_sync_table_ptr_t memtable_to_flush);

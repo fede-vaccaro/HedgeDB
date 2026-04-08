@@ -430,7 +430,7 @@ namespace hedge::db
                 bool release_pressure = this->_pending_compacting_sst_in_l0_count < threshold / 2;
                 if(release_pressure && this->_compaction_backpressure.ref().load(std::memory_order::relaxed))
                 {
-                    this->_logger.log("Compaction backpressure released: pending compacting SST count in L0 is ", this->_pending_compacting_sst_in_l0_count, " below threshold ", threshold / 2);
+                    // this->_logger.log("Compaction backpressure released: pending compacting SST count in L0 is ", this->_pending_compacting_sst_in_l0_count, " below threshold ", threshold / 2);
                     this->_compaction_backpressure.ref().store(false, std::memory_order::release);
                     this->_compaction_backpressure.notify_all();
                 }

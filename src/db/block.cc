@@ -41,7 +41,7 @@ namespace hedge::db
     void _write_unsafe(T v, uint8_t** ptr)
     {
         // Check alignment
-        assert(&v % alignof(v) == 0);
+        assert((uint64_t)&v % std::alignment_of<T>::value == 0);
         **ptr = v;
         *ptr += sizeof(T);
     }
