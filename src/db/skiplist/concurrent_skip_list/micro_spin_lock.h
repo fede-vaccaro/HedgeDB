@@ -7,7 +7,7 @@
 #include <new>
 #include <thread>
 
-namespace folly
+namespace third_party::folly
 {
 
     namespace detail
@@ -188,4 +188,4 @@ namespace folly
 
     //////////////////////////////////////////////////////////////////////
 
-} // namespace folly
+} // namespace third_party::folly

@@ -4,7 +4,7 @@
 #include "db/block.h"
 #include "db/index_ops.h"
 #include "db/merge/merge_utils.h"
-#include "db/merge/rolling_buffer.h"
+#include "db/merge/sst_stream.h"
 #include "db/merge/write_buffer.h"
 #include "db/quotient_filter.h"
 #include "db/sst.h"
@@ -153,7 +153,7 @@ namespace hedge::db
         // When pushing a new item:
         // - If its key is the same as the last pushed one, the internal buffer keeps only the one with the highest value_ptr (most recent entry).
         // - If its key is different from the last pushed one, the last pushed is rotate to the output (ready to be popped), and the new item is stored as the current one.
-        merge_iterator2 dedup{};
+        deduplicator dedup{};
 
         // Keep track of the last written key for debugging purposes
         [[maybe_unused]] key_t last_written_key{};

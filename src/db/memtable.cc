@@ -11,7 +11,7 @@
 #include <shared_mutex>
 #include <thread>
 
-#include "db/folly/concurrent_skip_list/micro_spin_lock.h"
+#include "db/skiplist/concurrent_skip_list/micro_spin_lock.h"
 #include "error.hpp"
 #include "index_ops.h"
 #include "io/io_executor.h"
@@ -32,7 +32,7 @@ namespace hedge::db
     {
         try
         {
-            auto seq = std::atomic_ref<uint64_t>(this->_seq_nr).fetch_add(1, std::memory_order::relaxed);
+            auto seq = this->_seq_nr->fetch_add(1, std::memory_order::relaxed);
             this->_accessor.insert(memtable_entry(key, seq, value));
             return {true, seq};
         }
@@ -89,13 +89,14 @@ namespace hedge::db
         this->_pipelined_table.notify_one();
     }
 
-    std::shared_ptr<memtable::rw_sync_table_t> memtable::_make_memtable() const
+    std::shared_ptr<memtable::rw_sync_table_t> memtable::_make_memtable()
     {
         return std::make_shared<rw_sync_table_t>(
             this->_cfg.num_writer_threads,
+            &this->_seq_nr,
             this->_indices_path,
             this->_cfg.use_wal,
-            const_cast<std::atomic_size_t*>(&this->_wal_epoch)->fetch_add(1, std::memory_order::relaxed),
+            this->_wal_epoch.fetch_add(1, std::memory_order::relaxed),
             this->_cfg.memory_budget_cap,
             this->_cfg.num_writer_threads,
             this->_cfg.memory_budget_cap);
@@ -124,7 +125,7 @@ namespace hedge::db
 
                     if(insert_attempts++ < ATTEMPTS_BEFORE_BACKPRESSURE)
                     {
-                        folly::detail::asm_volatile_pause();
+                        ::third_party::folly::detail::asm_volatile_pause();
                         continue;
                     }
 
@@ -159,7 +160,7 @@ namespace hedge::db
             {
                 bool this_thread_flushed = co_await this->_flush(local_memtable_ref);
                 if(!this_thread_flushed)
-                    folly::detail::asm_volatile_pause();
+                    ::third_party::folly::detail::asm_volatile_pause();
                 continue;
             }
 
@@ -353,23 +354,27 @@ namespace hedge::db
 
         constexpr size_t alignment = std::atomic_ref<std::span<const uint8_t>>::required_alignment;
         size_t replayed = 0;
+        uint64_t max_seq_nr = 0;
 
-        return wal::replay(
+        auto status = wal::replay(
             this->_indices_path,
-            [&](const key_t& key, std::span<const uint8_t> value) -> bool
+            [&](const key_t& key, std::span<const uint8_t> value, uint64_t seq_nr) -> bool
             {
                 auto* ptr = mt->value_arenas[0]->allocate_many(value.size(), alignment);
                 if(!ptr)
-                {
-                    this->_logger.log("WAL replay: arena exhausted after ", replayed, " entries");
-                    return false;
-                }
+                    throw std::runtime_error("WAL replay: arena exhausted after " + std::to_string(replayed) + " entries — data loss prevented");
                 std::memcpy(ptr, value.data(), value.size());
                 mt->insert(key, {ptr, value.size()});
+                max_seq_nr = std::max(max_seq_nr, seq_nr);
                 ++replayed;
                 return true;
             },
             this->_logger);
+
+        if(replayed > 0)
+            this->_seq_nr.store(max_seq_nr + 1, std::memory_order::relaxed);
+
+        return status;
     }
 
     memtable::snapshot memtable::acquire_snapshot()

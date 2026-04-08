@@ -18,7 +18,6 @@
 
 #pragma once
 
-#include <algorithm>
 #include <atomic>
 #include <climits>
 #include <cmath>
@@ -28,11 +27,10 @@
 #include <type_traits>
 #include <vector>
 
-#include <boost/random.hpp>
-
+#include "checks.h"
 #include "micro_spin_lock.h"
 
-namespace folly
+namespace third_party::folly
 {
     namespace detail
     {
@@ -247,6 +245,7 @@ namespace folly
             static SkipListNode* create(
                 NodeAlloc& alloc, int height, U&& data, bool isHead = false)
             {
+                DCHECK(height >= 1 && height < 64) << height;
                 size_t size =
                     sizeof(SkipListNode) + (height * sizeof(std::atomic<SkipListNode*>));
                 auto storage = std::allocator_traits<NodeAlloc>::allocate(alloc, size);
@@ -276,6 +275,7 @@ namespace folly
             // copy the head node to a new head node assuming lock acquired
             SkipListNode* copyHead(SkipListNode* node)
             {
+                DCHECK(node != nullptr && height_ > node->height_);
                 setFlags(node->getFlags());
                 for(uint8_t i = 0; i < node->height_; ++i)
                 {
@@ -286,6 +286,7 @@ namespace folly
 
             inline SkipListNode* skip(int layer) const
             {
+                DCHECK_LT(layer, height_);
                 return skip_[layer].load(std::memory_order_acquire);
             }
 
@@ -302,6 +303,7 @@ namespace folly
 
             void setSkip(uint8_t h, SkipListNode* next)
             {
+                DCHECK_LT(h, height_);
                 skip_[h].store(next, std::memory_order_release);
             }
 
@@ -389,6 +391,7 @@ namespace folly
 
             int getHeight(int maxHeight) const
             {
+                DCHECK_LE(maxHeight, kMaxHeight) << "max height too big!";
                 double p = randomProb();
                 for(int i = 0; i < maxHeight; ++i)
                 {
@@ -402,6 +405,7 @@ namespace folly
 
             size_t getSizeLimit(int height) const
             {
+                DCHECK_LT(height, kMaxHeight);
                 return sizeLimitTable_[height];
             }
 
@@ -461,7 +465,7 @@ namespace folly
 
             ~NodeRecycler()
             {
-                CHECK_EQ(refs(), 0);
+                DCHECK_EQ(refs(), 0);
                 if(nodes_)
                 {
                     for(auto& node : *nodes_)
@@ -564,6 +568,6 @@ namespace folly
         };
 
     } // namespace detail
-} // namespace folly
+} // namespace third_party::folly
 
 // NOLINTEND

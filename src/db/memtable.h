@@ -61,12 +61,13 @@ namespace hedge::db
     {
         using Accessor = skiplist_t::Accessor;
         Accessor _accessor;
-        alignas(64) uint64_t _seq_nr;
+        std::atomic_uint64_t* _seq_nr;
 
     public:
-        memtable_impl3_t(size_t /*budget*/)
+        memtable_impl3_t(std::atomic_uint64_t* seq_nr, size_t /*budget*/)
             : skiplist_t(24, std::allocator<uint8_t>{}),
-              _accessor(this)
+              _accessor(this),
+              _seq_nr(seq_nr)
         {
         }
 
@@ -78,7 +79,7 @@ namespace hedge::db
 
         [[nodiscard]] uint64_t seq_nr() const
         {
-            return std::atomic_ref<const uint64_t>(this->_seq_nr).load(std::memory_order::relaxed);
+            return this->_seq_nr->load(std::memory_order::relaxed);
         }
     };
 
@@ -87,20 +88,21 @@ namespace hedge::db
     struct memtable_with_arena_t : memtable_impl3_t
     {
         alignas(64) std::atomic_size_t bytes_written{0};
-        std::vector<std::unique_ptr<hedge::db::arena_allocator<uint8_t, false>>> value_arenas; // one per writer thread, not shared between threads
+        std::vector<std::unique_ptr<hedge::db::arena_allocator<uint8_t>>> value_arenas; // one per writer thread, not shared between threads
         std::optional<wal> _wal;
 
-        memtable_with_arena_t(const std::filesystem::path& base_path,
+        memtable_with_arena_t(std::atomic_uint64_t* seq_nr,
+                              const std::filesystem::path& base_path,
                               bool use_wal,
                               size_t flush_iteration,
                               size_t memtable_memory_budget,
                               size_t n_threads,
                               size_t value_memory_budget)
-            : memtable_impl3_t(memtable_memory_budget)
+            : memtable_impl3_t(seq_nr, memtable_memory_budget)
         {
             value_arenas.reserve(n_threads);
             for(auto i = 0UL; i < n_threads; ++i)
-                value_arenas.emplace_back(std::make_unique<hedge::db::arena_allocator<uint8_t, false>>(value_memory_budget));
+                value_arenas.emplace_back(std::make_unique<hedge::db::arena_allocator<uint8_t>>(value_memory_budget));
 
             if(use_wal)
             {
@@ -134,6 +136,9 @@ namespace hedge::db
 
         // Page cache
         std::shared_ptr<db::sharded_page_cache> _cache{};
+
+        // Global sequence number shared across all memtable instances
+        alignas(64) std::atomic_uint64_t _seq_nr{0};
 
         // Current memtable and pipelined
         alignas(64) tmc::atomic_condvar<rw_sync_table_ptr_t> _table{nullptr};
@@ -191,7 +196,7 @@ namespace hedge::db
         }
 
     private:
-        [[nodiscard]] std::shared_ptr<rw_sync_table_t> _make_memtable() const;
+        [[nodiscard]] std::shared_ptr<rw_sync_table_t> _make_memtable();
 
         tmc::task<bool> _flush(rw_sync_table_ptr_t expected_table);
         tmc::task<void> _flush_inner(size_t curr_flush_epoch, rw_sync_table_ptr_t memtable_to_flush);

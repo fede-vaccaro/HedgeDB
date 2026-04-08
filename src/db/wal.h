@@ -35,7 +35,7 @@ namespace hedge::db
         // Deletes the WAL files after processing.
         static hedge::status replay(
             const std::filesystem::path& path,
-            const std::function<bool(const key_t&, std::span<const uint8_t>)>& on_entry,
+            const std::function<bool(const key_t&, std::span<const uint8_t>, uint64_t)>& on_entry,
             logger& log);
 
         void remove();

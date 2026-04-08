@@ -33,20 +33,17 @@ namespace hedge::db
 {
     static constexpr size_t KEY_SIZE = 24;
     static constexpr uint64_t SEED_0 = 0xDEADBEEF;
-    static constexpr uint64_t SEED_1 = 0xCAFF3BAB3;
     static constexpr size_t NUM_CACHED_VALUES = 1024;
 
     static key_t make_key(size_t i)
     {
         uint64_t h0 = xxh64::hash(reinterpret_cast<const char*>(&i), sizeof(i), SEED_0);
-        uint64_t h1 = xxh64::hash(reinterpret_cast<const char*>(&i), sizeof(i), SEED_1);
 
         auto k = key_t::make_with_length(KEY_SIZE);
         auto span = k.as_bytes();
         std::memset(span.data(), 0, KEY_SIZE);
 
         std::memcpy(span.data(), &h0, std::min(sizeof(h0), KEY_SIZE));
-        std::memcpy(span.data() + sizeof(uint64_t), &h1, std::min(sizeof(h1), KEY_SIZE + sizeof(uint64_t)));
 
         return k;
     }
@@ -145,6 +142,7 @@ int main(int argc, char* argv[])
     config.index_point_cache_size_bytes = 0;
     config.compaction_io_workers = 4;
     config.flush_io_workers = 4;
+    config.max_pending_flushes = 8;
     config.disable_wal = false;
 
     std::shared_ptr<database> db;

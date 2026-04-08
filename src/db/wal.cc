@@ -241,7 +241,7 @@ namespace hedge::db
     }
 
     hedge::status wal::replay(const std::filesystem::path& path,
-                              const std::function<bool(const key_t&, std::span<const uint8_t>)>& on_entry,
+                              const std::function<bool(const key_t&, std::span<const uint8_t>, uint64_t)>& on_entry,
                               logger& log)
     {
         auto files = collect_wal_files(path);
@@ -253,7 +253,7 @@ namespace hedge::db
         size_t replayed = 0;
         for(const auto& entry : entries)
         {
-            if(!on_entry(entry.key, entry.value))
+            if(!on_entry(entry.key, entry.value, entry.seq_nr))
                 break;
             ++replayed;
         }

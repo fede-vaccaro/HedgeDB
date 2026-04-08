@@ -10,7 +10,7 @@
 #include "cache.h"
 #include "memtable.h"
 #include "merge/merge_utils.h"
-#include "merge/rolling_buffer.h"
+#include "merge/sst_stream.h"
 #include "sst.h"
 #include "tmc/task.hpp"
 #include "types.h"
@@ -70,7 +70,7 @@ namespace hedge::db
         std::optional<key_t> _lower;
         std::optional<key_t> _upper;
 
-        merge_iterator2 _dedup;
+        deduplicator _dedup;
         std::vector<heap_item_t> _heap;
 
         bool _initialized{false};

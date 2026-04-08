@@ -129,8 +129,9 @@ Sample usage:
 #include "iterators.h"
 #include "micro_spin_lock.h"
 #include "skiplist_details.h"
+#include "checks.h"
 
-namespace folly
+namespace third_party::folly
 {
 
     template <
@@ -920,4 +921,4 @@ namespace folly
         uint8_t hints_[MAX_HEIGHT];
     };
 
-} // namespace folly
+} // namespace third_party::folly

@@ -3,57 +3,16 @@
 #include "single_buffer_arena_allocator.h"
 #include "types.h"
 
-struct CheckStream
-{
-    // bool condition;
-    explicit CheckStream(bool /*cond*/) /*: condition(cond) */ {}
-    template <typename T>
-    CheckStream& operator<<(const T& /*msg*/)
-    {
-        // if(!condition)
-        //     std::cerr << msg;
-        return *this;
-    }
-    ~CheckStream()
-    {
-        // if(!condition)
-        // {
-        //     std::cerr << std::endl;
-        //     std::abort();
-        // }
-    }
-};
-
-#ifndef CHECK_EQ
-#define CHECK_EQ(a, b) CheckStream((a) == (b))
-#endif
-#ifndef DCHECK
-#define DCHECK(x) CheckStream(!!(x))
-#endif
-#ifndef DCHECK_GT
-#define DCHECK_GT(a, b) CheckStream((a) > (b))
-#endif
-#ifndef DCHECK_EQ
-#define DCHECK_EQ(a, b) CheckStream((a) == (b))
-#endif
-#ifndef CHECK_LE
-#define CHECK_LE(a, b) CheckStream((a) <= (b))
-#endif
-#ifndef FOLLY_UNLIKELY
-#define FOLLY_UNLIKELY(x) (x)
-#endif
-#ifndef FOLLY_LIKELY
-#define FOLLY_LIKELY(x) (x)
-#endif
-
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
-#include "db/folly/concurrent_skip_list/concurrent_skiplist.h"
+// Folly's ConcurrentSkiplist
+#include "db/skiplist/concurrent_skip_list/concurrent_skiplist.h"
 #pragma GCC diagnostic pop
 
 namespace hedge::db
 {
     // Adapter for single_buffer_arena_allocator to std::allocator interface
+    // *** Currently unused ***
     template <typename T>
     class StdArenaAllocator
     {
@@ -122,6 +81,6 @@ namespace hedge::db
         }
     };
 
-    using skiplist_t = folly::ConcurrentSkipList<memtable_entry, memtable_cmp, std::allocator<uint8_t>>;
+    using skiplist_t = third_party::folly::ConcurrentSkipList<memtable_entry, memtable_cmp, std::allocator<uint8_t>>;
 
 } // namespace hedge::db

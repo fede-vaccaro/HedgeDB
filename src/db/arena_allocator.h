@@ -1,21 +1,17 @@
 #pragma once
 
 #include "utils.h"
-#include <emmintrin.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cstddef>
-#include <cstdint>
 #include <cstdlib>
 #include <memory>
-#include <mutex>
 #include <vector>
 
 namespace hedge::db
 {
 
-    template <typename T, bool THREAD_SAFE = true>
+    template <typename T>
     class arena_allocator
     {
     public:
@@ -35,7 +31,7 @@ namespace hedge::db
 
             budget = std::max(this->_extent_size, budget);
 
-            this->_items_per_extent = std::max(this->_extent_size / sizeof(T), 1UL); // at least 1 extent
+            this->_items_per_extent = std::max(this->_extent_size / sizeof(T), 1UL);
 
             size_t n_extents = hedge::ceil(budget, this->_extent_size);
             this->_extents.reserve(n_extents);
@@ -51,80 +47,43 @@ namespace hedge::db
             }
         }
 
-        // Disable copy/move
         arena_allocator(const arena_allocator&) = delete;
         arena_allocator& operator=(const arena_allocator&) = delete;
 
         /**
-         * @brief Allocates one object of type T.
-         * @return Pointer to allocated memory, or nullptr if budget exceeded or allocation failed.
-         */
-        T* allocate()
-        {
-            if constexpr(THREAD_SAFE)
-            {
-                std::lock_guard lk(this->_mutex);
-                return this->_allocate_impl();
-            }
-            else
-            {
-                return this->_allocate_impl();
-            }
-        }
-
-        /**
-         * @brief Allocates multiple contiguous objects of type T.
-         * @param n_items Number of items to allocate.
-         * @return Pointer to allocated memory, or nullptr if budget exceeded or allocation failed.
+         * @brief Allocates n_items contiguous objects of type T, aligned to alignment items.
+         * @return Pointer to allocated memory, or nullptr if budget exceeded.
          */
         T* allocate_many(size_t n_items, size_t alignment)
         {
-            if constexpr(THREAD_SAFE)
-            {
-                std::lock_guard lk(this->_mutex);
-                return this->_allocate_many_impl(hedge::round_up(n_items, alignment));
-            }
-            else
-            {
-                return this->_allocate_many_impl(hedge::round_up(n_items, alignment));
-            }
-        }
-
-        [[nodiscard]] size_t
-        allocated_size() const
-        {
-            return this->_total_allocated.load(std::memory_order_relaxed);
+            return this->_allocate_many_impl(hedge::round_up(n_items, alignment));
         }
 
     private:
         size_t _budget;
         size_t _extent_size;
         size_t _items_per_extent;
+        size_t _total_allocated{0};
 
-        std::atomic<size_t> _total_allocated{0};
-
-        // Current extent state
         T* _curr_extent{nullptr};
-        std::size_t _current_slot_index{0};
+        size_t _current_slot_index{0};
 
         struct extent_t
         {
             std::unique_ptr<void, decltype(&std::free)> memory;
             size_t count{0};
 
-            extent_t(void* mem, decltype(&std::free) free_func) : memory(mem, free_func)
-            {
-            }
+            extent_t(void* mem, decltype(&std::free) free_func) : memory(mem, free_func) {}
 
             ~extent_t()
             {
-                if(memory)
+                if constexpr(!std::is_trivially_destructible_v<T>)
                 {
-                    T* ptr = static_cast<T*>(memory.get());
-                    // Destroy items in reverse order of allocation
-                    for(size_t i = 0; i < count; ++i)
+                    if(memory)
                     {
-                        ptr[count - 1 - i].~T();
+                        T* ptr = static_cast<T*>(memory.get());
+                        for(size_t i = 0; i < count; ++i)
+                            ptr[count - 1 - i].~T();
                     }
                 }
             }
@@ -137,19 +96,14 @@ namespace hedge::db
         };
 
         std::vector<extent_t> _extents;
-        std::mutex _mutex;
 
         T* _allocate_many_impl(size_t n_items)
         {
             if(this->_current_slot_index + n_items > this->_items_per_extent) [[unlikely]]
             {
-                // If the request is larger than any single extent, it's an impossible request for this allocator design.
                 if(n_items > this->_items_per_extent) [[unlikely]]
-                {
                     return nullptr;
-                }
 
-                // Otherwise, the current extent is just full. Get a new one.
                 this->_curr_extent = this->_allocate_new_extent();
                 this->_current_slot_index = 0;
             }
@@ -162,41 +116,21 @@ namespace hedge::db
             return ptr;
         }
 
-        T* _allocate_impl()
-        {
-            if(this->_current_slot_index >= this->_items_per_extent) [[unlikely]]
-            {
-                this->_curr_extent = this->_allocate_new_extent();
-                this->_current_slot_index = 0;
-            }
-
-            if(this->_curr_extent == nullptr) [[unlikely]]
-                return nullptr;
-
-            T* ptr = this->_curr_extent + this->_current_slot_index++;
-            return ptr;
-        }
-
         T* _allocate_new_extent()
         {
-            // If we have an existing extent, save its item count
             if(!this->_extents.empty())
-            {
                 this->_extents.back().count = this->_current_slot_index;
-            }
 
-            // Check budget
-            size_t current_total = this->_total_allocated.load(std::memory_order_relaxed);
-            if(current_total + this->_extent_size > this->_budget)
+            if(this->_total_allocated + this->_extent_size > this->_budget)
                 return nullptr;
 
             void* new_extent_mem{nullptr};
 
-            constexpr size_t block_alignment = std::max(size_t(64), alignof(T)); // At least an extent should be cache aligned
+            constexpr size_t block_alignment = std::max(size_t(64), alignof(T));
             if(posix_memalign(&new_extent_mem, block_alignment, this->_extent_size) != 0)
                 return nullptr;
 
-            this->_total_allocated.fetch_add(this->_extent_size, std::memory_order_relaxed);
+            this->_total_allocated += this->_extent_size;
             this->_extents.emplace_back(new_extent_mem, std::free);
 
             return reinterpret_cast<T*>(new_extent_mem);

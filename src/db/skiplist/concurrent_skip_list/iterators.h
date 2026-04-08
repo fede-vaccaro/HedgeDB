@@ -46,7 +46,7 @@
  * Folly libs.  Common use cases can also be found in `IteratorsTest.cpp`.
  */
 
-namespace folly {
+namespace third_party::folly {
 namespace detail {
 
 /**
@@ -153,4 +153,4 @@ class IteratorAdaptor : public IteratorFacade<D, V, Tag> {
 };
 
 } // namespace detail
-} // namespace folly
+} // namespace third_party::folly
