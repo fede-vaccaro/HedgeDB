@@ -287,7 +287,6 @@ TEST_P(range_scan_test, test_flush_and_range_scan_all_16b_keys)
                     &partition,
                     std::nullopt,
                     std::nullopt,
-                    nullptr,
                     64 * 1024);
 
                 if(!maybe_it)
@@ -427,15 +426,13 @@ struct memtable_merged_scan_test : public ::testing::TestWithParam<std::tuple<si
                                     .start_offset = start,
                                     .end_offset = end,
                                     .read_ahead_size = read_ahead_size},
-                                read_ahead_size,
-                                nullptr);
+                                read_ahead_size);
         }
 
         return hedge::db::scan_iterator{
             std::move(snapshot),
             std::move(sst_ptrs),
             std::move(rbufs),
-            nullptr,
             std::nullopt,
             std::nullopt};
     }

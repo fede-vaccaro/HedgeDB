@@ -2,9 +2,9 @@
 
 #include <cstdint>
 #include <error.hpp>
+#include <optional>
 #include <sys/types.h>
 
-#include "cache.h"
 #include "fs.hpp"
 #include "io/io_ctx.h"
 #include "page_aligned_buffer.h"
@@ -24,7 +24,6 @@ namespace hedge::fs
     };
 
     template <typename FILE = fs::file>
-    // requires std::is_base_of_v<fs::file, FILE>
     class file_reader2
     {
         const FILE& _file;
@@ -34,22 +33,13 @@ namespace hedge::fs
     public:
         file_reader2(const FILE& fd, const file_reader2_config& config);
 
-        // This object represents an asynchronous read request.
-        // The caller can co_await on the mailbox to get the result, and the buffer is where the data will be written to.
         struct awaitable_read_request_t
         {
             hedge::io::aw_io awaitable;          // Awaitable request (just a handler, does not own the memory)
             page_aligned_buffer<uint8_t> buffer; // Where the read_response result is written to (owned memory)
         };
 
-        // This object represents an asynchronous page guard request.
-        // The buffer associated with it is owned and managed by the cache
-        // However, the page guard acts as a reference counter for keeping the page alive while it's being processed
-        using awaitable_page_guard_t = db::page_cache::awaitable_page_guard;
-
-        using awaitable_from_cache_or_fs_t = std::variant<awaitable_read_request_t, awaitable_page_guard_t>;
-
-        std::vector<awaitable_from_cache_or_fs_t> next(const std::shared_ptr<db::sharded_page_cache>& cache);
+        std::optional<awaitable_read_request_t> next();
 
         [[nodiscard]] size_t get_current_offset() const;
         [[nodiscard]] bool is_eof() const;
@@ -59,8 +49,7 @@ namespace hedge::fs
         }
 
     private:
-        std::vector<awaitable_from_cache_or_fs_t> _next_no_cache();
-        // std::vector<awaitable_from_cache_or_fs_t> _next_cache(const std::shared_ptr<db::sharded_page_cache>& cache);
+        std::optional<awaitable_read_request_t> _next_no_cache();
     };
 
 } // namespace hedge::fs

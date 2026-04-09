@@ -79,7 +79,7 @@ int main(int argc, char* argv[])
     using clk = std::chrono::high_resolution_clock;
 
     // Init static threadpool
-    constexpr size_t NUM_THREADS = 12;
+    constexpr size_t NUM_THREADS = 8;
     constexpr uint32_t QD = 64;
 
     auto& pool = hedge::io::static_pool::instance()->init(NUM_THREADS, QD, "io-pool");
@@ -140,8 +140,8 @@ int main(int argc, char* argv[])
     config.use_odirect_for_indices = true;
     config.index_page_clock_cache_size_bytes = 0;
     config.index_point_cache_size_bytes = 0;
-    config.compaction_io_workers = 4;
-    config.flush_io_workers = 4;
+    config.compaction_io_workers = 6;
+    config.flush_io_workers = 6;
     config.max_pending_flushes = 8;
     config.disable_wal = false;
 

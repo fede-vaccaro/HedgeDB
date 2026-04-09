@@ -330,7 +330,7 @@ namespace hedge::db
             return hedge::error(maybe_partition.error());
 
         auto partition = std::move(maybe_partition.value());
-        return scan_iterator::from_partition(nullptr, &partition, std::move(lower), std::move(upper), this->_page_cache, read_ahead_size);
+        return scan_iterator::from_partition(nullptr, &partition, std::move(lower), std::move(upper), read_ahead_size);
     }
 
     tmc::task<void> sst_manager::_make_self_completing_compaction_task(size_t level, std::vector<sst_ptr_t> inputs, size_t input_min_merge_width)
@@ -342,7 +342,6 @@ namespace hedge::db
             .discard_deleted_keys = false,
             .create_new_with_odirect = this->_cfg.use_odirect_for_indices,
             .populate_cache_with_output = false,
-            .try_reading_from_cache = true,
         };
 
         std::vector<const sst*> indices;
@@ -422,7 +421,7 @@ namespace hedge::db
             this->_pending_compacting_sst_count -= input_count;
 
             // Backpressure only applies to L0
-            if(level == 0)
+            // if(level == 0)
             {
                 this->_pending_compacting_sst_in_l0_count -= input_count;
                 constexpr size_t stop_inserts_l0_threshold = 20;
@@ -716,7 +715,7 @@ namespace hedge::db
                             this->_pending_compacting_sst_count += bucket_input_count;
 
                             // Backpressure only applies to L0
-                            if(level == 0)
+                            // if(level == 0)
                             {
                                 this->_pending_compacting_sst_in_l0_count += bucket_input_count;
                                 constexpr size_t stop_inserts_l0_threshold = 20;

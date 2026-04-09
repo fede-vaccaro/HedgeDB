@@ -198,4 +198,83 @@ namespace hedge::db
         }
     }
 
+    TEST_F(wal_replay_test, replay_restores_seq_nr)
+    {
+        constexpr size_t N_KEYS = 1'000;
+        constexpr size_t PAYLOAD_SIZE = 32;
+
+        memtable_config cfg;
+        cfg.max_inserts_cap = 100'000'000;
+        cfg.memory_budget_cap = 256 * 1024 * 1024;
+        cfg.auto_compaction = false;
+        cfg.use_odirect = false;
+        cfg.num_writer_threads = N_THREADS;
+        cfg.use_wal = true;
+
+        std::atomic_size_t flush_epoch{0};
+        size_t wal_epoch;
+
+        // Phase 1: write keys, capture seq_nr before "crash"
+        uint64_t seq_nr_before_crash;
+        {
+            memtable mt(
+                cfg,
+                4,
+                _indices_path,
+                &flush_epoch,
+                executor,
+                [](std::vector<sst>) -> tmc::task<void> { co_return; },
+                []() {},
+                nullptr);
+
+            auto make_put_task = [&mt]() -> tmc::task<void>
+            {
+                auto put_task = [&mt](size_t i, tmc::semaphore& s) -> tmc::task<void>
+                {
+                    auto key = make_test_key(i);
+                    auto value = make_test_value(i, PAYLOAD_SIZE);
+                    co_await mt.put_async(key, value, hedge::value_type::IN_PLACE_VALUE);
+                    s.release();
+                };
+
+                auto semaphore = tmc::semaphore(64);
+                auto fg = tmc::fork_group();
+                for(size_t i = 0; i < N_KEYS; ++i)
+                {
+                    co_await semaphore;
+                    fg.fork(put_task(i, semaphore));
+                }
+            };
+
+            tmc::post_waitable(*wal_replay_test::executor, make_put_task()).wait();
+
+            seq_nr_before_crash = mt.acquire_snapshot().seq_nr;
+            wal_epoch = mt.wal_epoch();
+        }
+
+        // Phase 2: replay into a fresh memtable and verify seq_nr is restored
+        {
+            cfg.starting_wal_epoch = wal_epoch;
+            memtable mt(
+                cfg,
+                4,
+                _indices_path,
+                &flush_epoch,
+                executor,
+                [](std::vector<sst>) -> tmc::task<void> { co_return; },
+                []() {},
+                nullptr);
+
+            ASSERT_TRUE(mt.replay_wal());
+
+            auto seq_nr_after_replay = mt.acquire_snapshot().seq_nr;
+            EXPECT_GE(seq_nr_after_replay, seq_nr_before_crash)
+                << "seq_nr after replay (" << seq_nr_after_replay
+                << ") must be >= seq_nr before crash (" << seq_nr_before_crash << ")";
+
+            std::cout << "seq_nr before crash: " << seq_nr_before_crash
+                      << ", after replay: " << seq_nr_after_replay << std::endl;
+        }
+    }
+
 } // namespace hedge::db

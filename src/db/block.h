@@ -331,7 +331,7 @@ namespace hedge::db
             return this->_block_decoder;
         }
 
-        hedge::status next_block()
+        hedge::status next()
         {
             if(++this->_block_it != this->_block_decoder.end()) [[likely]] // There are KV left -> continue
                 return hedge::ok();

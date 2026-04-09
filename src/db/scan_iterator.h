@@ -7,7 +7,6 @@
 
 #include <error.hpp>
 
-#include "cache.h"
 #include "memtable.h"
 #include "merge/merge_utils.h"
 #include "merge/sst_stream.h"
@@ -65,7 +64,6 @@ namespace hedge::db
         std::vector<sst_ptr_t> _ssts;
         std::unique_ptr<sst_stream_set> _rbufs;
         std::vector<memtable_cursor> _mem_cursors;
-        std::shared_ptr<sharded_page_cache> _cache;
 
         std::optional<key_t> _lower;
         std::optional<key_t> _upper;
@@ -97,7 +95,6 @@ namespace hedge::db
             memtable::snapshot snapshot,
             std::vector<sst_ptr_t> ssts,
             std::unique_ptr<sst_stream_set> rbufs,
-            std::shared_ptr<sharded_page_cache> cache,
             std::optional<key_t> lower,
             std::optional<key_t> upper);
 
@@ -114,7 +111,6 @@ namespace hedge::db
             const partition_t* partition,
             std::optional<key_t> lower,
             std::optional<key_t> upper,
-            std::shared_ptr<sharded_page_cache> cache = nullptr,
             size_t read_ahead_size = 32 * 1024);
     };
 

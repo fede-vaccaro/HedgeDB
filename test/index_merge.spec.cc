@@ -237,8 +237,7 @@ public:
                 .base_path = _base_path,
                 .discard_deleted_keys = false,
                 .create_new_with_odirect = false,
-                .populate_cache_with_output = false,
-                .try_reading_from_cache = false};
+                .populate_cache_with_output = false};
 
             auto res = co_await hedge::db::index_ops::k_way_merge_async2(
                 config, inputs, nullptr);

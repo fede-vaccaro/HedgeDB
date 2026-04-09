@@ -2,7 +2,6 @@
 
 #include <cstdlib>
 #include <limits>
-#include <memory>
 #include <new>
 #include <optional>
 
@@ -16,59 +15,35 @@
 namespace hedge::db
 {
     using file_reader = fs::file_reader2<fs::file>;
-    using cached_frame = db::page_cache::read_page_guard;
-    using disk_frame = page_aligned_buffer<uint8_t>;
 
     class sst_stream
     {
-        using buffered_page_t = std::variant<cached_frame, disk_frame>;
-
-        std::deque<buffered_page_t> _buffers;
+        std::deque<page_aligned_buffer<uint8_t>> _buffers;
         [[maybe_unused]] size_t _read_ahead_size;
         file_reader _reader;
-        std::vector<file_reader::awaitable_from_cache_or_fs_t> _pending_reads;
 
-        std::deque<buffered_page_t>::iterator _cur_buffer{};
+        std::deque<page_aligned_buffer<uint8_t>>::iterator _cur_buffer{};
 
         // Reader
         block_buffer_reader _block_reader = block_buffer_reader{true};
 
-        const uint8_t* _end_of_buffer(const buffered_page_t& buffer)
-        {
-            const auto* ptr = std::visit([](const auto& buffer)
-                                         { return buffer.end(); }, buffer);
-            assert(hedge::is_page_aligned((uint64_t)ptr));
-            return ptr;
-        }
-
-        const uint8_t* _begin_of_buffer(const buffered_page_t& buffer)
-        {
-            const auto* ptr = std::visit([](const auto& buffer)
-                                         { return buffer.begin(); }, buffer);
-            assert(hedge::is_page_aligned((uint64_t)ptr));
-            return ptr;
-        }
-
     public:
         sst_stream(const fs::file& file,
                    fs::file_reader2_config reader_cfg,
-                   size_t read_ahead_size,
-                   const std::shared_ptr<db::sharded_page_cache>& cache) : _read_ahead_size(read_ahead_size),
-                                                                           _reader(file, reader_cfg)
+                   size_t read_ahead_size) : _read_ahead_size(read_ahead_size),
+                                             _reader(file, reader_cfg)
         {
-            this->_pending_reads = this->_reader.next(cache);
         }
 
         // Warning: unsafe
         [[nodiscard]] const db::sst& index() const
         {
-            // cast to sst
             return static_cast<const db::sst&>(this->_reader.file());
         }
 
-        [[nodiscard]] hedge::status _push(buffered_page_t&& t)
+        [[nodiscard]] hedge::status _push(page_aligned_buffer<uint8_t>&& buffer)
         {
-            this->_buffers.emplace_back(std::move(t));
+            this->_buffers.emplace_back(std::move(buffer));
 
             if(this->_buffers.size() == 1)
             {
@@ -79,58 +54,39 @@ namespace hedge::db
             return hedge::ok();
         }
 
-        [[nodiscard]] hedge::status _start_consuming_buffer(const std::deque<buffered_page_t>::iterator& buffer_it)
+        [[nodiscard]] hedge::status _start_consuming_buffer(const std::deque<page_aligned_buffer<uint8_t>>::iterator& buffer_it)
         {
-            return this->_block_reader.reset(this->_begin_of_buffer(*buffer_it),
-                                             this->_end_of_buffer(*buffer_it));
+            return this->_block_reader.reset(buffer_it->begin(),
+                                             buffer_it->end());
         }
 
         // refresh is idempotent if the readers are EOF
-        tmc::task<status> refresh(const std::shared_ptr<db::sharded_page_cache>& cache)
+        tmc::task<status> refresh()
         {
-            auto unpack_read_result = hedge::overloaded{
-                [](file_reader::awaitable_page_guard_t& awaitable) -> tmc::task<expected<buffered_page_t>>
-                {
-                    co_return buffered_page_t{db::page_cache::read_page_guard(co_await awaitable)};
-                },
-                [](file_reader::awaitable_read_request_t& read_request) -> tmc::task<expected<buffered_page_t>>
-                {
-                    auto response = co_await std::move(read_request.awaitable);
+            if(this->_reader.is_eof())
+                co_return hedge::ok();
 
-                    if(response < 0)
-                        co_return hedge::error("Read request failed with error code: " + std::string(strerror(-response)));
+            auto read_request = this->_reader.next();
 
-                    auto buffer = std::move(read_request.buffer);
+            if(!read_request.has_value())
+                co_return hedge::ok();
 
-                    co_return buffered_page_t{disk_frame{std::move(buffer)}};
-                },
-            };
+            auto response = co_await std::move(read_request.value().awaitable);
 
-            for(auto& read_request : this->_pending_reads)
-            {
-                auto maybe_read = co_await std::visit(unpack_read_result, read_request);
-                if(!maybe_read)
-                    co_return hedge::error("Failed to read from LHS during buffer refresh: " + maybe_read.error().to_string());
+            if(response < 0)
+                co_return hedge::error("Read request failed with error code: " + std::string(strerror(-response)));
 
-                auto ok = this->_push(std::move(maybe_read.value()));
-                if(!ok)
-                    co_return ok.error();
-            }
-            this->_pending_reads.clear();
-
-            // Submit new requests
-            if(!this->_reader.is_eof())
-                this->_pending_reads = this->_reader.next(cache);
+            auto ok = this->_push(std::move(read_request.value().buffer));
+            if(!ok)
+                co_return ok.error();
 
             co_return hedge::ok();
         }
 
         [[nodiscard]] hedge::status pop_front()
         {
-            // prof::counter_guard guard(prof::get<"rolling_buffer::pop_front">());
-
             // Try to move to the next entry in the current block
-            auto status = this->_block_reader.next_block();
+            auto status = this->_block_reader.next();
             if(!status) [[unlikely]]
                 return status;
 
@@ -138,7 +94,6 @@ namespace hedge::db
                 return hedge::ok();
 
             // The current buffer is fully consumed, move to the next one
-            // Erase current buffer
             this->_buffers.pop_front();
 
             // Move to next buffer (if any)
@@ -166,7 +121,7 @@ namespace hedge::db
         {
             size_t size = 0;
             for(const auto& buffer : this->_buffers)
-                size += (this->_end_of_buffer(buffer) - this->_begin_of_buffer(buffer));
+                size += (buffer.end() - buffer.begin());
 
             return size;
         }
@@ -178,7 +133,7 @@ namespace hedge::db
 
         [[nodiscard]] bool is_eof() const
         {
-            return this->_reader.is_eof() && this->buffer_empty() && this->_pending_reads.empty();
+            return this->_reader.is_eof() && this->buffer_empty();
         }
 
         [[nodiscard]] uint64_t epoch() const { return this->index().epoch(); }

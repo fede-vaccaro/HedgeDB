@@ -400,7 +400,7 @@ namespace hedge::db
 
         auto partition = std::move(maybe_partition.value());
         memtable* mem = this->_memtable.has_value() ? &*this->_memtable : nullptr;
-        return scan_iterator::from_partition(mem, &partition, std::move(lower), std::move(upper), this->_page_cache);
+        return scan_iterator::from_partition(mem, &partition, std::move(lower), std::move(upper));
     }
 
     tmc::task<hedge::status> database::remove_async(const key_t& /* key */)

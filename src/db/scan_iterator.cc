@@ -2,7 +2,6 @@
 #include <cstdint>
 #include <limits>
 
-#include "cache.h"
 #include "db/memtable.h"
 #include "db/scan_iterator.h"
 #include "error.hpp"
@@ -17,7 +16,6 @@ namespace hedge::db
         const partition_t* partition,
         std::optional<key_t> lower,
         std::optional<key_t> upper,
-        std::shared_ptr<sharded_page_cache> cache,
         size_t read_ahead_size)
     {
 
@@ -75,15 +73,13 @@ namespace hedge::db
                                     .start_offset = start_offset,
                                     .end_offset = end_offset,
                                     .read_ahead_size = read_ahead_size},
-                                read_ahead_size,
-                                cache);
+                                read_ahead_size);
         }
 
         return scan_iterator{
             std::move(snapshot),
             std::move(matching_ssts),
             std::move(rbufs),
-            std::move(cache),
             std::move(lower),
             std::move(upper)};
     };
@@ -92,14 +88,12 @@ namespace hedge::db
         memtable::snapshot snapshot,
         std::vector<sst_ptr_t> ssts,
         std::unique_ptr<sst_stream_set> rbufs,
-        std::shared_ptr<sharded_page_cache> cache,
         std::optional<key_t> lower,
         std::optional<key_t> upper)
 
         : _memtable_snapshot(std::move(snapshot)),
           _ssts(std::move(ssts)),
           _rbufs(std::move(rbufs)),
-          _cache(std::move(cache)),
           _lower(std::move(lower)),
           _upper(std::move(upper))
     {
@@ -117,7 +111,7 @@ namespace hedge::db
     {
         for(auto* it = this->_rbufs->begin(); it < this->_rbufs->end(); ++it)
         {
-            if(auto status = co_await it->refresh(this->_cache); !status)
+            if(auto status = co_await it->refresh(); !status)
                 co_return hedge::error("Failed to refresh scan buffer: " + status.error().to_string());
         }
 
@@ -137,7 +131,7 @@ namespace hedge::db
 
             if(rbuf->buffer_empty())
             {
-                auto s = co_await rbuf->refresh(this->_cache);
+                auto s = co_await rbuf->refresh();
                 if(!s)
                     co_return s;
             }
@@ -207,7 +201,7 @@ namespace hedge::db
                 if(source_buffer_empty(source)) [[unlikely]]
                 {
                     auto* rbuf = std::get<sst_stream*>(source);
-                    auto s = co_await rbuf->refresh(this->_cache);
+                    auto s = co_await rbuf->refresh();
                     if(!s)
                         co_return hedge::error("Failed to refresh scan buffer: " + s.error().to_string());
                 }

@@ -110,8 +110,7 @@ namespace hedge::db
                                    .start_offset = index->_footer.index_offset,
                                    .end_offset = index->_footer.meta_index_offset,
                                    .read_ahead_size = read_ahead_size},
-                               read_ahead_size,
-                               config.try_reading_from_cache ? cache : nullptr);
+                               read_ahead_size);
         }
 
         [[maybe_unused]] size_t filtered_keys = 0;
@@ -132,7 +131,7 @@ namespace hedge::db
             {
                 if((double)it->size() / (double)read_ahead_size < 0.35)
                 {
-                    if(auto status = co_await it->refresh(config.try_reading_from_cache ? cache : nullptr); !status)
+                    if(auto status = co_await it->refresh(); !status)
                         co_return hedge::error("Failed to read from buffer during buffer refresh: " + status.error().to_string());
                 }
             }

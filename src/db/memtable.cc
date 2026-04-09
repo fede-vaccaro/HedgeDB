@@ -24,7 +24,6 @@
 #include "types.h"
 #include "wal.h"
 
-
 namespace hedge::db
 {
 
@@ -325,15 +324,15 @@ namespace hedge::db
         // Avoids co_awaiting while holding lock
         co_await std::move(persist_indices);
 
-        // Release the flush slot so the next flush can proceed
-        co_await this->_pending_flush_slots.co_release();
-
         bool under_pressure = (this->_compaction_backpressure != nullptr) && this->_compaction_backpressure->ref().load(std::memory_order::relaxed);
         if(under_pressure)
         {
             // this->_logger.log("Flush completed for epoch ", curr_flush_epoch, " but compaction backpressure is active, waiting...");
-            co_await this->_compaction_backpressure->await(false);
+            co_await this->_compaction_backpressure->await(true);
         }
+
+        // Release the flush slot so the next flush can proceed
+        this->_pending_flush_slots.release();
 
         if(this->_cfg.auto_compaction)
             this->_trigger_compaction_callback();

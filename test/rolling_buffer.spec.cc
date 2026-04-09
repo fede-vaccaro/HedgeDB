@@ -11,7 +11,7 @@
 #include "async/io_executor.h"
 #include "async/wait_group.h"
 #include "db/block.h"
-#include "db/merge/rolling_buffer.h"
+#include "db/merge/sst_stream.h"
 #include "fs/fs.hpp"
 #include "types.h"
 
@@ -138,8 +138,6 @@ TEST_P(RollingBufferTest, WriteAndReadBack)
         config.end_offset = file_size;
         config.read_ahead_size = read_ahead_size;
 
-        std::shared_ptr<db::sharded_page_cache> null_cache = nullptr;
-
         auto wg = hedge::async::wait_group::make_shared();
         wg->set(1);
 
@@ -147,10 +145,10 @@ TEST_P(RollingBufferTest, WriteAndReadBack)
 
         auto read_task = [&]() -> async::task<void>
         {
-            sst_stream rb(file, config, config.read_ahead_size, null_cache);
+            sst_stream rb(file, config, config.read_ahead_size);
             size_t idx = 0;
 
-            auto status = co_await rb.refresh(null_cache);
+            auto status = co_await rb.refresh();
             if(!status)
             {
                 std::cerr << "Initial refresh failed: " << status.error().to_string() << std::endl;
@@ -165,7 +163,7 @@ TEST_P(RollingBufferTest, WriteAndReadBack)
                     if(rb.is_eof())
                         break;
 
-                    status = co_await rb.refresh(null_cache);
+                    status = co_await rb.refresh();
                     if(!status)
                     {
                         std::cerr << "Refresh failed: " << status.error().to_string() << std::endl;
