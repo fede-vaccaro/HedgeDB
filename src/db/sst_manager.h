@@ -8,8 +8,6 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
-#include <span>
-#include <unordered_set>
 #include <vector>
 
 #include <error.hpp>
@@ -21,6 +19,7 @@
 #include "sst.h"
 #include "tmc/atomic_condvar.hpp"
 #include "tmc/ex_braid.hpp"
+#include "tmc/semaphore.hpp"
 #include "types.h"
 
 namespace hedge::db
@@ -53,7 +52,7 @@ namespace hedge::db
                                                                   std::shared_ptr<sharded_page_cache> page_cache);
 
         // Called by memtable flush callback
-        tmc::task<void> push_new_indices(std::vector<sst> new_indices);
+        tmc::task<void> push_new_ssts(std::vector<sst> new_ssts);
 
         // SST lookup for the read path
         tmc::task<expected<value_t>> lookup_async(const key_t& key, size_t matching_partition_id);
@@ -65,7 +64,7 @@ namespace hedge::db
         hedge::expected<scan_iterator> range_iterator(std::optional<key_t> lower, std::optional<key_t> upper, size_t matching_partition_id, size_t read_ahead_size = 256 * 1024);
 
         // Compaction control
-        void trigger_compaction(bool compact_all);
+        void schedule_compaction(bool compact_all);
         void wait_for_compactions_to_finish();
 
         // Observability
@@ -96,10 +95,15 @@ namespace hedge::db
         };
 
     private:
+        using permissions_t = std::vector<std::shared_ptr<tmc::semaphore>>;
+        using sst_level_created_t = std::vector<uint8_t>;
         struct partition_state
         {
             alignas(64) mutable std::shared_mutex mutex;
             partition_t levels;
+            permissions_t permissions;     // For fine-grained coordination between compaction commits
+            sst_level_created_t created; // For tracking (for each level) whether it's been created, or whether a running compaction task will create it
+                                           // Needed for coordinating tombstone garbage collection
             std::atomic_size_t levels_seq_num{0};
             fs::file state_file{};
             std::mutex state_write_mutex{};
@@ -145,7 +149,19 @@ namespace hedge::db
             std::vector<compaction_args> results;
         };
 
-        tmc::task<void> _make_self_completing_compaction_task(size_t level, std::vector<sst_ptr_t> inputs, size_t merge_width);
+        //
+        // COSA STAVO FACENDO:
+        // STAVO RAGIONANDO SUL FATTO CHE - VISTO LO SCHEDULING CHE ACCADE IN SEQUENZA (BRAID) -
+        // POSSO DECIDERE PRIMA DI LANCIARE _MAKE_SELF_COMPLECTING_.... SE IN QUESTO TASK POSSO
+        // ABILITARE IL GC DELLE CHIAVI (cioe' se next_level + 1 e' vuoto oppure se il livello e' l'ultimo, se sono il bucket del livello)
+        //
+        tmc::task<void> _make_compaction_task(
+            std::shared_ptr<tmc::semaphore> can_write,
+            std::shared_ptr<tmc::semaphore> next_can_write,
+            size_t level,
+            std::vector<sst_ptr_t> inputs,
+            size_t merge_width,
+            bool discard_deleted_keys);
 
         static std::string _serialize_levels(const partition_t& levels);
 

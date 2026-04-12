@@ -62,7 +62,7 @@ elseif (CMAKE_BUILD_TYPE MATCHES "Release")
 endif()
 
 add_definitions(
-    -DTMC_PRIORITY_COUNT=5
+    # -DTMC_PRIORITY_COUNT=5
     -DTMC_USE_HWLOC
 )
 
@@ -98,6 +98,8 @@ set(DB_SOURCES
     src/db/index_ops.h
     src/db/memtable.h
     src/db/memtable.cc
+    src/db/wal.h
+    src/db/wal.cc
     src/fs/fs.hpp
     src/fs/fs.cc
     src/fs/file_reader2.cc
@@ -255,7 +257,7 @@ target_link_libraries(single_buffer_arena_allocator_test gtest gtest_main)
 
 # debug test
 add_executable(index_merge ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_merge.spec.cc)
-target_link_libraries(index_merge gtest gtest_main uring atomic hwloc)
+target_link_libraries(index_merge gtest gtest_main uring atomic hwloc xxhash)
 
 # concurrent_skiplist tests
 add_executable(concurrent_skiplist_test test/concurrent_skiplist.spec.cc)

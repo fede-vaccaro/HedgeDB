@@ -63,8 +63,8 @@ namespace hedge::db
           _num_partition_exponent(num_partition_exponent),
           _indices_path(std::move(indices_path)),
           _flush_epoch(flush_epoch_ptr),
-          _push_new_indices(std::move(push_new_indices)),
-          _trigger_compaction_callback(std::move(trigger_compaction_callback)),
+          _push_new_ssts_callback(std::move(push_new_indices)),
+          _schedule_compaction_callback(std::move(trigger_compaction_callback)),
           _compaction_backpressure(compaction_backpressure),
           _cache(std::move(page_cache)),
           _wal_epoch(cfg.starting_wal_epoch),
@@ -267,7 +267,7 @@ namespace hedge::db
 
             // Launch flush job on the flusher executor
             tmc::spawn(this->_flush_inner(curr_flush_epoch, memtable_to_flush))
-                .with_priority(0)
+                // .with_priority(0)
                 .run_on(*this->_flusher)
                 .detach();
 
@@ -281,6 +281,7 @@ namespace hedge::db
 
     tmc::task<void> memtable::_flush_inner(size_t curr_flush_epoch, rw_sync_table_ptr_t memtable_to_flush)
     {
+        // The braid must be initialized on the same executor it will run on
         if(!this->_braid.has_value())
             this->_braid.emplace();
 
@@ -314,7 +315,7 @@ namespace hedge::db
 
         {
             std::unique_lock lk(this->_pending_flushes_mutex);
-            persist_indices = this->_push_new_indices(std::move(partitioned_sorted_indices.value()));
+            persist_indices = this->_push_new_ssts_callback(std::move(partitioned_sorted_indices.value()));
             auto it = this->_pending_flushes.find(curr_flush_epoch);
             assert(it->second == memtable_to_flush);
             this->_pending_flushes.erase(it);
@@ -335,7 +336,7 @@ namespace hedge::db
         this->_pending_flush_slots.release();
 
         if(this->_cfg.auto_compaction)
-            this->_trigger_compaction_callback();
+            this->_schedule_compaction_callback();
 
         if(auto& w = memtable_to_flush->ptr()->_wal; w.has_value())
             w->remove();

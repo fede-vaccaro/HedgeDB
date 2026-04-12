@@ -9,7 +9,7 @@
 
 namespace hedge::db
 {
-    using value_buffer_t = hedge::key<>;
+    using value_buffer_t = hedge::key<>; // This type performs small buffer optimization for value buffers, which are often small and can be stored inline without heap allocation.
 
     struct merge_entry_t
     {

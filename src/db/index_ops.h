@@ -123,9 +123,9 @@ namespace hedge::db
             size_t read_ahead_size{};              ///< Number of bytes to read from each input index file at a time during the merge. (e.g., 64 * 1024 for 64KB chunks).
             size_t new_index_id{};                 ///< The unique ID (iteration number) to use for the output merged index file name (e.g., ".<new_index_id>").
             std::filesystem::path base_path{};     ///< The base directory where the output file will be created (within its partition subdirectory).
-            bool discard_deleted_keys{false};      ///< If `true`, entries marked with the delete flag (`value_ptr_t::is_deleted()`) will not be written to the output file.
-                                                   ///< Set `false` if there are more indices belonging to the same partition to be merged later, to preserve delete markers until the final merge.
-                                                   ///< Set `true` when this is the final merge for the partition to eliminate deleted entries from the final index.
+            bool discard_deleted_keys{false};      ///< If `true`, entries carrying a `tombstone_t` value will not be written to the output file.
+                                                   ///< Set `false` if there are more indices belonging to the same partition to be merged later, to preserve tombstones until the final merge.
+                                                   ///< Set `true` when this is the final merge for the partition to eliminate tombstones and reclaim space.
             bool create_new_with_odirect{false};   ///< If `true`, opens the output file with O_DIRECT flag for direct I/O access.
             bool populate_cache_with_output{true}; ///< If `true`, tries to fill the cache with the resulting sorted index
             bool fdatasync_output{true};          ///< If `true`, issues an fdatasync on the output file descriptor before completing the merge, to ensure durability of the merged index on disk before it becomes visible to the rest of the system.

@@ -1,12 +1,9 @@
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cmath>
-#include <coroutine>
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <numeric>
 #include <random>
 #include <ranges>
 #include <shared_mutex>
@@ -23,6 +20,7 @@
 #include "perf_counter.h"
 #include "sst_manager.h"
 #include "tmc/aw_resume_on.hpp"
+#include "tmc/semaphore.hpp"
 #include "tmc/spawn_many.hpp"
 #include "tmc/sync.hpp"
 #include "utils.h"
@@ -51,6 +49,10 @@ namespace hedge::db
             auto partition_id = static_cast<uint16_t>(((i + 1) * partition_size) - 1);
             auto state = std::make_unique<partition_state>();
             state->levels.resize(cfg.max_num_levels);
+            state->permissions.resize(cfg.max_num_levels);
+            state->created.resize(cfg.max_num_levels, 0);
+            for(auto& s : state->permissions)
+                s = std::make_shared<tmc::semaphore>(1);
             _sorted_indices.emplace(partition_id, std::move(state));
         }
     }
@@ -106,6 +108,11 @@ namespace hedge::db
                     if(maybe_levels)
                     {
                         state.levels = std::move(maybe_levels.value());
+
+                        state.created.resize(cfg.max_num_levels, 0);
+                        for(auto i = 0UL; i < state.levels.size(); ++i)
+                            state.created[i] = state.levels[i].size() > 0 ? 1 : 0;
+
                         for(const auto& level : state.levels)
                         {
                             for(const auto& sst_ptr : level)
@@ -183,7 +190,7 @@ namespace hedge::db
         return mgr;
     }
 
-    tmc::task<void> sst_manager::push_new_indices(std::vector<sst> new_indices)
+    tmc::task<void> sst_manager::push_new_ssts(std::vector<sst> new_indices)
     {
         std::vector<uint16_t> affected_partitions;
 
@@ -333,13 +340,19 @@ namespace hedge::db
         return scan_iterator::from_partition(nullptr, &partition, std::move(lower), std::move(upper), read_ahead_size);
     }
 
-    tmc::task<void> sst_manager::_make_self_completing_compaction_task(size_t level, std::vector<sst_ptr_t> inputs, size_t input_min_merge_width)
+    tmc::task<void> sst_manager::_make_compaction_task(
+        std::shared_ptr<tmc::semaphore> can_write,
+        std::shared_ptr<tmc::semaphore> next_can_write,
+        size_t level,
+        std::vector<sst_ptr_t> inputs,
+        size_t input_min_merge_width,
+        bool discard_deleted_keys)
     {
         auto merge_config = hedge::db::index_ops::merge_config{
             .read_ahead_size = this->_cfg.compaction_read_ahead_size_bytes,
             .new_index_id = this->_flush_iteration.fetch_add(1, std::memory_order::relaxed),
             .base_path = this->_cfg.indices_path,
-            .discard_deleted_keys = false,
+            .discard_deleted_keys = discard_deleted_keys,
             .create_new_with_odirect = this->_cfg.use_odirect_for_indices,
             .populate_cache_with_output = false,
         };
@@ -359,6 +372,7 @@ namespace hedge::db
         for(const auto& i : inputs)
             input_ids.insert(i->id());
 
+        // Merge went ok (including file writing and flushing)
         if(merge_result)
         {
             auto output_ptr = std::make_shared<sst>(std::move(merge_result.value()));
@@ -367,6 +381,11 @@ namespace hedge::db
             auto partition_prefix = inputs[0]->upper_bound();
             auto partition_it = this->_sorted_indices.find(partition_prefix);
             auto& state = *partition_it->second;
+
+            // Update current and next level with new SST
+
+            // Wait for permission
+            co_await *can_write;
             std::unique_lock lk(state.mutex);
 
             auto& sst_level = state.levels[level];
@@ -375,26 +394,20 @@ namespace hedge::db
             std::erase_if(sst_level, [&input_ids](const sst_ptr_t& sst)
                           { return input_ids.contains(sst->id()); });
 
-            size_t bucket_avg_size = std::accumulate(
-                inputs.begin(), inputs.end(),
-                0UL, [](size_t sum, const sst_ptr_t& ptr)
-                { return sum + ptr->file_size(); });
-            bucket_avg_size /= inputs.size();
-
-            const size_t next_level_idx = std::min(level + ((output_ptr->file_size() / bucket_avg_size) / input_min_merge_width), this->_cfg.max_num_levels - 1);
+            const size_t next_level_idx = std::min(level + 1, this->_cfg.max_num_levels - 1);
 
             auto& target_level = state.levels[next_level_idx];
-            auto pos = std::ranges::lower_bound(target_level, output_ptr,
-                                                [](const sst_ptr_t& a, const sst_ptr_t& b)
-                                                { return a->epoch() < b->epoch(); });
-            target_level.insert(pos, std::move(output_ptr));
+            target_level.push_back(std::move(output_ptr));
             state.levels_seq_num.fetch_add(1, std::memory_order::release);
 
             const bool needs_compaction = target_level.size() > input_min_merge_width;
             lk.unlock();
 
+            // Forward permission to next in chain before any async work
+            next_can_write->release();
+
             if(needs_compaction)
-                this->trigger_compaction(false);
+                this->schedule_compaction(false);
 
             auto persist_status = co_await _persist_partition_state(partition_prefix);
             if(!persist_status)
@@ -409,10 +422,14 @@ namespace hedge::db
         }
         else
         {
+            // Handle error case — no write occurred, but still forward the permission
+            // so the chain is never broken (failure to release here deadlocks all
+            // subsequent tasks on this (partition, level) chain)
             for(const auto& input : inputs)
                 input->set_compaction_state(compaction_progress_state::COMPACTION_ERROR);
 
             this->_logger.log("Self-completing compaction failed: ", merge_result.error().to_string());
+            next_can_write->release();
         }
 
         // Always decrement counter and remove in-flight IDs
@@ -439,6 +456,13 @@ namespace hedge::db
         }
     }
 
+    // Serialization format for partition state
+    // Each level is represented as a line of text, with SST filenames separated by ';'
+    // e.g.
+    // (level_0) sst_00012.sst;sst_00015.sst;sst_00020.sst\n
+    // (level_1) sst_00010.sst;sst_00018.sst\n
+    // ...
+    // Unused levels are represented as empty lines
     std::string sst_manager::_serialize_levels(const partition_t& levels)
     {
         std::string result;
@@ -607,6 +631,7 @@ namespace hedge::db
             // Snapshot in-flight IDs for filtering
             [[maybe_unused]] size_t jobs_count = 0;
 
+            // Prepare the compaction buckets
             // Iterate for every partition
             for(auto& [partition_prefix, partition] : index_snapshot)
             {
@@ -630,20 +655,23 @@ namespace hedge::db
                         continue;
 
                     candidates.emplace_back(*it);
-                    size_t sizes_sum = (*it)->file_size(); // For computing the average
+                    // size_t sizes_sum = (*it)->file_size(); // For computing the average
 
+                    // The new SSTs are pushed back
+                    // Then, within a level, we prepare the buckets from the oldest SSTs to the newests, in order to preserve the key-values arrival order
                     for(it = std::next(it); it != level.end(); ++it)
                     {
                         size_t file_size = (*it)->file_size();
-                        auto new_avg = (double)(sizes_sum + file_size) / (candidates.size() + 1);
+                        // auto new_avg = (double)(sizes_sum + file_size) / (candidates.size() + 1);
 
                         const bool pickable_for_compaction = (*it)->pickable_for_compaction();
 
                         // Form candidate set
-                        if(pickable_for_compaction && (file_size <= new_avg * this->_cfg.bucket_ratio) && (candidates.size() < max_merge_width))
+                        // if(pickable_for_compaction && (file_size <= new_avg * this->_cfg.bucket_ratio) && (candidates.size() < max_merge_width))
+                        if(pickable_for_compaction && (candidates.size() < max_merge_width))
                         {
                             candidates.emplace_back(*it);
-                            sizes_sum += file_size;
+                            // sizes_sum += file_size;
 
                             if(std::next(it) != level.end())
                                 continue;
@@ -668,7 +696,7 @@ namespace hedge::db
                         // Move to the next bucket, reset candidates
                         candidates.clear();
                         candidates.emplace_back(*it);
-                        sizes_sum = (*it)->file_size();
+                        // sizes_sum = (*it)->file_size();
                     }
                 }
             }
@@ -684,15 +712,15 @@ namespace hedge::db
                 co_return;
             };
 
-            constexpr bool OPTIMIZE_FOR_SPACE_AMP = false;
+            constexpr bool OPTIMIZE_FOR_SPACE_AMP = false; // TODO : check correctness and make configurable
 
             std::vector<tmc::task<void>> last_level_tasks;
 
             for(auto& [partition_prefix, buckets] : buckets_per_partitions)
             {
-                const size_t last_level = index_snapshot.at(partition_prefix).size();
+                const size_t current_last_level = index_snapshot.at(partition_prefix).size();
 
-                for(size_t level = 0; level < last_level; ++level)
+                for(size_t level = 0; level < current_last_level; ++level)
                 {
                     // Given a partition and a level, iterates over every bucket; the bucket are sorted by epoch
                     // If we consider the epoch range as the [min, max] epochs of the SSTs within a bucket,
@@ -705,9 +733,9 @@ namespace hedge::db
                     std::vector<tmc::task<void>> tasks;
                     tasks.reserve(std::distance(begin, end));
 
-                    for(auto it = begin; it != end; ++it)
+                    for(auto bucket_it = begin; bucket_it != end; ++bucket_it)
                     {
-                        size_t bucket_input_count = it->second.size();
+                        size_t bucket_input_count = bucket_it->second.size();
 
                         // Always increment pending count
                         {
@@ -729,8 +757,46 @@ namespace hedge::db
                             }
                         }
 
-                        // Submit self-completing task
-                        auto task = this->_make_self_completing_compaction_task(level, std::move(it->second), min_merge_width);
+                        const auto max_num_levels = this->_cfg.max_num_levels;
+                        auto test_can_discard_keys = [&]() -> bool
+                        {
+                            const bool merge_to_bottommost_level = level + 1 == current_last_level ||
+                                                                   level + 1 == max_num_levels - 1;
+
+                            // Only the first bucket within the level (i.e. the oldest) is allowed to discard keys
+                            if(bucket_it != begin)
+                                return false;
+
+                            return merge_to_bottommost_level;
+                        };
+
+                        // Set-up permissions-chain between coro writing on the same level
+                        // Is initialized with 0-count because this `task` will give the permission to the next one by releasing the sempahore.
+                        auto next_can_write = std::make_shared<tmc::semaphore>(0);
+                        auto can_write = std::exchange(this->_sorted_indices[partition_prefix]->permissions[level], next_can_write);
+
+                        const auto target_level = std::min(level + 1, max_num_levels - 1);
+                        auto& level_created = this->_sorted_indices[partition_prefix]->created[target_level]; // Thread-safe, occurs on braid (serialized execution)
+
+                        const bool can_discard_keys =
+                            test_can_discard_keys() &&
+                            (target_level == max_num_levels || level_created == 0); // Confirms that the next level is empty and no other tasks has intention to write to it.
+                                                                                    // There is a chance that a compaction that will write to the bottommost level,
+                                                                                    // did not manage to publish the new SST yet;
+                                                                                    // `level_created` is needed for signaling this intention, and protecting from erroneously discarding records
+                                                                                    // Does not apply if it is the last level
+
+                        level_created = 1; // Here: the resulting SST is unpublished, but we still signal that there will be something
+
+                        auto task = this->_make_compaction_task(
+                            std::move(can_write),
+                            std::move(next_can_write),
+                            level,
+                            std::move(bucket_it->second),
+                            min_merge_width,
+                            can_discard_keys);
+
+                        // Queue the task
                         tasks.emplace_back(std::move(task));
                     }
 
@@ -738,11 +804,14 @@ namespace hedge::db
                     {
                         jobs_count++;
 
-                        if(!OPTIMIZE_FOR_SPACE_AMP || (level == 0) || (level != last_level))
+                        // Currently OPTIMIZE_FOR_SPACE_AMP == false, so this condition is always true
+                        if(!OPTIMIZE_FOR_SPACE_AMP || (level == 0) || (level != current_last_level))
                         {
-                            // auto compaction_executor_idx = this->_compactor_executor_id++ % this->_compation_executor_pool.size();
-                            // this->_compation_executor_pool[compaction_executor_idx]->submit_io_task(run_tasks_in_sequence(std::move(tasks)));
-                            tmc::post(*this->_compaction_pool, run_tasks_in_sequence(std::move(tasks)), 1, this->_compactor_executor_id++ % this->_compaction_pool->num_threads());
+                            tmc::post(*this->_compaction_pool,
+                                      //    tasks.begin(), tasks.end(),
+                                      run_tasks_in_sequence(std::move(tasks)),
+                                      0,
+                                      this->_compactor_executor_id++ % this->_compaction_pool->num_threads());
                         }
                         else
                         {
@@ -764,7 +833,7 @@ namespace hedge::db
         return stats;
     }
 
-    void sst_manager::trigger_compaction(bool compact_all)
+    void sst_manager::schedule_compaction(bool compact_all)
     {
         constexpr size_t max_in_flight_compaction_triggers = 16;
 

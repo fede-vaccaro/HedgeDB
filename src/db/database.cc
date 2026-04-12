@@ -52,9 +52,9 @@ namespace hedge::db
             &db._sst_manager->flush_iteration(),
             flush_executor,
             [&sst_mgr = *db._sst_manager](std::vector<sst> indices) -> tmc::task<void>
-            { return sst_mgr.push_new_indices(std::move(indices)); },
+            { return sst_mgr.push_new_ssts(std::move(indices)); },
             [&sst_mgr = *db._sst_manager]()
-            { sst_mgr.trigger_compaction(false); },
+            { sst_mgr.schedule_compaction(false); },
             db._page_cache,
             &db._sst_manager->compaction_backpressure());
     }
@@ -467,7 +467,7 @@ namespace hedge::db
 
     void database::trigger_compaction(bool compact_all)
     {
-        this->_sst_manager->trigger_compaction(compact_all);
+        this->_sst_manager->schedule_compaction(compact_all);
     }
 
     void database::wait_for_compactions_to_finish()

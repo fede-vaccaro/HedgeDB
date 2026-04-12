@@ -17,7 +17,7 @@
 namespace hedge::db
 {
     static constexpr size_t QF_BITS_PER_KEY = 10;
-    static constexpr size_t QF_FLAG_BITS = 3;
+    [[maybe_unused]] static constexpr size_t QF_FLAG_BITS = 3;
 
     static hedge::expected<quotient_filter> create_qf_for_key_count(size_t num_keys)
     {
@@ -246,9 +246,9 @@ namespace hedge::db
         }
 
         // Outer loop, interrupted when both buffers are EOF
-        while(true)
+        [[maybe_unused]] size_t i = 0;
+        while(!key_heap.empty())
         {
-
             // prof::counter_guard counter_guard{prof::get<"inner_merge_loop">()};
 
             std::ranges::pop_heap(key_heap, heap_item_t_comparator);
@@ -294,12 +294,14 @@ namespace hedge::db
                 // Note that we are always lagging by one entry!
                 // After popping from `dedup`, there is still one entry sitting there waiting to get checked against the next pushed one and thus getting ready
                 auto new_item = dedup.pop();
+                assert(last_written_key < new_item.key);
+                last_written_key = new_item.key;
 
-                // if(config.discard_deleted_keys && new_item.value_ptr.is_deleted())
-                // {
-                // filtered_keys++;
-                // continue;
-                // }
+                if(config.discard_deleted_keys && static_cast<value_type>(new_item.value.data()[0]) == value_type::TOMBSTONE)
+                {
+                    filtered_keys++;
+                    continue;
+                }
 
                 if(qf.has_value())
                     qf->insert(xxh64::hash((const char*)new_item.key.data(), new_item.key.size(), 0xDEADBEEF));
@@ -310,13 +312,7 @@ namespace hedge::db
                     if(!s)
                         co_return s.error();
                 }
-
-                assert(last_written_key < new_item.key);
-                last_written_key = new_item.key;
             }
-
-            if(key_heap.empty())
-                break;
         }
 
         prof::get<"merge_cache_bulk_writes_count">().add(0, 1);
@@ -339,11 +335,11 @@ namespace hedge::db
         {
             assert(last_written_key < new_item.key);
 
-            // if(config.discard_deleted_keys && new_item.value_ptr.is_deleted())
-            // {
-            // filtered_keys++;
-            // continue;
-            // }
+            if(config.discard_deleted_keys && static_cast<value_type>(new_item.value.data()[0]) == value_type::TOMBSTONE)
+            {
+                filtered_keys++;
+                continue;
+            }
 
             if(qf.has_value())
                 qf->insert(xxh64::hash((const char*)new_item.key.data(), new_item.key.size(), 0xDEADBEEF));

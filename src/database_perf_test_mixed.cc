@@ -429,12 +429,12 @@ int main(int argc, char* argv[])
 
             auto t0 = clk::now();
 
-            std::vector<std::future<void>> futures;
-            futures.reserve(NUM_WORKERS);
+            std::vector<tmc::task<void>> tasks;
+            tasks.reserve(NUM_WORKERS);
             for(size_t tid = 0; tid < NUM_WORKERS; ++tid)
-                futures.push_back(tmc::post_waitable(pool, make_scan_task(tid), 0, tid));
-            for(auto& f : futures)
-                f.get();
+                tasks.push_back(make_scan_task(tid));
+
+            tmc::post_bulk_waitable(pool, tasks.begin(), tasks.end()).wait();
 
             auto t1 = clk::now();
             double elapsed_s = std::chrono::duration<double>(t1 - t0).count();
