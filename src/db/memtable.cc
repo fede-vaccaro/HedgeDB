@@ -18,16 +18,16 @@
 #include "key.h"
 #include "memtable.h"
 #include "tmc/atomic_condvar.hpp"
-#include "tmc/aw_resume_on.hpp"
 #include "tmc/ex_cpu_st.hpp"
 #include "tmc/spawn.hpp"
+#include "tmc/sync.hpp"
 #include "types.h"
 #include "wal.h"
 
 namespace hedge::db
 {
 
-    std::pair<bool, uint64_t> memtable_impl3_t::insert(const key_t& key, std::span<const uint8_t> value)
+    std::pair<bool, uint64_t> skiplist_wrapper::insert(const key_t& key, std::span<const uint8_t> value)
     {
         try
         {
@@ -41,9 +41,9 @@ namespace hedge::db
         }
     }
 
-    std::optional<std::span<const uint8_t>> memtable_impl3_t::get(const key_t& key) const
+    std::optional<std::span<const uint8_t>> skiplist_wrapper::get(const key_t& key) const
     {
-        Accessor acc(const_cast<memtable_impl3_t*>(this));
+        Accessor acc(const_cast<skiplist_wrapper*>(this));
         auto it = acc.lower_bound(memtable_entry(key, UINT64_MAX, {}));
         if(it != acc.end() && it->_key == key)
             return it->_value;
@@ -55,16 +55,16 @@ namespace hedge::db
                        std::filesystem::path indices_path,
                        std::atomic_size_t* flush_epoch_ptr,
                        std::shared_ptr<io::io_executor> flusher_executor,
-                       std::function<tmc::task<void>(std::vector<sst>)> push_new_indices,
-                       std::function<void()> trigger_compaction_callback,
+                       std::function<tmc::task<void>(std::vector<sst>)> push_new_ssts_callback,
+                       std::function<void()> schedule_comapction_callback,
                        std::shared_ptr<db::sharded_page_cache> page_cache,
                        tmc::atomic_condvar<bool>* compaction_backpressure)
         : _cfg(cfg),
           _num_partition_exponent(num_partition_exponent),
           _indices_path(std::move(indices_path)),
           _flush_epoch(flush_epoch_ptr),
-          _push_new_ssts_callback(std::move(push_new_indices)),
-          _schedule_compaction_callback(std::move(trigger_compaction_callback)),
+          _push_new_ssts_callback(std::move(push_new_ssts_callback)),
+          _schedule_compaction_callback(std::move(schedule_comapction_callback)),
           _compaction_backpressure(compaction_backpressure),
           _cache(std::move(page_cache)),
           _wal_epoch(cfg.starting_wal_epoch),
@@ -74,18 +74,31 @@ namespace hedge::db
           _logger("memtable")
     {
         this->_flusher->init();
-        // this->_flush_executors = std::make_unique<io::io_executor>(this->_cfg.flush_io_workers, 32);
+
+        if(cfg.use_wal)
+        {
+            int fd = ::open(this->_indices_path.c_str(), O_RDONLY | O_DIRECTORY);
+            if(fd >= 0)
+                this->_wal_dir_fd = fd;
+        }
 
         this->_table.ref()
             .store(this->_make_memtable());
-        this->_pipelined_table = this->_make_memtable();
+        this->_pipelined_table.ref().store(this->_make_memtable());
+
+        // Initialize braid
+        tmc::post_waitable(*this->_flusher, [](memtable* memtable) -> tmc::task<void>
+                           { memtable->_braid.emplace(); co_return; }(this))
+            .wait();
     }
 
     memtable::~memtable()
     {
-        this->_running.store(false, std::memory_order::relaxed);
-        this->_pipelined_table.store(nullptr, std::memory_order::relaxed);
+        this->_pipelined_table.ref().store(nullptr, std::memory_order::relaxed);
         this->_pipelined_table.notify_one();
+
+        if(this->_wal_dir_fd)
+            ::close(*this->_wal_dir_fd);
     }
 
     std::shared_ptr<memtable::rw_sync_table_t> memtable::_make_memtable()
@@ -94,6 +107,7 @@ namespace hedge::db
             this->_cfg.num_writer_threads,
             &this->_seq_nr,
             this->_indices_path,
+            this->_wal_dir_fd,
             this->_cfg.use_wal,
             this->_wal_epoch.fetch_add(1, std::memory_order::relaxed),
             this->_cfg.memory_budget_cap,
@@ -103,8 +117,8 @@ namespace hedge::db
 
     tmc::task<hedge::status> memtable::put_async(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type)
     {
-        // Loading from an atomic shared every time is slow AF
-        // Basically a thread-local cache
+        // Loading from an atomic shared every time is slow AF since it is (at the time being) implemented through a spinlock
+        // This is a thread-local cache
         thread_local std::shared_ptr<rw_sync_table_t> local_memtable_ref = this->_table.ref().load(std::memory_order::relaxed);
 
         static std::atomic_size_t THREADS{0};
@@ -118,7 +132,7 @@ namespace hedge::db
             if(!memtable) [[unlikely]] // The memtable has been frozen (from the flusher), try loading the new one
             {
                 auto t = this->_table.ref().load(std::memory_order::relaxed);
-                if(t == local_memtable_ref) // Backpressure
+                if(t == local_memtable_ref) // Backpressure if the table is not ready
                 {
                     constexpr size_t ATTEMPTS_BEFORE_BACKPRESSURE = 8;
 
@@ -128,8 +142,9 @@ namespace hedge::db
                         continue;
                     }
 
-                    BACKPRESSURE.fetch_add(1, std::memory_order::relaxed);
+                    HALT_COUNTER.fetch_add(1, std::memory_order::relaxed);
                     co_await this->_table.await(local_memtable_ref);
+
                     local_memtable_ref = this->_table.ref().load(std::memory_order::relaxed);
                     insert_attempts = 0;
                     continue;
@@ -140,10 +155,7 @@ namespace hedge::db
                 continue;
             }
 
-            // auto value_span = memtable->value_arena.allocate(value.size() + 1);
-            constexpr size_t alignment = std::atomic_ref<std::span<const uint8_t>>::required_alignment;
-            auto* value_ptr = memtable->value_arenas[THIS_THREAD_IDX % this->_cfg.num_writer_threads]->allocate_many(value.size() + 1, alignment);
-            // bool ok = !value_span.empty(); // nullptr means out of memory budget
+            auto* value_ptr = memtable->value_arenas[THIS_THREAD_IDX % this->_cfg.num_writer_threads]->allocate_many(value.size() + 1, VALUE_DATA_ALIGNMENT);
             bool ok = value_ptr != nullptr; // nullptr means out of memory budget
             std::span<uint8_t> value_span(value_ptr, value.size() + 1);
             uint64_t seq_nr;
@@ -248,12 +260,12 @@ namespace hedge::db
 
             expected_table->freeze_writes();
 
-            // Acquire a flush slot (blocks if max_pending_flushes in flight)
+            // Acquire a flush slot (blocks if there are max_pending_flushes in flight flushes)
             co_await this->_pending_flush_slots;
 
             {
                 std::unique_lock lk(this->_pending_flushes_mutex);
-                rw_sync_table_ptr_t next_in_pipeline = this->_pipelined_table.exchange(nullptr);
+                rw_sync_table_ptr_t next_in_pipeline = this->_pipelined_table.ref().exchange(nullptr);
                 memtable_to_flush = this->_table.ref().exchange(next_in_pipeline, std::memory_order::relaxed);
                 this->_pending_flushes.insert({curr_flush_epoch, memtable_to_flush});
             }
@@ -262,13 +274,12 @@ namespace hedge::db
 
             // Publish new memtable to readers
             this->_table_switch_epoch.fetch_add(1, std::memory_order::release);
-
-            this->_pipelined_table.store(this->_make_memtable(), std::memory_order_relaxed);
+            this->_pipelined_table.ref().store(this->_make_memtable(), std::memory_order_relaxed);
 
             // Launch flush job on the flusher executor
             tmc::spawn(this->_flush_inner(curr_flush_epoch, memtable_to_flush))
                 // .with_priority(0)
-                .run_on(*this->_flusher)
+                .run_on(*this->_braid)
                 .detach();
 
             // Release mutex
@@ -281,19 +292,12 @@ namespace hedge::db
 
     tmc::task<void> memtable::_flush_inner(size_t curr_flush_epoch, rw_sync_table_ptr_t memtable_to_flush)
     {
-        // The braid must be initialized on the same executor it will run on
-        if(!this->_braid.has_value())
-            this->_braid.emplace();
-
-        co_await tmc::resume_on(*this->_braid);
-
-        // std::cout << "curr_flush_epoch: " << curr_flush_epoch << "\n";
-
         auto t0 = std::chrono::high_resolution_clock::now();
 
         while(memtable_to_flush->any_active_writer()) // Wait until every writer is done with the object
             std::this_thread::yield();
 
+        // The flush procedure generates 2^num_partition_exponent SSTs (1 per partition)
         auto partitioned_sorted_indices = co_await index_ops::flush_mem_index2_parallel(
             this->_indices_path,
             memtable_to_flush.get()->ptr(),
@@ -311,35 +315,47 @@ namespace hedge::db
             co_return;
         }
 
-        tmc::task<void> persist_indices{};
+        tmc::task<void> update_manifest_callback{};
 
+        // Update LSM-tree with this->_push_new_ssts_callback
         {
             std::unique_lock lk(this->_pending_flushes_mutex);
-            persist_indices = this->_push_new_ssts_callback(std::move(partitioned_sorted_indices.value()));
+            update_manifest_callback = this->_push_new_ssts_callback(std::move(partitioned_sorted_indices.value()));
             auto it = this->_pending_flushes.find(curr_flush_epoch);
             assert(it->second == memtable_to_flush);
-            this->_pending_flushes.erase(it);
+            this->_pending_flushes.erase(it); // LSM-tree updated, can safely erase the memtable from memory
             this->_pending_flushes_cv_sync.notify_all();
         }
 
         // Avoids co_awaiting while holding lock
-        co_await std::move(persist_indices);
+        co_await std::move(update_manifest_callback);
 
-        bool under_pressure = (this->_compaction_backpressure != nullptr) && this->_compaction_backpressure->ref().load(std::memory_order::relaxed);
+        // Check if the compactions area is putting pressure
+        bool under_pressure = (this->_compaction_backpressure != nullptr) &&
+                              this->_compaction_backpressure->ref().load(std::memory_order::relaxed);
         if(under_pressure)
         {
             // this->_logger.log("Flush completed for epoch ", curr_flush_epoch, " but compaction backpressure is active, waiting...");
             co_await this->_compaction_backpressure->await(true);
         }
 
-        // Release the flush slot so the next flush can proceed
+        // Release the flush slot (when there is no pressure from compaction)
         this->_pending_flush_slots.release();
 
+        // Flush done: remove old WALs
+        if(auto& w = memtable_to_flush->ptr()->_wal; w.has_value())
+            w->remove();
+
+        // Schedule compaction
+        // NB behind the callback, the `sst_manager` might decided to not doing anything,
+        // if a compaction is not necessary
         if(this->_cfg.auto_compaction)
             this->_schedule_compaction_callback();
 
-        if(auto& w = memtable_to_flush->ptr()->_wal; w.has_value())
-            w->remove();
+        // Not sure if necessary here
+        // if(this->_cfg.use_wal)
+        // [[maybe_unused]]
+        // int32_t dir_res = co_await io::fdatasync(*this->_wal_dir_fd);
 
         auto t1 = std::chrono::high_resolution_clock::now();
         [[maybe_unused]] auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
@@ -352,26 +368,27 @@ namespace hedge::db
         auto table_ptr = this->_table.ref().load(std::memory_order::relaxed);
         auto* mt = table_ptr->ptr();
 
-        constexpr size_t alignment = std::atomic_ref<std::span<const uint8_t>>::required_alignment;
-        size_t replayed = 0;
+        size_t replayed_entries_count = 0;
         uint64_t max_seq_nr = 0;
 
         auto status = wal::replay(
             this->_indices_path,
             [&](const key_t& key, std::span<const uint8_t> value, uint64_t seq_nr) -> bool
             {
-                auto* ptr = mt->value_arenas[0]->allocate_many(value.size(), alignment);
-                if(!ptr)
-                    throw std::runtime_error("WAL replay: arena exhausted after " + std::to_string(replayed) + " entries — data loss prevented");
+                auto* ptr = mt->value_arenas[0]->allocate_many(value.size(), VALUE_DATA_ALIGNMENT);
+                if(ptr == nullptr)
+                    throw std::runtime_error("WAL replay: arena exhausted after " +
+                                             std::to_string(replayed_entries_count) + " entries — data loss prevented");
+
                 std::memcpy(ptr, value.data(), value.size());
                 mt->insert(key, {ptr, value.size()});
                 max_seq_nr = std::max(max_seq_nr, seq_nr);
-                ++replayed;
+                ++replayed_entries_count;
                 return true;
             },
             this->_logger);
 
-        if(replayed > 0)
+        if(replayed_entries_count > 0)
             this->_seq_nr.store(max_seq_nr + 1, std::memory_order::relaxed);
 
         return status;

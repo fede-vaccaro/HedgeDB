@@ -110,7 +110,7 @@ namespace hedge::db
 
         static tmc::task<hedge::expected<std::vector<sst>>> flush_mem_index2_parallel(
             std::filesystem::path base_path,
-            memtable_impl3_t* index,
+            skiplist_wrapper* index,
             size_t num_partition_exponent,
             size_t flush_iteration,
             std::shared_ptr<db::sharded_page_cache> cache,

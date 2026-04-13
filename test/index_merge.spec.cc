@@ -199,7 +199,7 @@ public:
         std::atomic_uint64_t seq_nr{0};
         for(size_t run_idx = 0; run_idx < N_RUNS; ++run_idx)
         {
-            auto memtable = hedge::db::memtable_impl3_t{&seq_nr, 1024 * 1024 * 128};
+            auto memtable = hedge::db::skiplist_wrapper{&seq_nr, 1024 * 1024 * 128};
             auto& keys = all_keys_per_run[run_idx];
             keys.reserve(N_KEYS_PER_RUN);
 
@@ -409,7 +409,7 @@ public:
         all_keys.reserve(N_KEYS_PER_RUN);
 
         std::atomic_uint64_t seq_nr{0};
-        auto memtable0 = hedge::db::memtable_impl3_t{&seq_nr, 1024 * 1024 * 128};
+        auto memtable0 = hedge::db::skiplist_wrapper{&seq_nr, 1024 * 1024 * 128};
         for(size_t i = 0; i < N_KEYS_PER_RUN; ++i)
         {
             auto key = variable_keys ? generate_key(len_dist(generator)) : generate_key(16);
@@ -429,7 +429,7 @@ public:
         std::bernoulli_distribution coin(deletion_fraction);
         size_t total_deleted = 0;
 
-        auto memtable1 = hedge::db::memtable_impl3_t{&seq_nr, 1024 * 1024 * 128};
+        auto memtable1 = hedge::db::skiplist_wrapper{&seq_nr, 1024 * 1024 * 128};
         for(size_t i = 0; i < N_KEYS_PER_RUN; ++i)
         {
             if(coin(generator))

@@ -378,7 +378,7 @@ struct memtable_merged_scan_test : public ::testing::TestWithParam<std::tuple<si
             1, this->_base_path, false, 0, budget, 1, budget);
     }
 
-    [[nodiscard]] hedge::expected<std::vector<hedge::db::sst>> do_flush(hedge::db::memtable_impl3_t& mem, size_t flush_iter) const
+    [[nodiscard]] hedge::expected<std::vector<hedge::db::sst>> do_flush(hedge::db::skiplist_wrapper& mem, size_t flush_iter) const
     {
         return tmc::post_waitable(
                    *this->_executor,
@@ -534,7 +534,7 @@ TEST_P(memtable_merged_scan_test, single_sst_single_memtable)
     for(auto& k : overlap)   k = generate_key(16);
     for(auto& k : mem_only)  k = generate_key(16);
 
-    hedge::db::memtable_impl3_t sst_mem(64 * 1024 * 1024);
+    hedge::db::skiplist_wrapper sst_mem(64 * 1024 * 1024);
     for(size_t i = 0; i < N; ++i)
         sst_mem.insert(sst_only[i], generate_value(this->_arena, i, this->VALUE_TYPE));
     for(size_t i = 0; i < OVERLAP; ++i)
@@ -600,14 +600,14 @@ TEST_P(memtable_merged_scan_test, multiple_ssts_multiple_memtables)
     for(auto& k : mem2_keys) k = generate_key(16);
 
     // SST1 (seeds 0..N-1)
-    hedge::db::memtable_impl3_t sst1_mem(16 * 1024 * 1024);
+    hedge::db::skiplist_wrapper sst1_mem(16 * 1024 * 1024);
     for(size_t i = 0; i < N; ++i)
         sst1_mem.insert(sst1_keys[i], generate_value(this->_arena, i, this->VALUE_TYPE));
     auto r1 = do_flush(sst1_mem, 0);
     ASSERT_TRUE(r1) << r1.error().to_string();
 
     // SST2 (seeds N..2N-1)
-    hedge::db::memtable_impl3_t sst2_mem(16 * 1024 * 1024);
+    hedge::db::skiplist_wrapper sst2_mem(16 * 1024 * 1024);
     for(size_t i = 0; i < N; ++i)
         sst2_mem.insert(sst2_keys[i], generate_value(this->_arena, N + i, this->VALUE_TYPE));
     auto r2 = do_flush(sst2_mem, 1);

@@ -131,7 +131,7 @@ int main()
     std::cout << "Inserted " << N << " keys via threads in " << elapsed_s * 1000.0 << " ms\n";
     std::cout << "Throughput: " << static_cast<size_t>(throughput) << " items/s\n";
     std::cout << "Bandwidth:  " << bandwidth_mb << " MB/s\n";
-    std::cout << "Backpressure count: " << hedge::db::memtable::BACKPRESSURE.load() << "\n";
+    std::cout << "Backpressure count: " << hedge::db::memtable::HALT_COUNTER.load() << "\n";
 
     mt.wait_for_flush().wait();
 }

@@ -93,7 +93,7 @@ int main(int argc, char* argv[])
     const size_t INITIAL_WRITES = std::strtoull(argv[1], nullptr, 10);
     const size_t N_OPS = std::strtoull(argv[2], nullptr, 10);
     constexpr size_t PAYLOAD_SIZE = 100;
-    constexpr size_t MEMTABLE_CAPACITY_BYTES = 64 * 1024 * 1024;
+    constexpr size_t MEMTABLE_CAPACITY_BYTES = 70 * 1024 * 1024;
 
     bool flag_compact_all = false;
     bool flag_load_only = false;
@@ -214,7 +214,7 @@ int main(int argc, char* argv[])
         std::cout << "\n--- Initial write phase (" << INITIAL_WRITES << " keys) ---" << std::endl;
         std::cout << "Duration: " << elapsed_s * 1000.0 << " ms" << std::endl;
         std::cout << "Throughput: " << static_cast<uint64_t>(INITIAL_WRITES / elapsed_s) << " items/s" << std::endl;
-        std::cout << "Backpressure: " << memtable::BACKPRESSURE << " total backpressure events during initial load" << std::endl;
+        std::cout << "Backpressure: " << memtable::HALT_COUNTER << " total backpressure events during initial load" << std::endl;
 
         if(N_OPS == 0)
         {
@@ -248,110 +248,110 @@ int main(int argc, char* argv[])
     // =========================================================================
     // Mixed phase — 50/50 read/write
     // =========================================================================
-    // if(!flag_load_only && N_OPS > 0)
-    // {
-    //     std::atomic_size_t read_count{0};
-    //     std::atomic_size_t write_count{0};
-    //     std::atomic_size_t read_errors{0};
+    if(!flag_load_only && N_OPS > 0)
+    {
+        std::atomic_size_t read_count{0};
+        std::atomic_size_t write_count{0};
+        std::atomic_size_t read_errors{0};
 
-    //     // Per-worker PRNG seeds
-    //     std::vector<uint64_t> rng_seeds(NUM_WORKERS);
-    //     {
-    //         std::random_device rd;
-    //         for(auto& s : rng_seeds)
-    //             s = (static_cast<uint64_t>(rd()) << 32) | rd();
-    //     }
+        // Per-worker PRNG seeds
+        std::vector<uint64_t> rng_seeds(NUM_WORKERS);
+        {
+            std::random_device rd;
+            for(auto& s : rng_seeds)
+                s = (static_cast<uint64_t>(rd()) << 32) | rd();
+        }
 
-    //     std::atomic_size_t next_write_idx{INITIAL_WRITES};
+        std::atomic_size_t next_write_idx{INITIAL_WRITES};
 
-    //     auto make_read = [](size_t idx, const auto& db, std::atomic_size_t& read_count,
-    //                         std::atomic_size_t& read_errors, tmc::semaphore& s) -> tmc::task<void>
-    //     {
-    //         auto key = make_key(idx);
-    //         auto maybe_value = co_await db->get_async(key);
-    //         if(!maybe_value)
-    //         {
-    //             read_errors.fetch_add(1, std::memory_order_relaxed);
-    //             std::cerr << "get error at idx=" << idx << ": " << maybe_value.error().to_string() << std::endl;
-    //         }
-    //         read_count.fetch_add(1, std::memory_order_relaxed);
-    //         s.release();
-    //     };
+        auto make_read = [](size_t idx, const auto& db, std::atomic_size_t& read_count,
+                            std::atomic_size_t& read_errors, tmc::semaphore& s) -> tmc::task<void>
+        {
+            auto key = make_key(idx);
+            auto maybe_value = co_await db->get_async(key);
+            if(!maybe_value)
+            {
+                read_errors.fetch_add(1, std::memory_order_relaxed);
+                std::cerr << "get error at idx=" << idx << ": " << maybe_value.error().to_string() << std::endl;
+            }
+            read_count.fetch_add(1, std::memory_order_relaxed);
+            s.release();
+        };
 
-    //     auto make_write = [](size_t idx, const auto& db, const auto& values,
-    //                          std::atomic_size_t& write_count, tmc::semaphore& s) -> tmc::task<void>
-    //     {
-    //         auto key = make_key(idx);
-    //         const auto& val = values[value_slot(idx)];
-    //         auto status = co_await db->put_async(key, val);
-    //         if(!status)
-    //             std::cerr << "put error at i=" << idx << ": " << status.error().to_string() << std::endl;
-    //         write_count.fetch_add(1, std::memory_order_relaxed);
-    //         s.release();
-    //     };
+        auto make_write = [](size_t idx, const auto& db, const auto& values,
+                             std::atomic_size_t& write_count, tmc::semaphore& s) -> tmc::task<void>
+        {
+            auto key = make_key(idx);
+            const auto& val = values[value_slot(idx)];
+            auto status = co_await db->put_async(key, val);
+            if(!status)
+                std::cerr << "put error at i=" << idx << ": " << status.error().to_string() << std::endl;
+            write_count.fetch_add(1, std::memory_order_relaxed);
+            s.release();
+        };
 
-    //     auto make_op_task = [&](size_t tid) -> tmc::task<void>
-    //     {
-    //         auto fg = tmc::fork_group();
-    //         auto semaphore = tmc::semaphore(io::static_pool::instance()->queue_depth());
-    //         uint64_t rng = rng_seeds[tid];
+        auto make_op_task = [&](size_t tid) -> tmc::task<void>
+        {
+            auto fg = tmc::fork_group();
+            auto semaphore = tmc::semaphore(io::static_pool::instance()->queue_depth());
+            uint64_t rng = rng_seeds[tid];
 
-    //         for(size_t op_idx = tid; op_idx < N_OPS; op_idx += NUM_WORKERS)
-    //         {
-    //             uint64_t decision = xxh64::hash(reinterpret_cast<const char*>(&op_idx), sizeof(op_idx), 0x12345678);
-    //             bool is_read = (decision & 1) == 0;
+            for(size_t op_idx = tid; op_idx < N_OPS; op_idx += NUM_WORKERS)
+            {
+                uint64_t decision = xxh64::hash(reinterpret_cast<const char*>(&op_idx), sizeof(op_idx), 0x12345678);
+                bool is_read = (decision & 1) == 0;
 
-    //             co_await semaphore;
-    //             if(is_read)
-    //             {
-    //                 size_t idx = fast_rand(rng) % INITIAL_WRITES;
-    //                 fg.fork(make_read(idx, db, read_count, read_errors, semaphore));
-    //             }
-    //             else
-    //             {
-    //                 size_t idx = next_write_idx.fetch_add(1, std::memory_order_relaxed);
-    //                 fg.fork(make_write(idx, db, values, write_count, semaphore));
-    //             }
-    //         }
+                co_await semaphore;
+                if(is_read)
+                {
+                    size_t idx = fast_rand(rng) % INITIAL_WRITES;
+                    fg.fork(make_read(idx, db, read_count, read_errors, semaphore));
+                }
+                else
+                {
+                    size_t idx = next_write_idx.fetch_add(1, std::memory_order_relaxed);
+                    fg.fork(make_write(idx, db, values, write_count, semaphore));
+                }
+            }
 
-    //         co_await std::move(fg);
-    //     };
+            co_await std::move(fg);
+        };
 
-    //     std::cout << "\n--- Mixed phase (50/50 r/w, " << N_OPS << " ops) ---" << std::endl;
-    //     auto t0 = clk::now();
+        std::cout << "\n--- Mixed phase (50/50 r/w, " << N_OPS << " ops) ---" << std::endl;
+        auto t0 = clk::now();
 
-    //     std::vector<std::future<void>> futures;
-    //     futures.reserve(NUM_WORKERS);
-    //     for(size_t tid = 0; tid < NUM_WORKERS; ++tid)
-    //         futures.push_back(tmc::post_waitable(pool, make_op_task(tid), 0, tid));
-    //     for(auto& f : futures)
-    //         f.get();
+        std::vector<std::future<void>> futures;
+        futures.reserve(NUM_WORKERS);
+        for(size_t tid = 0; tid < NUM_WORKERS; ++tid)
+            futures.push_back(tmc::post_waitable(pool, make_op_task(tid), 0, tid));
+        for(auto& f : futures)
+            f.get();
 
-    //     auto t1 = clk::now();
-    //     double elapsed_s = std::chrono::duration<double>(t1 - t0).count();
+        auto t1 = clk::now();
+        double elapsed_s = std::chrono::duration<double>(t1 - t0).count();
 
-    //     std::cout << "Duration: " << elapsed_s * 1000.0 << " ms" << std::endl;
-    //     std::cout << "Total throughput: " << static_cast<uint64_t>(N_OPS / elapsed_s) << " ops/s" << std::endl;
-    //     std::cout << "Reads:  " << read_count.load() << "  (errors: " << read_errors.load() << ")" << std::endl;
-    //     std::cout << "Writes: " << write_count.load() << std::endl;
-    //     std::cout << "Bandwidth: " << (N_OPS * (PAYLOAD_SIZE + KEY_SIZE) / 1e6) / elapsed_s << " MB/s" << std::endl;
+        std::cout << "Duration: " << elapsed_s * 1000.0 << " ms" << std::endl;
+        std::cout << "Total throughput: " << static_cast<uint64_t>(N_OPS / elapsed_s) << " ops/s" << std::endl;
+        std::cout << "Reads:  " << read_count.load() << "  (errors: " << read_errors.load() << ")" << std::endl;
+        std::cout << "Writes: " << write_count.load() << std::endl;
+        std::cout << "Bandwidth: " << (N_OPS * (PAYLOAD_SIZE + KEY_SIZE) / 1e6) / elapsed_s << " MB/s" << std::endl;
 
-    //     std::cout << "\nWaiting for pending compactions..." << std::endl;
-    //     db->wait_for_compactions_to_finish();
+        std::cout << "\nWaiting for pending compactions..." << std::endl;
+        db->wait_for_compactions_to_finish();
 
-    //     auto t2 = clk::now();
-    //     double total_s = std::chrono::duration<double>(t2 - t0).count();
-    //     std::cout << "Total (w/compaction): " << total_s * 1000.0 << " ms" << std::endl;
-    //     std::cout << "Total throughput (w/compaction): " << static_cast<uint64_t>(N_OPS / total_s) << " ops/s" << std::endl;
+        auto t2 = clk::now();
+        double total_s = std::chrono::duration<double>(t2 - t0).count();
+        std::cout << "Total (w/compaction): " << total_s * 1000.0 << " ms" << std::endl;
+        std::cout << "Total throughput (w/compaction): " << static_cast<uint64_t>(N_OPS / total_s) << " ops/s" << std::endl;
 
-    //     prof::print_internal_perf_stats(false);
+        prof::print_internal_perf_stats(false);
 
-    //     if(read_errors.load() > 0)
-    //     {
-    //         std::cerr << "Read errors detected: " << read_errors.load() << std::endl;
-    //         return 1;
-    //     }
-    // }
+        if(read_errors.load() > 0)
+        {
+            std::cerr << "Read errors detected: " << read_errors.load() << std::endl;
+            return 1;
+        }
+    }
 
     // =========================================================================
     // Range scan phase — measure scans/s for small, medium, and large ranges

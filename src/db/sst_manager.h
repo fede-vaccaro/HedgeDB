@@ -106,7 +106,10 @@ namespace hedge::db
                                            // Needed for coordinating tombstone garbage collection
             std::atomic_size_t levels_seq_num{0};
             fs::file state_file{};
+            std::optional<int> dir_fd{};
             std::mutex state_write_mutex{};
+
+            ~partition_state() { if(dir_fd) ::close(*dir_fd); }
         };
 
         using sorted_indices_map_t = std::map<uint16_t, std::unique_ptr<partition_state>>;

@@ -214,12 +214,12 @@ namespace hedge::db
         }
 
     public:
-        memtable_cursor(const memtable_impl3_t& mem,
+        memtable_cursor(const skiplist_wrapper& mem,
                         const std::optional<key_t>& lower,
                         const std::optional<key_t>& upper,
                         uint64_t epoch,
                         uint64_t max_seq = std::numeric_limits<uint64_t>::max())
-            : _accessor(const_cast<memtable_impl3_t*>(&mem)),
+            : _accessor(const_cast<skiplist_wrapper*>(&mem)),
               _max_seq(max_seq),
               _epoch(epoch)
         {

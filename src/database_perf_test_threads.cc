@@ -202,7 +202,7 @@ int main(int argc, char* argv[])
         std::cout << "Duration: " << elapsed_finish_writing_s * 1000.0 << " ms" << std::endl;
         std::cout << "Write throughput: " << static_cast<uint64_t>(N_KEYS / elapsed_finish_writing_s) << " items/s" << std::endl;
         std::cout << "Bandwidth: " << (N_KEYS * (PAYLOAD_SIZE + KEY_SIZE) / 1e6) / elapsed_finish_writing_s << " MB/s" << std::endl;
-        std::cout << "Backpressure: " << memtable::BACKPRESSURE.load(std::memory_order_relaxed) << " total backpressure events during write phase" << std::endl;
+        std::cout << "Backpressure: " << memtable::HALT_COUNTER.load(std::memory_order_relaxed) << " total backpressure events during write phase" << std::endl;
 
         // std::cout << "Waiting for pending compactions..." << std::endl;
         // db->wait_for_compactions_to_finish();

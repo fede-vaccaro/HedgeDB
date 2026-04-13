@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -20,6 +21,7 @@ namespace hedge::db
         struct config
         {
             std::filesystem::path base_path;
+            std::optional<int> dir_fd;
             size_t epoch;
             size_t n_threads;
             size_t file_size_hint;
@@ -32,7 +34,8 @@ namespace hedge::db
 
         // Reads all WAL files under `path`, sorted by (epoch, seq_nr).
         // Calls on_entry for each; stops early if it returns false.
-        // Deletes the WAL files after processing.
+        // Deletes the old WAL files after processing.
+        // on_entry should push the entries into the memtable;
         static hedge::status replay(
             const std::filesystem::path& path,
             const std::function<bool(const key_t&, std::span<const uint8_t>, uint64_t)>& on_entry,

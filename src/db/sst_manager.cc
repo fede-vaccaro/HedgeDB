@@ -94,6 +94,10 @@ namespace hedge::db
                 auto maybe_file = fs::file::from_path(state_path, mode, false, PAGE_SIZE_IN_BYTES);
                 if(maybe_file)
                     state.state_file = std::move(maybe_file.value());
+
+                int fd = ::open(dir_path.c_str(), O_RDONLY | O_DIRECTORY);
+                if(fd >= 0)
+                    state.dir_fd = fd;
             }
 
             bool loaded_from_state = false;
@@ -547,13 +551,17 @@ namespace hedge::db
 
         auto& state = *it->second;
 
-        // Lazily open state file (under unique_lock to prevent double-open)
+        // Lazily open state file and directory fd (under unique_lock to prevent double-open)
         {
             std::unique_lock lk(state.mutex);
             if(state.state_file.fd() == -1)
             {
                 auto [dir_prefix, file_prefix] = format_prefix(partition_id);
-                auto state_path = this->_cfg.indices_path / dir_prefix / with_extension(file_prefix, ".tiers");
+                auto dir_path = this->_cfg.indices_path / dir_prefix;
+                auto state_path = dir_path / with_extension(file_prefix, ".tiers");
+
+                if(!state.dir_fd)
+                    state.dir_fd = ::open(dir_path.c_str(), O_RDONLY | O_DIRECTORY);
 
                 const bool exists = std::filesystem::exists(state_path);
                 const auto mode = exists ? fs::file::open_mode::read_write
@@ -603,6 +611,11 @@ namespace hedge::db
             this->_logger.log("fdatasync failed for partition state file: ", strerror(-fsync_res));
             co_return hedge::error(std::string("fdatasync failed for partition state file: ") + strerror(-fsync_res));
         }
+
+        int32_t dir_res = co_await io::fdatasync(*state.dir_fd);
+        if(dir_res < 0)
+            co_return hedge::error(std::string("fdatasync dir failed: ") + strerror(-dir_res));
+
         co_return hedge::ok();
     }
 
@@ -661,7 +674,7 @@ namespace hedge::db
                     // Then, within a level, we prepare the buckets from the oldest SSTs to the newests, in order to preserve the key-values arrival order
                     for(it = std::next(it); it != level.end(); ++it)
                     {
-                        size_t file_size = (*it)->file_size();
+                        // size_t file_size = (*it)->file_size();
                         // auto new_avg = (double)(sizes_sum + file_size) / (candidates.size() + 1);
 
                         const bool pickable_for_compaction = (*it)->pickable_for_compaction();

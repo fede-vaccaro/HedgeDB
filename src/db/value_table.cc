@@ -296,6 +296,8 @@ namespace hedge::db
         if(!file_desc)
             return hedge::error("Failed to create file descriptor: " + file_desc.error().to_string());
 
+        fs::fsync_dir(base_path);
+
         if(file_desc.value().has_direct_access())
             posix_fadvise(file_desc.value().fd(), 0, 0, POSIX_FADV_DONTNEED);
 

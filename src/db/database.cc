@@ -79,6 +79,8 @@ namespace hedge::db
         std::filesystem::create_directories(db->_base_path);
         std::filesystem::create_directories(db->_indices_path);
         std::filesystem::create_directories(db->_values_path);
+        fs::fsync_dir(db->_base_path.parent_path());
+        fs::fsync_dir(db->_base_path);
 
         // Init clock cache
         if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1) // Minimum 1 MB page cache

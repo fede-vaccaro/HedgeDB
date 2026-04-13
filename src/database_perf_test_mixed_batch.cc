@@ -199,7 +199,7 @@ int main(int argc, char* argv[])
         std::cout << "\n--- Initial write phase (" << INITIAL_WRITES << " keys) ---" << std::endl;
         std::cout << "Duration: " << elapsed_s * 1000.0 << " ms" << std::endl;
         std::cout << "Throughput: " << static_cast<uint64_t>(INITIAL_WRITES / elapsed_s) << " items/s" << std::endl;
-        std::cout << "Backpressure: " << memtable::BACKPRESSURE.load(std::memory_order_relaxed) << " total backpressure events during initial load" << std::endl;
+        std::cout << "Backpressure: " << memtable::HALT_COUNTER.load(std::memory_order_relaxed) << " total backpressure events during initial load" << std::endl;
 
         if(N_OPS == 0)
         {

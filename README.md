@@ -12,15 +12,17 @@ So far it is only Linux compatible as it heavily leverage [liburing](https://git
 
 ## Features & design principles
 
-- **Fiber-style job scheduling**: A brand new and custom `executor` has been implemented to provide an abstraction layer over the [liburing](https://github.com/axboe/liburing) for maximizing the available hardware IOPS capacity; C++20 coroutines and other concurrency facilities have been exploited to strees a modern NVMe SSD at full capacity, while keeping a more linear coding style, instead of unravel the typical callback jungle.
+- **io_uring-native coroutine executor**: HedgeDB is built from the ground up around [liburing](https://github.com/axboe/liburing) and C++20 coroutines via the [TooManyCooks](https://github.com/tzcnt/TooManyCooks) work-stealing scheduler. Every I/O operation is a coroutine that suspends on an `io_uring` submission and resumes on its completion — no callbacks, no blocking threads. Each executor thread owns its own `io_uring` ring, so submissions and completions never contend across threads. The result is a write path that reaches NVMe IOPS limits without sacrificing code readability.
 
-- **Direct I/O**: Using `O_DIRECT` bypasses the OS page cache to eliminate double-caching, giving your database engine predictable, fine-grained control over memory and disk I/O.
+- **Separated index and value storage**: Following the [WiscKey](https://www.usenix.org/system/files/conference/fast16/fast16-papers-lu.pdf) design, SST files store only the sorted index (keys → location pointers); raw value bytes live in separate append-only value table files (`.vt`) and are never rewritten. Compaction is purely an index operation, which eliminates value write amplification — the dominant cost in naive LSM-tree implementations for large values.
 
-- **Log Structured Merge (LSM) Tree**: The index is basically a LSM Trees: the NVMEs are great at executing random scattered operations, but they nonetheless enjoy sequential workloads. Also, the LSM Tree-based index architecture has been proved to be flexible over different workload or even device (such as HDD) types.  
+- **Partitioned LSM tree with parallel flush and compaction**: The key space is divided into `2^N` independent partitions (default 1024). Each partition maintains its own level hierarchy and its own lock. A memtable flush fans out across all non-empty partitions simultaneously, with each partition's SST written on a separate executor thread. Background compaction jobs on different partitions run fully in parallel with no shared state. Both flush and compaction throughput scale with the number of executor threads.
 
-- **Separated Index and Value files**: Following the state of the art design of [WiscKey](https://www.usenix.org/system/files/conference/fast16/fast16-papers-lu.pdf), the HedgeDB's LSM tree is implemented through the separation between Index and Value files, allowing for an efficient look-up and compaction.
+- **Per-thread write path with no hot-path contention**: Each writer thread has its own value table write buffer and its own WAL file. A write to the value table is a local buffer append — no mutex, no atomic CAS beyond a single offset reservation. Threads only meet at the concurrent skiplist insert. This is what enables millions of writes per second at sub-microsecond latency.
 
-- **Latch-free**: Write and read paths are designed to be almost lock-free: value table instantiation, data flush, compaction, cache access, every operation is written to be lock free or to at least with very little contention.
+- **Direct I/O with a managed index cache**: `O_DIRECT` is used for all SST reads and writes, bypassing the OS page cache entirely. An explicit page cache, sized by configuration, holds the hot SST index pages. This gives the database predictable memory usage and avoids the OS evicting index pages under memory pressure from value reads.
+
+- **Quotient filter per SST**: Each SST embeds a [quotient filter](https://en.wikipedia.org/wiki/Quotient_filter) built at flush/compaction time. Compared to a bloom filter, a quotient filter stores fingerprints in a compact contiguous array, resulting in fewer cache misses per probe. Negative lookups (key absent from the SST) are resolved with a single cache-line access in the common case, avoiding the page load entirely.
 
 - **Lightweight dependencies**: One of the core principles of this project is being self-contained as much as possible, escaping the _dependency hell™_ that plagues software today.
 

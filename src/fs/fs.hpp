@@ -272,6 +272,16 @@ namespace hedge::fs
         }
     };
 
+    inline void fsync_dir(const std::filesystem::path& dir)
+    {
+        int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY);
+        if(fd >= 0)
+        {
+            ::fdatasync(fd);
+            ::close(fd);
+        }
+    }
+
     class mmap_owning
     {
     private:

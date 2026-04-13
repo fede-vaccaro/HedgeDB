@@ -236,7 +236,7 @@ namespace hedge::db
         std::cout << "Insertion bandwidth: " << (double)this->N_KEYS * ((this->PAYLOAD_SIZE + sizeof(uuid_t)) / 1000.0 / 1000.0) / (duration.count() / 1'000'000.0) << " MB/s" << std::endl;
         std::cout << "Insertion throughput: " << (uint64_t)(this->N_KEYS / (double)duration.count() * 1'000'000) << " items/s" << std::endl;
         std::cout << "Deleted keys: " << this->_deleted_keys.size() << std::endl;
-        std::cout << "BACKPRESSURE count (contention on memtable writers): " << hedge::db::memtable::BACKPRESSURE.load() << std::endl;
+        std::cout << "BACKPRESSURE count (contention on memtable writers): " << hedge::db::memtable::HALT_COUNTER.load() << std::endl;
         prof::print_internal_perf_stats(false);
 
         db->print_tree_structure();
