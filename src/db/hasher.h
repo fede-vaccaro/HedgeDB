@@ -21,6 +21,7 @@ namespace hedge::third_party
         return XXH3_64bits(input, length);
     }
 
+    // Stateful hasher from xxhash library
     class hasher64
     {
         struct _hasher_free_fn

@@ -75,20 +75,6 @@ namespace hedge
         return (value % PAGE_SIZE_IN_BYTES) == 0;
     }
 
-    /*
-        a partition is identified by its (included) upper bound
-        e.g. 00fa is the upper bound of the partition [0000, 00ff]
-        and might include elements up to 00fa ffff ffff ffff
-        element starting with 01fb will be in the subsequent partition
-     */
-    inline size_t find_partition_prefix_for_key(uuid_t key, size_t partition_size)
-    {
-        const auto& K = extract_prefix(key);
-        const auto& P = partition_size;
-
-        return ((K + P) / P * P) - 1;
-    };
-
     inline uint16_t extract_prefix(const uint8_t* k)
     {
         size_t prefix = 0;
@@ -113,6 +99,11 @@ namespace hedge
     std::vector<std::pair<size_t, std::filesystem::path>> get_prefixes(const std::filesystem::path& base_path, size_t num_space_partitions);
 
     using buffer_t = std::unique_ptr<uint8_t[], void (*)(void*)>;
+
+    constexpr buffer_t make_null_buffer()
+    {
+        return {nullptr, [](void*) {}};
+    }
 
     inline buffer_t make_aligned_buffer(size_t n)
     {

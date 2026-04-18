@@ -74,9 +74,9 @@ namespace hedge::db
 
         std::pair<bool, uint64_t> insert(const key_t& key, std::span<const uint8_t> value);
 
-        std::optional<std::span<const uint8_t>> get(const key_t& key) const;
+        [[nodiscard]] std::optional<std::span<const uint8_t>> get(const key_t& key) const;
 
-        Accessor accessor() { return Accessor(this); }
+        Accessor accessor()  { return Accessor(this); }
 
         [[nodiscard]] uint64_t seq_nr() const
         {

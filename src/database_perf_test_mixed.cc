@@ -93,7 +93,7 @@ int main(int argc, char* argv[])
     const size_t INITIAL_WRITES = std::strtoull(argv[1], nullptr, 10);
     const size_t N_OPS = std::strtoull(argv[2], nullptr, 10);
     constexpr size_t PAYLOAD_SIZE = 100;
-    constexpr size_t MEMTABLE_CAPACITY_BYTES = 70 * 1024 * 1024;
+    constexpr size_t MEMTABLE_CAPACITY_BYTES = 64 * 1024 * 1024;
 
     bool flag_compact_all = false;
     bool flag_load_only = false;
@@ -134,7 +134,7 @@ int main(int argc, char* argv[])
     std::cout << std::endl;
 
     // --- Init ---
-    constexpr size_t NUM_WORKERS = 12;
+    constexpr size_t NUM_WORKERS = 8;
     constexpr uint32_t QD = 64;
 
     auto& pool = hedge::io::static_pool::instance()->init(NUM_WORKERS, QD, "io-pool");
@@ -150,8 +150,8 @@ int main(int argc, char* argv[])
     config.use_odirect_for_indices = true;
     config.index_page_clock_cache_size_bytes = 0;
     config.index_point_cache_size_bytes = 0;
-    config.compaction_io_workers = 4;
-    config.flush_io_workers = 4;
+    config.compaction_io_workers = 6;
+    config.flush_io_workers = 6;
     config.disable_wal = false;
 
     auto maybe_db = [&]() -> expected<std::shared_ptr<database>>

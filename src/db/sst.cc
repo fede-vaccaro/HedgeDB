@@ -1,80 +1,21 @@
 #include <cstdint>
 #include <cstring>
-#include <stack>
-#include <stdexcept>
 #include <unistd.h>
 #include <utility>
 
 #include "db/block.h"
 #include "error.hpp"
-#include "io/io_ctx.h"
 #include "io/io_requests.hpp"
 #include "key.h"
-#include "perf_counter.h"
 #include "sst.h"
 #include "tmc/task.hpp"
 #include "types.h"
 #include "utils.h"
 
+#include "buffer_pool.h"
+
 namespace hedge::db
 {
-
-    struct tagged_buffer
-    {
-        buffer_t buf;
-        int32_t idx;
-    };
-
-    class read_buffer_pool
-    {
-    private:
-        using buffers_t = std::vector<tagged_buffer>;
-
-        std::stack<tagged_buffer, buffers_t> _buffers;
-
-    public:
-        // TODO: migrate to io_ctx
-        read_buffer_pool()
-        {
-            // TODO: migrate to io_ctx (queue_depth / register_page_buffers)
-            const size_t num_bufs = io::io_ctx::this_thread_ctx->queue_depth() * 2;
-
-            buffers_t buffer_vec;
-            buffer_vec.reserve(num_bufs);
-
-            std::vector<uint8_t*> buffer_ptrs;
-            buffer_ptrs.reserve(num_bufs);
-
-            for(size_t i = 0; i < num_bufs; ++i)
-            {
-                auto* buf_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, PAGE_SIZE_IN_BYTES));
-                if(buf_ptr == nullptr)
-                    throw std::runtime_error("Bould not allocate buffer");
-
-                buffer_vec.emplace_back(buffer_t(buf_ptr, std::free), static_cast<int32_t>(i));
-                buffer_ptrs.push_back(buf_ptr);
-            }
-
-            this->_buffers = std::stack<tagged_buffer, buffers_t>(std::move(buffer_vec));
-            io::io_ctx::this_thread_ctx->register_page_buffers(buffer_ptrs);
-        }
-
-        std::optional<tagged_buffer> try_pop()
-        {
-            if(this->_buffers.empty())
-                return std::nullopt;
-
-            auto b = std::move(this->_buffers.top());
-            this->_buffers.pop();
-
-            return std::optional{std::move(b)};
-        }
-
-        void push(tagged_buffer&& b)
-        {
-            this->_buffers.push(std::move(b));
-        }
-    };
 
     sst::sst(fs::file fd, page_aligned_buffer<key_t> meta_index, sst_footer footer, std::optional<page_aligned_buffer<key_t>> super_index, std::optional<quotient_filter> qf)
         : fs::file(std::move(fd)), _meta_index(std::move(meta_index)), _super_index(std::move(super_index)), _qf(std::move(qf)), _footer(footer)
@@ -148,11 +89,13 @@ namespace hedge::db
         }
 
         // Build super index if meta-index is large enough
+        // The super index is an auxiliary index over the meta-index that allows to quickly narrow down the search range in the meta-index for large SST files. 
+        // This needs to avoid polluting the cache with meta-index entries
+        // I'll be honest, I'm not sure it actually helps with performance
         std::optional<page_aligned_buffer<key_t>> super_index;
         constexpr size_t KEYS_PER_META_INDEX_PAGE = PAGE_SIZE_IN_BYTES / sizeof(key_t);
-        constexpr size_t SUPER_INDEX_THRESHOLD = 16;
 
-        if(meta_index.size() > KEYS_PER_META_INDEX_PAGE * SUPER_INDEX_THRESHOLD)
+        if(meta_index.size() > KEYS_PER_META_INDEX_PAGE * SUPER_INDEX_ENABLE_THRESHOLD)
         {
             size_t super_index_size = hedge::ceil(meta_index.size(), KEYS_PER_META_INDEX_PAGE);
             page_aligned_buffer<key_t> si(super_index_size);
@@ -180,11 +123,11 @@ namespace hedge::db
         return this->_qf->may_contain(key_hash);
     }
 
-    tmc::task<hedge::status> sst::_load_page_async(size_t offset, uint8_t* data_ptr, int32_t buf_index) const
+    tmc::task<hedge::status> sst::_load_page_async(size_t offset, const registered_buffer& tbuf) const
     {
-        int32_t res = buf_index != -1
-                          ? co_await hedge::io::read_fixed(this->fd(), data_ptr, PAGE_SIZE_IN_BYTES, offset, buf_index)
-                          : co_await hedge::io::read(this->fd(), data_ptr, PAGE_SIZE_IN_BYTES, offset);
+        int32_t res = tbuf.idx().has_value()
+                          ? co_await hedge::io::read_fixed(this->fd(), tbuf.data(), PAGE_SIZE_IN_BYTES, offset, tbuf.idx().value())
+                          : co_await hedge::io::read(this->fd(), tbuf.data(), PAGE_SIZE_IN_BYTES, offset);
 
         if(res < 0)
         {
@@ -193,7 +136,7 @@ namespace hedge::db
                 offset,
                 this->path().string(),
                 strerror(-res),
-                buf_index);
+                tbuf.idx().value_or(-1));
             co_return hedge::error(err_msg);
         }
 
@@ -211,19 +154,8 @@ namespace hedge::db
         co_return hedge::ok();
     }
 
-    tmc::task<expected<value_t>> sst::lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache, std::optional<uint64_t> /*key_hash*/) const
+    tmc::task<expected<value_t>> sst::lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& /*cache*/) const
     {
-        // prof::counter_guard guard(prof::get<"qf_lookups">());
-
-        // if(this->_qf.has_value() && key_hash.has_value() && !this->_qf->may_contain(key_hash.value()))
-        // {
-        //     // prof::get<"qf_false_positives">().add(0);
-        //     co_return hedge::error(std::string{}, errc::KEY_NOT_FOUND);
-        // }
-        // guard._counter->stop();
-
-        // co_return hedge::error("", errc::KEY_NOT_FOUND);
-
         auto maybe_page_id = this->_find_page_id(key);
         if(!maybe_page_id)
             co_return hedge::error("", errc::KEY_NOT_FOUND);
@@ -231,118 +163,20 @@ namespace hedge::db
         auto page_id = maybe_page_id.value();
 
         auto page_start_offset = this->_footer.index_offset + (page_id * PAGE_SIZE_IN_BYTES);
+        assert(page_start_offset < this->_footer.meta_index_offset);
 
-        // start_counter(fd);
-        std::optional<page_cache::read_page_guard> opt_page_guard;
-        std::optional<page_cache::write_page_guard> opt_write_guard;
+        thread_local read_buffer_pool bufs = read_buffer_pool(io::io_ctx::this_thread_ctx->queue_depth() * 2);
 
-        auto page_tag = to_page_tag(this->id(), page_start_offset);
+        auto guarded_buffer = registered_buffer_guard(bufs.try_get_fixed_buffer(), bufs);
 
-        tagged_buffer tbuf{
-            .buf = buffer_t{nullptr, std::free},
-            .idx = -1};
+        assert(guarded_buffer.buffer().data() != nullptr);
+        auto status = co_await this->_load_page_async(page_start_offset, guarded_buffer.buffer());
 
-        uint8_t* page_ptr = nullptr;
-        bool should_read_from_fs = (cache == nullptr);
+        if(!status)
+            co_return status.error();
 
-        if(!should_read_from_fs)
-        {
-            prof::get<"lookup">().start();
-            auto maybe_page_guard = cache->try_lookup(page_tag);
-
-            if(maybe_page_guard.has_value())
-            {
-                if(!maybe_page_guard->ready())
-                {
-                    should_read_from_fs = true;
-                }
-                else
-                {
-                    opt_page_guard = std::move(co_await maybe_page_guard.value());
-                    page_ptr = opt_page_guard->data + opt_page_guard->offset;
-                    prof::get<"cache_hits">().add(1);
-                    prof::get<"lookup">().stop(false);
-                }
-
-                // std::cout << "cache hit for fd " << this->fd() << " and file " << this->path() << " page offset " << page_start_offset << "\n";
-
-                // print meta index
-                // size_t count = 0;
-                // for(const auto& entry : this->_meta_index)
-                // std::cout << "Meta index entry key: " << count++ << " " << entry.key << "\n";
-            }
-            else
-            {
-                // should_read_from_fs = true;
-                prof::get<"lookup">().stop(true);
-            }
-        }
-
-        if(!should_read_from_fs && !opt_page_guard.has_value())
-        {
-            should_read_from_fs = true;
-            prof::get<"cache_hits">().add(0);
-
-            auto maybe_write_slot = cache->try_get_write_slot(page_tag);
-            if(maybe_write_slot.has_value())
-            {
-                opt_write_guard = std::move(maybe_write_slot);
-                page_ptr = opt_write_guard->data + opt_write_guard->idx;
-            }
-        }
-
-        thread_local read_buffer_pool bufs = read_buffer_pool{};
-
-        if(should_read_from_fs)
-        {
-            if(!opt_page_guard.has_value() && !opt_write_guard.has_value())
-            {
-
-                auto buf_from_pool = bufs.try_pop();
-                // std::optional<tagged_buffer> buf_from_pool = std::nullopt; // --- IGNORE ---
-                if(buf_from_pool.has_value())
-                {
-                    tbuf = std::move(buf_from_pool.value());
-                    page_ptr = tbuf.buf.get();
-                    tbuf.idx = -1;
-                }
-                else
-                {
-                    // throw std::runtime_error("not enough buffers for read");
-                    auto* page_mem_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, PAGE_SIZE_IN_BYTES));
-                    if(page_mem_ptr == nullptr)
-                    {
-                        auto err_msg = std::format(
-                            "Failed to allocate memory for loading page at offset {} from file {}",
-                            page_start_offset,
-                            this->path().string());
-                        co_return hedge::error(err_msg);
-                    }
-
-                    tbuf = tagged_buffer{
-                        .buf = buffer_t(page_mem_ptr, std::free),
-                        .idx = -1};
-                    page_ptr = page_mem_ptr;
-                }
-            }
-
-            assert(page_ptr != nullptr);
-            auto status = co_await this->_load_page_async(page_start_offset, page_ptr, tbuf.idx);
-
-            if(tbuf.buf != nullptr && tbuf.idx != -1)
-                bufs.push(std::move(tbuf));
-
-            if(!status)
-                co_return status.error();
-        }
-
-        prof::get<"find_in_page">().start();
-        assert(page_id < this->_footer.meta_index_offset * PAGE_SIZE_IN_BYTES);
-        hedge::expected<value_t> res = sst::_find_in_page(key, page_ptr);
-        prof::get<"find_in_page">().stop(should_read_from_fs);
-
-        // if(this->_qf.has_value() && !res.has_value())
-        //     prof::get<"qf_false_positives">().add(1);
+        assert(page_id < (this->_footer.meta_index_offset * PAGE_SIZE_IN_BYTES));
+        hedge::expected<value_t> res = sst::_find_in_page(key, guarded_buffer.buffer().data());
 
         co_return res;
     }
@@ -395,25 +229,6 @@ namespace hedge::db
                 if(last_page_size != 0)
                     meta_index_range_end = meta_index_range_begin + last_page_size;
             }
-            // else
-            // {
-            //     const key_t* base = meta_index_range_begin;
-
-            //     // Fully unrolled 8-step branchless lower_bound for exactly 128 elements
-            //     base += (base[63] < key) ? 64 : 0;
-            //     base += (base[31] < key) ? 32 : 0;
-            //     base += (base[15] < key) ? 16 : 0;
-            //     base += (base[7] < key) ? 8 : 0;
-            //     base += (base[3] < key) ? 4 : 0;
-            //     base += (base[1] < key) ? 2 : 0;
-            //     base += (base[0] < key) ? 1 : 0;
-
-            //     // Final boundary checks
-            //     if(base == meta_index_range_end || *base < key)
-            //         return std::nullopt;
-
-            //     return std::distance(&(*this->_meta_index.begin()), base);
-            // }
 
             const auto* prefetch_ptr = reinterpret_cast<const uint8_t*>(meta_index_range_begin);
             const auto* prefetch_end_ptr = reinterpret_cast<const uint8_t*>(meta_index_range_end);
@@ -429,20 +244,10 @@ namespace hedge::db
         // If lower_bound returns the end iterator, it means the key is greater than
         // the maximum key of all pages in this index file.
         if(it == this->_meta_index.end())
-        {
-            // Debugging output (commented out)
-            // for (const auto& entry : this->_meta_index) { std::cout << "Meta index entry: " << entry.page_max_id << std::endl; }
-            // std::cout << "Meta index size: " << this->_meta_index.size() << std::endl;
-            // std::cout << "Key not found in meta index: " << key << std::endl;
             return std::nullopt;
-        }
-
-        // print it
 
         // Otherwise, the distance from the beginning to the iterator gives the page ID.
         size_t page_id = std::distance(this->_meta_index.begin(), it);
-
-        // std::cout << "Meta index entry found for key: " << to_hex_string(key) << " with page max id: " << to_hex_string(*it) << " page id: " << page_id << std::endl;
 
         return page_id;
     }

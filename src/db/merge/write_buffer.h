@@ -5,11 +5,9 @@
 #include "cache.h"
 #include "db/block.h"
 #include "db/index_ops.h"
-#include "db/merge/merge_utils.h"
 #include "error.hpp"
 #include "io/io_requests.hpp"
 #include "page_aligned_buffer.h"
-#include "tmc/aw_yield.hpp"
 #include "tmc/task.hpp"
 #include "types.h"
 
@@ -106,15 +104,10 @@ namespace hedge::db
 
             assert(hedge::is_page_aligned(write_offset));
 
-            prof::get<"merge_cache_bulk_write_us">().start();
-            prof::get<"merge_cache_bulk_writes">().start();
-
             size_t start_page = write_offset / PAGE_SIZE_IN_BYTES;
             auto page_guards = cache->get_write_slots_range(new_file_id,
                                                             start_page,
                                                             num_written_pages);
-
-            prof::get<"merge_cache_bulk_writes">().stop();
 
             for(size_t cur_page = 0; cur_page < page_guards.size(); ++cur_page)
             {
@@ -133,8 +126,6 @@ namespace hedge::db
                 }
             }
 
-            prof::get<"merge_cache_bulk_write_us">().stop();
-            prof::get<"merge_cache_bulk_writes_count">().add(1, 0);
         }
     };
 

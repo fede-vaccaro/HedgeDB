@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -12,6 +11,7 @@
 #include <error.hpp>
 
 #include "cache.h"
+#include "db/buffer_pool.h"
 #include "fs/fs.hpp"
 #include "tmc/task.hpp"
 #include "types.h"
@@ -81,7 +81,14 @@ namespace hedge::db
         sst_footer _footer;                                     ///< In-memory copy of the file's footer (always loaded on construction/load).
         compaction_progress_state _compaction_state{compaction_progress_state::PICKABLE_FOR_COMPACTION};
 
+        // Threshold to decide whether to build a super index over the meta index.
+        // If there are at least 16 pages worth of Meta index entries, the super-index is built
+        static constexpr size_t SUPER_INDEX_ENABLE_THRESHOLD = 16;
+
     public:
+        // QF_SEED is the seed used for computing key hashes for quotient filter
+        static constexpr size_t QF_SEED = 0xDEADBEEF;
+
         sst(fs::file fd, page_aligned_buffer<key_t> meta_index, sst_footer footer, std::optional<page_aligned_buffer<key_t>> super_index, std::optional<quotient_filter> qf = std::nullopt);
 
         sst() = default;
@@ -105,7 +112,7 @@ namespace hedge::db
 
         [[nodiscard]] bool probe_filter(uint64_t key_hash) const;
 
-        [[nodiscard]] tmc::task<expected<value_t>> lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache, std::optional<uint64_t> key_hash = std::nullopt) const;
+        [[nodiscard]] tmc::task<expected<value_t>> lookup_async(const key_t& key, const std::shared_ptr<sharded_page_cache>& cache) const;
 
         [[nodiscard]] size_t upper_bound() const { return this->_footer.upper_bound; }
 
@@ -164,7 +171,7 @@ namespace hedge::db
 
         [[nodiscard]] std::optional<size_t> _find_page_id(const key_t& key) const;
 
-        [[nodiscard]] tmc::task<hedge::status> _load_page_async(size_t offset, uint8_t* data_ptr, int32_t buf_index) const;
+        [[nodiscard]] tmc::task<hedge::status> _load_page_async(size_t offset, const registered_buffer& tbuf) const;
     };
 
     // Typedefs related to LSM-tree hierarchies

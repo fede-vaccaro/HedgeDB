@@ -238,7 +238,7 @@ namespace hedge::db
                 throw std::runtime_error("could not open wal " + (cfg.base_path / wal_path).string() +
                                          " : " + maybe_file.error().to_string());
 
-            fallocate(maybe_file.value().fd(), FALLOC_FL_KEEP_SIZE, 0, static_cast<off_t>(cfg.file_size_hint));
+            ::fallocate(maybe_file.value().fd(), FALLOC_FL_KEEP_SIZE, 0, static_cast<off_t>(cfg.file_size_hint));
             this->_files.emplace_back(std::move(maybe_file.value()));
         }
 

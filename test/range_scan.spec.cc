@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
@@ -84,7 +85,8 @@ struct scan_test_helpers
                     generate_inline_value(groundtruth, seed);
                     return std::equal(groundtruth.begin(), groundtruth.end(), v.begin());
                 },
-                [](const hedge::tombstone_t&) -> bool { return true; },
+                [](const hedge::tombstone_t&) -> bool
+                { return true; },
             },
             value);
     }
@@ -185,7 +187,8 @@ struct range_scan_test : public ::testing::TestWithParam<std::tuple<size_t, size
 
 TEST_P(range_scan_test, test_flush_and_range_scan_all_16b_keys)
 {
-    auto memtable = hedge::db::memtable_impl3_t{1024 * 1024 * 128};
+    std::atomic_size_t seq_nr{};
+    auto memtable = hedge::db::skiplist_wrapper{&seq_nr, 1024 * 1024 * 128};
 
     std::cout << "Generating " << this->N_KEYS << " keys..." << std::endl;
     for(size_t j = 0; j < this->N_KEYS; ++j)
@@ -202,11 +205,15 @@ TEST_P(range_scan_test, test_flush_and_range_scan_all_16b_keys)
     std::filesystem::path base_path = this->_base_path;
 
     auto t0 = std::chrono::high_resolution_clock::now();
+    auto begin = memtable.accessor().cbegin();
+    auto end = memtable.accessor().cend();
+
     auto result_future = tmc::post_waitable(
         *_executor,
-        hedge::db::index_ops::flush_mem_index2_parallel(
+        hedge::db::index_ops::flush_memtable(
             base_path,
-            &memtable,
+            begin,
+            end,
             this->NUM_PARTITION_EXPONENT,
             0, // flush_iteration
             nullptr,
@@ -380,11 +387,15 @@ struct memtable_merged_scan_test : public ::testing::TestWithParam<std::tuple<si
 
     [[nodiscard]] hedge::expected<std::vector<hedge::db::sst>> do_flush(hedge::db::skiplist_wrapper& mem, size_t flush_iter) const
     {
+        auto begin = mem.accessor().cbegin();
+        auto end = mem.accessor().cend();
+
         return tmc::post_waitable(
                    *this->_executor,
-                   hedge::db::index_ops::flush_mem_index2_parallel(
+                   hedge::db::index_ops::flush_memtable(
                        std::filesystem::path{this->_base_path},
-                       &mem,
+                       begin,
+                       end,
                        0,
                        flush_iter,
                        nullptr,
@@ -419,8 +430,8 @@ struct memtable_merged_scan_test : public ::testing::TestWithParam<std::tuple<si
         {
             const auto& sp = sst_ptrs[i];
             const auto& r = ranges[i];
-            size_t start = sp->footer().index_offset + r.first_page_id * hedge::PAGE_SIZE_IN_BYTES;
-            size_t end = sp->footer().index_offset + (r.last_page_id + 1) * hedge::PAGE_SIZE_IN_BYTES;
+            size_t start = sp->footer().index_offset + (r.first_page_id * hedge::PAGE_SIZE_IN_BYTES);
+            size_t end = sp->footer().index_offset + ((r.last_page_id + 1) * hedge::PAGE_SIZE_IN_BYTES);
             rbufs->emplace_back(*sp,
                                 hedge::fs::file_reader2_config{
                                     .start_offset = start,
@@ -485,7 +496,8 @@ TEST_P(memtable_merged_scan_test, memtable_only)
     const size_t N = this->N_KEYS;
 
     std::vector<hedge::key_t> all_keys(N);
-    for(auto& k : all_keys) k = generate_key(16);
+    for(auto& k : all_keys)
+        k = generate_key(16);
 
     auto table = make_table();
     for(size_t i = 0; i < N; ++i)
@@ -511,7 +523,8 @@ TEST_P(memtable_merged_scan_test, memtable_only)
     EXPECT_TRUE(std::is_sorted(keys.begin(), keys.end()));
 
     std::map<hedge::key_t, size_t> expected_seed;
-    for(size_t i = 0; i < N; ++i) expected_seed[all_keys[i]] = i;
+    for(size_t i = 0; i < N; ++i)
+        expected_seed[all_keys[i]] = i;
 
     for(auto& [k, v] : result.entries)
         EXPECT_TRUE(check_returned_payload(v, expected_seed.at(k))) << "value mismatch";
@@ -530,17 +543,22 @@ TEST_P(memtable_merged_scan_test, single_sst_single_memtable)
     std::vector<hedge::key_t> sst_only(N);
     std::vector<hedge::key_t> overlap(OVERLAP);
     std::vector<hedge::key_t> mem_only(N);
-    for(auto& k : sst_only)  k = generate_key(16);
-    for(auto& k : overlap)   k = generate_key(16);
-    for(auto& k : mem_only)  k = generate_key(16);
+    for(auto& k : sst_only)
+        k = generate_key(16);
+    for(auto& k : overlap)
+        k = generate_key(16);
+    for(auto& k : mem_only)
+        k = generate_key(16);
 
-    hedge::db::skiplist_wrapper sst_mem(64 * 1024 * 1024);
+    std::atomic_size_t seq_nr{};
+    auto memtable = hedge::db::skiplist_wrapper{&seq_nr, 1024 * 1024 * 128};
+
     for(size_t i = 0; i < N; ++i)
-        sst_mem.insert(sst_only[i], generate_value(this->_arena, i, this->VALUE_TYPE));
+        memtable.insert(sst_only[i], generate_value(this->_arena, i, this->VALUE_TYPE));
     for(size_t i = 0; i < OVERLAP; ++i)
-        sst_mem.insert(overlap[i], generate_value(this->_arena, N + i, this->VALUE_TYPE));
+        memtable.insert(overlap[i], generate_value(this->_arena, N + i, this->VALUE_TYPE));
 
-    auto flush_result = do_flush(sst_mem, 0);
+    auto flush_result = do_flush(memtable, 0);
     ASSERT_TRUE(flush_result) << flush_result.error().to_string();
 
     hedge::db::partition_t partition{hedge::db::level_t{}};
@@ -549,9 +567,9 @@ TEST_P(memtable_merged_scan_test, single_sst_single_memtable)
 
     auto live = make_table();
     for(size_t i = 0; i < N; ++i)
-        live->ptr()->insert(mem_only[i], generate_value(this->_arena, 2 * N + i, this->VALUE_TYPE));
+        live->ptr()->insert(mem_only[i], generate_value(this->_arena, (2 * N) + i, this->VALUE_TYPE));
     for(size_t i = 0; i < OVERLAP; ++i)
-        live->ptr()->insert(overlap[i], generate_value(this->_arena, 3 * N + i, this->VALUE_TYPE)); // wins
+        live->ptr()->insert(overlap[i], generate_value(this->_arena, (3 * N) + i, this->VALUE_TYPE)); // wins
 
     hedge::db::memtable::snapshot snap{.seq_nr = std::numeric_limits<uint64_t>::max(), .curr = nullptr, .pending_flushes = {}};
     snap.curr = live;
@@ -563,7 +581,7 @@ TEST_P(memtable_merged_scan_test, single_sst_single_memtable)
               << result.duration_us / 1000.0 << " ms, throughput: "
               << static_cast<size_t>(result.entries.size() / (result.duration_us / 1e6)) << " keys/s\n";
 
-    ASSERT_EQ(result.entries.size(), 2 * N + OVERLAP);
+    ASSERT_EQ(result.entries.size(), (2 * N) + OVERLAP);
 
     std::vector<hedge::key_t> keys;
     keys.reserve(result.entries.size());
@@ -572,9 +590,12 @@ TEST_P(memtable_merged_scan_test, single_sst_single_memtable)
     EXPECT_TRUE(std::is_sorted(keys.begin(), keys.end()));
 
     std::map<hedge::key_t, size_t> expected_seed;
-    for(size_t i = 0; i < N; ++i)       expected_seed[sst_only[i]] = i;
-    for(size_t i = 0; i < OVERLAP; ++i) expected_seed[overlap[i]]  = 3 * N + i; // memtable wins
-    for(size_t i = 0; i < N; ++i)       expected_seed[mem_only[i]] = 2 * N + i;
+    for(size_t i = 0; i < N; ++i)
+        expected_seed[sst_only[i]] = i;
+    for(size_t i = 0; i < OVERLAP; ++i)
+        expected_seed[overlap[i]] = (3 * N) + i; // memtable wins
+    for(size_t i = 0; i < N; ++i)
+        expected_seed[mem_only[i]] = (2 * N) + i;
 
     for(auto& [k, v] : result.entries)
         EXPECT_TRUE(check_returned_payload(v, expected_seed.at(k))) << "value mismatch";
@@ -594,40 +615,48 @@ TEST_P(memtable_merged_scan_test, multiple_ssts_multiple_memtables)
     std::vector<hedge::key_t> sst2_keys(N);
     std::vector<hedge::key_t> mem1_keys(N);
     std::vector<hedge::key_t> mem2_keys(N);
-    for(auto& k : sst1_keys) k = generate_key(16);
-    for(auto& k : sst2_keys) k = generate_key(16);
-    for(auto& k : mem1_keys) k = generate_key(16);
-    for(auto& k : mem2_keys) k = generate_key(16);
+    for(auto& k : sst1_keys)
+        k = generate_key(16);
+    for(auto& k : sst2_keys)
+        k = generate_key(16);
+    for(auto& k : mem1_keys)
+        k = generate_key(16);
+    for(auto& k : mem2_keys)
+        k = generate_key(16);
 
     // SST1 (seeds 0..N-1)
-    hedge::db::skiplist_wrapper sst1_mem(16 * 1024 * 1024);
+    std::atomic_size_t seq_nr{};
+    hedge::db::skiplist_wrapper sst1_mem(&seq_nr, 16 * 1024 * 1024);
     for(size_t i = 0; i < N; ++i)
         sst1_mem.insert(sst1_keys[i], generate_value(this->_arena, i, this->VALUE_TYPE));
     auto r1 = do_flush(sst1_mem, 0);
     ASSERT_TRUE(r1) << r1.error().to_string();
 
     // SST2 (seeds N..2N-1)
-    hedge::db::skiplist_wrapper sst2_mem(16 * 1024 * 1024);
+    std::atomic_size_t seq_nr2{};
+    hedge::db::skiplist_wrapper sst2_mem(&seq_nr2, 16 * 1024 * 1024);
     for(size_t i = 0; i < N; ++i)
         sst2_mem.insert(sst2_keys[i], generate_value(this->_arena, N + i, this->VALUE_TYPE));
     auto r2 = do_flush(sst2_mem, 1);
     ASSERT_TRUE(r2) << r2.error().to_string();
 
     hedge::db::partition_t partition{hedge::db::level_t{}};
-    for(auto& sst : r1.value()) partition[0].push_back(std::make_shared<hedge::db::sst>(std::move(sst)));
-    for(auto& sst : r2.value()) partition[0].push_back(std::make_shared<hedge::db::sst>(std::move(sst)));
+    for(auto& sst : r1.value())
+        partition[0].push_back(std::make_shared<hedge::db::sst>(std::move(sst)));
+    for(auto& sst : r2.value())
+        partition[0].push_back(std::make_shared<hedge::db::sst>(std::move(sst)));
 
     // Mem1 (seeds 2N..3N-1)
     auto mem1 = make_table();
     for(size_t i = 0; i < N; ++i)
-        mem1->ptr()->insert(mem1_keys[i], generate_value(this->_arena, 2 * N + i, this->VALUE_TYPE));
+        mem1->ptr()->insert(mem1_keys[i], generate_value(this->_arena, (2 * N) + i, this->VALUE_TYPE));
 
     // Mem2 (seeds 3N..4N-1) + overlap with SST1 (seeds 4N..4N+OVERLAP-1, wins)
     auto mem2 = make_table();
     for(size_t i = 0; i < N; ++i)
-        mem2->ptr()->insert(mem2_keys[i], generate_value(this->_arena, 3 * N + i, this->VALUE_TYPE));
+        mem2->ptr()->insert(mem2_keys[i], generate_value(this->_arena, (3 * N) + i, this->VALUE_TYPE));
     for(size_t i = 0; i < OVERLAP; ++i)
-        mem2->ptr()->insert(sst1_keys[i], generate_value(this->_arena, 4 * N + i, this->VALUE_TYPE));
+        mem2->ptr()->insert(sst1_keys[i], generate_value(this->_arena, (4 * N) + i, this->VALUE_TYPE));
 
     hedge::db::memtable::snapshot snap{.seq_nr = std::numeric_limits<uint64_t>::max(), .curr = nullptr, .pending_flushes = {}};
     snap.curr = mem1;
@@ -649,11 +678,16 @@ TEST_P(memtable_merged_scan_test, multiple_ssts_multiple_memtables)
     EXPECT_TRUE(std::is_sorted(keys.begin(), keys.end()));
 
     std::map<hedge::key_t, size_t> expected_seed;
-    for(size_t i = 0; i < N; ++i)       expected_seed[sst1_keys[i]] = i;
-    for(size_t i = 0; i < N; ++i)       expected_seed[sst2_keys[i]] = N + i;
-    for(size_t i = 0; i < N; ++i)       expected_seed[mem1_keys[i]] = 2 * N + i;
-    for(size_t i = 0; i < N; ++i)       expected_seed[mem2_keys[i]] = 3 * N + i;
-    for(size_t i = 0; i < OVERLAP; ++i) expected_seed[sst1_keys[i]] = 4 * N + i; // mem2 wins
+    for(size_t i = 0; i < N; ++i)
+        expected_seed[sst1_keys[i]] = i;
+    for(size_t i = 0; i < N; ++i)
+        expected_seed[sst2_keys[i]] = N + i;
+    for(size_t i = 0; i < N; ++i)
+        expected_seed[mem1_keys[i]] = 2 * N + i;
+    for(size_t i = 0; i < N; ++i)
+        expected_seed[mem2_keys[i]] = 3 * N + i;
+    for(size_t i = 0; i < OVERLAP; ++i)
+        expected_seed[sst1_keys[i]] = 4 * N + i; // mem2 wins
 
     for(auto& [k, v] : result.entries)
         EXPECT_TRUE(check_returned_payload(v, expected_seed.at(k))) << "value mismatch";
@@ -672,7 +706,8 @@ TEST_P(memtable_merged_scan_test, intra_memtable_key_dedup)
 
     // Insert N_UNIQUE distinct keys with initial values (seeds 0..N-1).
     std::vector<hedge::key_t> unique_keys(N_UNIQUE);
-    for(auto& k : unique_keys) k = generate_key(16);
+    for(auto& k : unique_keys)
+        k = generate_key(16);
 
     auto table = make_table();
 
@@ -684,7 +719,7 @@ TEST_P(memtable_merged_scan_test, intra_memtable_key_dedup)
     // the same key. Only the value from the last round should survive.
     for(size_t round = 1; round <= N_OVERWRITES; ++round)
         for(size_t i = 0; i < OVERWRITE_COUNT; ++i)
-            table->ptr()->insert(unique_keys[i], generate_value(this->_arena, N_UNIQUE * round + i, this->VALUE_TYPE));
+            table->ptr()->insert(unique_keys[i], generate_value(this->_arena, (N_UNIQUE * round) + i, this->VALUE_TYPE));
 
     hedge::db::memtable::snapshot snap{.seq_nr = std::numeric_limits<uint64_t>::max(), .curr = nullptr, .pending_flushes = {}};
     snap.curr = table;
@@ -704,7 +739,8 @@ TEST_P(memtable_merged_scan_test, intra_memtable_key_dedup)
 
     // Overwritten keys must carry the value from the final overwrite round.
     std::map<hedge::key_t, size_t> expected_seed;
-    for(size_t i = 0; i < N_UNIQUE; ++i) expected_seed[unique_keys[i]] = i;
+    for(size_t i = 0; i < N_UNIQUE; ++i)
+        expected_seed[unique_keys[i]] = i;
     for(size_t i = 0; i < OVERWRITE_COUNT; ++i)
         expected_seed[unique_keys[i]] = N_UNIQUE * N_OVERWRITES + i;
 
@@ -729,9 +765,12 @@ TEST_P(memtable_merged_scan_test, pending_flush_epoch_ordering)
     std::vector<hedge::key_t> pf1_keys(N);
     std::vector<hedge::key_t> pf2_keys(N);
     std::vector<hedge::key_t> overlap_keys(OVERLAP);
-    for(auto& k : pf1_keys)     k = generate_key(16);
-    for(auto& k : pf2_keys)     k = generate_key(16);
-    for(auto& k : overlap_keys) k = generate_key(16);
+    for(auto& k : pf1_keys)
+        k = generate_key(16);
+    for(auto& k : pf2_keys)
+        k = generate_key(16);
+    for(auto& k : overlap_keys)
+        k = generate_key(16);
 
     // Pending flush 1 — older (epoch = 10).
     // Overlap keys here use seeds N..N+OVERLAP-1 and must lose.
@@ -745,9 +784,9 @@ TEST_P(memtable_merged_scan_test, pending_flush_epoch_ordering)
     // Overlap keys here use seeds 3N..3N+OVERLAP-1 and must win.
     auto pf2 = make_table();
     for(size_t i = 0; i < N; ++i)
-        pf2->ptr()->insert(pf2_keys[i], generate_value(this->_arena, 2 * N + i, this->VALUE_TYPE));
+        pf2->ptr()->insert(pf2_keys[i], generate_value(this->_arena, (2 * N) + i, this->VALUE_TYPE));
     for(size_t i = 0; i < OVERLAP; ++i)
-        pf2->ptr()->insert(overlap_keys[i], generate_value(this->_arena, 3 * N + i, this->VALUE_TYPE));
+        pf2->ptr()->insert(overlap_keys[i], generate_value(this->_arena, (3 * N) + i, this->VALUE_TYPE));
 
     // No current memtable — only the two pending flushes with distinct epochs.
     hedge::db::memtable::snapshot snap{.seq_nr = std::numeric_limits<uint64_t>::max(), .curr = nullptr, .pending_flushes = {}};
@@ -759,7 +798,7 @@ TEST_P(memtable_merged_scan_test, pending_flush_epoch_ordering)
     ASSERT_TRUE(result.error.empty()) << result.error;
 
     // Overlap keys are deduplicated: 2*N unique + OVERLAP shared = 2*N + OVERLAP total.
-    ASSERT_EQ(result.entries.size(), 2 * N + OVERLAP);
+    ASSERT_EQ(result.entries.size(), (2 * N) + OVERLAP);
 
     std::vector<hedge::key_t> keys;
     keys.reserve(result.entries.size());
@@ -768,9 +807,12 @@ TEST_P(memtable_merged_scan_test, pending_flush_epoch_ordering)
     EXPECT_TRUE(std::is_sorted(keys.begin(), keys.end()));
 
     std::map<hedge::key_t, size_t> expected_seed;
-    for(size_t i = 0; i < N; ++i)       expected_seed[pf1_keys[i]]     = i;
-    for(size_t i = 0; i < N; ++i)       expected_seed[pf2_keys[i]]     = 2 * N + i;
-    for(size_t i = 0; i < OVERLAP; ++i) expected_seed[overlap_keys[i]] = 3 * N + i; // epoch 20 wins
+    for(size_t i = 0; i < N; ++i)
+        expected_seed[pf1_keys[i]] = i;
+    for(size_t i = 0; i < N; ++i)
+        expected_seed[pf2_keys[i]] = 2 * N + i;
+    for(size_t i = 0; i < OVERLAP; ++i)
+        expected_seed[overlap_keys[i]] = 3 * N + i; // epoch 20 wins
 
     for(auto& [k, v] : result.entries)
         EXPECT_TRUE(check_returned_payload(v, expected_seed.at(k))) << "value mismatch";
@@ -790,9 +832,12 @@ TEST_P(memtable_merged_scan_test, current_memtable_beats_pending_flush)
     std::vector<hedge::key_t> pf_keys(N);
     std::vector<hedge::key_t> curr_keys(N);
     std::vector<hedge::key_t> overlap_keys(OVERLAP);
-    for(auto& k : pf_keys)      k = generate_key(16);
-    for(auto& k : curr_keys)    k = generate_key(16);
-    for(auto& k : overlap_keys) k = generate_key(16);
+    for(auto& k : pf_keys)
+        k = generate_key(16);
+    for(auto& k : curr_keys)
+        k = generate_key(16);
+    for(auto& k : overlap_keys)
+        k = generate_key(16);
 
     // Pending flush (epoch = 999).
     // Overlap keys here use seeds N..N+OVERLAP-1 and must lose.
@@ -806,9 +851,9 @@ TEST_P(memtable_merged_scan_test, current_memtable_beats_pending_flush)
     // Overlap keys here use seeds 3N..3N+OVERLAP-1 and must win.
     auto curr = make_table();
     for(size_t i = 0; i < N; ++i)
-        curr->ptr()->insert(curr_keys[i], generate_value(this->_arena, 2 * N + i, this->VALUE_TYPE));
+        curr->ptr()->insert(curr_keys[i], generate_value(this->_arena, (2 * N) + i, this->VALUE_TYPE));
     for(size_t i = 0; i < OVERLAP; ++i)
-        curr->ptr()->insert(overlap_keys[i], generate_value(this->_arena, 3 * N + i, this->VALUE_TYPE));
+        curr->ptr()->insert(overlap_keys[i], generate_value(this->_arena, (3 * N) + i, this->VALUE_TYPE));
 
     hedge::db::memtable::snapshot snap{.seq_nr = std::numeric_limits<uint64_t>::max(), .curr = nullptr, .pending_flushes = {}};
     snap.curr = curr;
@@ -819,7 +864,7 @@ TEST_P(memtable_merged_scan_test, current_memtable_beats_pending_flush)
     ASSERT_TRUE(result.error.empty()) << result.error;
 
     // Overlap keys are deduplicated: 2*N unique + OVERLAP shared = 2*N + OVERLAP total.
-    ASSERT_EQ(result.entries.size(), 2 * N + OVERLAP);
+    ASSERT_EQ(result.entries.size(), (2 * N) + OVERLAP);
 
     std::vector<hedge::key_t> keys;
     keys.reserve(result.entries.size());
@@ -828,9 +873,12 @@ TEST_P(memtable_merged_scan_test, current_memtable_beats_pending_flush)
     EXPECT_TRUE(std::is_sorted(keys.begin(), keys.end()));
 
     std::map<hedge::key_t, size_t> expected_seed;
-    for(size_t i = 0; i < N; ++i)       expected_seed[pf_keys[i]]      = i;
-    for(size_t i = 0; i < N; ++i)       expected_seed[curr_keys[i]]    = 2 * N + i;
-    for(size_t i = 0; i < OVERLAP; ++i) expected_seed[overlap_keys[i]] = 3 * N + i; // live memtable wins
+    for(size_t i = 0; i < N; ++i)
+        expected_seed[pf_keys[i]] = i;
+    for(size_t i = 0; i < N; ++i)
+        expected_seed[curr_keys[i]] = 2 * N + i;
+    for(size_t i = 0; i < OVERLAP; ++i)
+        expected_seed[overlap_keys[i]] = 3 * N + i; // live memtable wins
 
     for(auto& [k, v] : result.entries)
         EXPECT_TRUE(check_returned_payload(v, expected_seed.at(k))) << "value mismatch";

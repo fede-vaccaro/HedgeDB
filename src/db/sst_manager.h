@@ -30,14 +30,13 @@ namespace hedge::db
     public:
         struct config
         {
-            size_t num_partition_exponent;
-            size_t max_num_levels;
-            size_t min_merge_width;
-            size_t max_merge_width;
-            double bucket_ratio;
-            size_t compaction_read_ahead_size_bytes;
-            size_t _compaction_io_workers;
-            bool use_odirect_for_indices;
+            size_t num_partition_exponent{4};
+            size_t max_num_levels{40};
+            size_t min_merge_width{4};
+            size_t max_merge_width{16};
+            double bucket_ratio{1.5};
+            size_t compaction_read_ahead_size_bytes{2 * MiB};
+            bool use_odirect_for_indices{true};
             std::filesystem::path indices_path;
         };
 
@@ -51,17 +50,18 @@ namespace hedge::db
                                                                   std::shared_ptr<io::io_executor> compaction_pool,
                                                                   std::shared_ptr<sharded_page_cache> page_cache);
 
-        // Called by memtable flush callback
-        tmc::task<void> push_new_ssts(std::vector<sst> new_ssts);
+        // push_new_ssts_to_l0 Push a batch of SSTs to L0 as the most recent
+        // Returns a second callback (via tmc::task) that should be called for updating the manifest
+        tmc::task<void> push_new_ssts_to_l0(std::vector<sst> new_ssts);
 
         // SST lookup for the read path
         tmc::task<expected<value_t>> lookup_async(const key_t& key, size_t matching_partition_id);
 
         // Returns a snapshot (copy) of the partition's level tree, or an error if the partition is not found
-        [[nodiscard]] hedge::expected<partition_t> partition_snapshot(size_t partition_id) const;
+        [[nodiscard]] hedge::expected<partition_t> acquire_partition_snapshot(size_t partition_id) const;
 
         // Range scan: returns an iterator over deduplicated entries within [lower, upper]
-        hedge::expected<scan_iterator> range_iterator(std::optional<key_t> lower, std::optional<key_t> upper, size_t matching_partition_id, size_t read_ahead_size = 256 * 1024);
+        [[nodiscard]] hedge::expected<scan_iterator> range_iterator(std::optional<key_t> lower, std::optional<key_t> upper, size_t matching_partition_id, size_t read_ahead_size = 256 * 1024) const;
 
         // Compaction control
         void schedule_compaction(bool compact_all);
@@ -72,10 +72,10 @@ namespace hedge::db
         void print_tree_structure() const;
 
         // Backpressure flag (read by memtable/database)
-        auto& compaction_backpressure() { return _compaction_backpressure; }
+        auto& compaction_backpressure() { return this->_compaction_backpressure; }
 
         // Flush iteration counter (shared with memtable for SST naming)
-        std::atomic_size_t& flush_iteration() { return _flush_iteration; }
+        std::atomic_size_t& flush_iteration() { return this->_flush_iteration; }
 
         struct compaction_stats
         {
@@ -95,24 +95,30 @@ namespace hedge::db
         };
 
     private:
+        friend class sst_manager_helpers;
+
         using permissions_t = std::vector<std::shared_ptr<tmc::semaphore>>;
         using sst_level_created_t = std::vector<uint8_t>;
-        struct partition_state
+        struct _partition_state
         {
             alignas(64) mutable std::shared_mutex mutex;
             partition_t levels;
-            permissions_t permissions;     // For fine-grained coordination between compaction commits
+            permissions_t permissions;   // For fine-grained coordination between compaction commits
             sst_level_created_t created; // For tracking (for each level) whether it's been created, or whether a running compaction task will create it
-                                           // Needed for coordinating tombstone garbage collection
+                                         // Needed for coordinating tombstone garbage collection
             std::atomic_size_t levels_seq_num{0};
             fs::file state_file{};
             std::optional<int> dir_fd{};
             std::mutex state_write_mutex{};
 
-            ~partition_state() { if(dir_fd) ::close(*dir_fd); }
+            ~_partition_state()
+            {
+                if(dir_fd)
+                    ::close(*dir_fd);
+            }
         };
 
-        using sorted_indices_map_t = std::map<uint16_t, std::unique_ptr<partition_state>>;
+        using sorted_indices_map_t = std::map<uint16_t, std::unique_ptr<_partition_state>>;
         using partition_snapshot_map_t = std::map<uint16_t, partition_t>;
 
         config _cfg{};
@@ -121,7 +127,7 @@ namespace hedge::db
         sorted_indices_map_t _sorted_indices;
 
         std::shared_ptr<io::io_executor> _compaction_pool;
-        std::optional<tmc::ex_braid> _compaction_braid;
+        std::optional<tmc::ex_braid> _compaction_braid; // Serialized executor, just for scheduling compactions
 
         size_t _compactor_executor_id{0};
         std::atomic_size_t _compaction_jobs_in_flight{0};
@@ -129,8 +135,8 @@ namespace hedge::db
         std::shared_ptr<sharded_page_cache> _page_cache;
 
         std::mutex _pending_compactions_mutex;
-        size_t _pending_compacting_sst_in_l0_count{0};
-        size_t _pending_compacting_sst_count{0};
+        int64_t _pending_compacting_sst_for_backpressure_count{0};
+        int64_t _total_pending_compacting_sst_count{0};
         std::condition_variable _pending_compactions_cv;
 
         alignas(64) tmc::atomic_condvar<bool> _compaction_backpressure{false};
@@ -152,12 +158,19 @@ namespace hedge::db
             std::vector<compaction_args> results;
         };
 
-        //
-        // COSA STAVO FACENDO:
-        // STAVO RAGIONANDO SUL FATTO CHE - VISTO LO SCHEDULING CHE ACCADE IN SEQUENZA (BRAID) -
-        // POSSO DECIDERE PRIMA DI LANCIARE _MAKE_SELF_COMPLECTING_.... SE IN QUESTO TASK POSSO
-        // ABILITARE IL GC DELLE CHIAVI (cioe' se next_level + 1 e' vuoto oppure se il livello e' l'ultimo, se sono il bucket del livello)
-        //
+        // Manifest related methods
+        inline const static std::string MANIFEST_FILENAME = "manifest";
+        static std::string _serialize_levels(const partition_t& levels);
+        tmc::task<hedge::status> _persist_partition_state(uint16_t partition_id);
+
+        // Compaction related types
+        using compaction_bucket_t = std::vector<sst_ptr_t>;                                                // A bucket is a group of SSTs
+        using compaction_buckets_t = std::multimap<size_t, compaction_bucket_t>;                           // level_id -> list of buckets (each bucket is a list of SSTs)
+        using compaction_buckets_per_partition_t = std::vector<std::pair<uint16_t, compaction_buckets_t>>; // partition_id -> buckets (per level)
+
+        // Compaction related methods
+        void _update_pending_compactions_counter(int32_t count);
+
         tmc::task<void> _make_compaction_task(
             std::shared_ptr<tmc::semaphore> can_write,
             std::shared_ptr<tmc::semaphore> next_can_write,
@@ -166,17 +179,25 @@ namespace hedge::db
             size_t merge_width,
             bool discard_deleted_keys);
 
-        static std::string _serialize_levels(const partition_t& levels);
+        hedge::expected<compaction_stats> _schedule_compaction(bool compact_all);
 
-        static hedge::expected<partition_t> _deserialize_levels(std::string_view content,
-                                                                const std::filesystem::path& dir_path,
-                                                                size_t max_num_levels,
-                                                                bool use_odirect);
+        static void create_buckets_from_level(
+            compaction_buckets_t& out_buckets,
+            size_t level_idx,
+            const level_t& level,
+            size_t min_merge_width,
+            size_t max_merge_width);
+        static compaction_buckets_per_partition_t pick_ssts_into_buckets(
+            const sst_manager::partition_snapshot_map_t& index_snapshot,
+            size_t min_merge_width,
+            size_t max_merge_width);
+        void launch_compaction_tasks(
+            const partition_snapshot_map_t& index_snapshot,
+            compaction_buckets_per_partition_t&& buckets_per_partition,
+            size_t min_merge_width,
+            size_t max_merge_width);
 
-        tmc::task<hedge::status> _persist_partition_state(uint16_t partition_id);
-
-        hedge::expected<compaction_stats> _compaction_job_size_tiered(bool compact_all);
-
+        // Check helpers
         static auto check_is_sorted_by_epoch(const std::vector<sst_ptr_t>& vec) -> bool
         {
             auto sorted = std::ranges::is_sorted(

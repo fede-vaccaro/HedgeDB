@@ -79,7 +79,7 @@ int main(int argc, char* argv[])
     using clk = std::chrono::high_resolution_clock;
 
     // Init static threadpool
-    constexpr size_t NUM_THREADS = 12;
+    constexpr size_t NUM_THREADS = 8;
     constexpr uint32_t QD = 64;
 
     auto& pool = hedge::io::static_pool::instance()->init(NUM_THREADS, QD, "io-pool");
@@ -87,7 +87,7 @@ int main(int argc, char* argv[])
     // --- CLI args ---
     size_t N_KEYS = 300'000'000;
     size_t PAYLOAD_SIZE = 100;
-    size_t MEMTABLE_CAPACITY_BYTES = 32 * 1024 * 1024;
+    size_t MEMTABLE_CAPACITY_BYTES = 64 * MiB;
     bool readonly = false;
     bool compact_all = false;
 
@@ -133,18 +133,18 @@ int main(int argc, char* argv[])
 
     db_config config;
     config.auto_compaction = true;
-    config.compaction_read_ahead_size_bytes = 2 * 1024 * 1024;
+    config.compaction_read_ahead_size_bytes = 2 * MiB;
     config.memtable_budget_bytes = MEMTABLE_CAPACITY_BYTES;
     config.num_partition_exponent = 4;
     config.bucket_ratio = 1.50;
     config.use_odirect_for_indices = true;
     config.index_page_clock_cache_size_bytes = 0;
     config.index_point_cache_size_bytes = 0;
-    config.compaction_io_workers = 4;
-    config.flush_io_workers = 4;
+    config.compaction_io_workers = 6;
+    config.flush_io_workers = 6;
     config.max_pending_flushes = 8;
-    config.min_merge_width = 8;
-    config.max_merge_width = 32;
+    config.min_merge_width = 4;
+    config.max_merge_width = 16;
     config.disable_wal = false;
 
     std::shared_ptr<database> db;

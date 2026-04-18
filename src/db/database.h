@@ -1,14 +1,9 @@
 #pragma once
 
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
-#include <future>
-#include <map>
 #include <memory>
-#include <span>
-#include <unordered_set>
 
 #include <error.hpp>
 #include <logger.h>
@@ -18,7 +13,6 @@
 #include "cache.h"
 #include "io/io_executor.h"
 #include "memtable.h"
-#include "sst.h"
 #include "sst_manager.h"
 #include "tmc/task.hpp"
 #include "types.h"
@@ -39,7 +33,7 @@ namespace hedge::db
         /// Minimum number of keys required in the memtable before a flush is allowed.
         static constexpr size_t MIN_KEYS_IN_MEM_BEFORE_FLUSH = 1000;
         /// Memory budget in bytes for the memtable before a flush is triggered.
-        size_t memtable_budget_bytes = 64 * 1024 * 1024;
+        size_t memtable_budget_bytes = 64 * MiB;
         /// Exponent determining the number of partitions (2^num_partition_exponent). Affects index file organization.
         size_t num_partition_exponent = 10;
         /// Ratio (rhs_size / lhs_size) threshold triggering compaction during a two-way merge. rhs is the smaller index.
@@ -47,7 +41,7 @@ namespace hedge::db
         /// Higher bucket_ratio means less frequent compactions (lower write amplification) but higher read amplification (more data read during compaction).
         double bucket_ratio = 1.5;
         /// Amount of data read ahead from each sorted_index file during compaction merges.
-        size_t compaction_read_ahead_size_bytes = 4 * 1024 * 1024;
+        size_t compaction_read_ahead_size_bytes = 4 * MiB;
         /// Maximum time to wait for a compaction job (currently for sub-tasks within the job) before timing out.
         std::chrono::milliseconds compaction_timeout{120000};
         /// If true, compaction is automatically triggered when the memtable is flushed and merge conditions are met.
@@ -57,7 +51,7 @@ namespace hedge::db
         /// If true, use O_DIRECT flag for sorted_index file I/O to bypass
         bool use_odirect_for_indices = true;
         /// Use 0 no cache is desired; the cache size in bytes otherwise
-        size_t index_page_clock_cache_size_bytes = 3UL * 1024 * 1024 * 1024;
+        size_t index_page_clock_cache_size_bytes = 3UL * GiB;
         /// Experimental; it's like a giant memtable; do not use
         size_t index_point_cache_size_bytes = 0;
         /// Number of background workers to be used for compaction
@@ -117,7 +111,6 @@ namespace hedge::db
 
         // Index page cache
         std::shared_ptr<sharded_page_cache> _page_cache;
-        std::shared_ptr<point_cache> _index_point_cache;
 
         // Background pool
         std::shared_ptr<io::io_executor> _bg_pool;

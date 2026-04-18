@@ -212,10 +212,13 @@ public:
                 memtable.insert(key, buffer);
             }
 
+            auto begin = memtable.accessor().cbegin();
+            auto end = memtable.accessor().cend();
+
             auto res = tmc::post_waitable(
                            *this->_executor,
-                           hedge::db::index_ops::flush_mem_index2_parallel(
-                               _base_path, &memtable, NUM_PARTITION_EXPONENT, run_idx, nullptr, false, this->_executor->ex(), false))
+                           hedge::db::index_ops::flush_memtable(
+                               _base_path, begin, end, NUM_PARTITION_EXPONENT, run_idx, nullptr, false, this->_executor->ex(), false))
                            .get();
 
             ASSERT_TRUE(res.has_value()) << "Flush failed: " << res.error().to_string();
@@ -417,10 +420,13 @@ public:
             memtable0.insert(key, generate_value(arena, i, VALUE_TYPE));
         }
 
+        auto begin = memtable0.accessor().cbegin();
+        auto end = memtable0.accessor().cend();
+
         auto flush0_res = tmc::post_waitable(
                               *this->_executor,
-                              hedge::db::index_ops::flush_mem_index2_parallel(
-                                  _base_path, &memtable0, NUM_PARTITION_EXPONENT, 0, nullptr, false, this->_executor->ex(), false))
+                              hedge::db::index_ops::flush_memtable(
+                                  _base_path, begin, end, NUM_PARTITION_EXPONENT, 0, nullptr, false, this->_executor->ex(), false))
                               .get();
         ASSERT_TRUE(flush0_res.has_value()) << "Flush 0 failed: " << flush0_res.error().to_string();
 
@@ -443,10 +449,13 @@ public:
         std::vector<hedge::db::sst> ssts1;
         if(total_deleted > 0)
         {
+            auto begin = memtable1.accessor().cbegin();
+            auto end = memtable1.accessor().cend();
+
             auto flush1_res = tmc::post_waitable(
                                   *this->_executor,
-                                  hedge::db::index_ops::flush_mem_index2_parallel(
-                                      _base_path, &memtable1, NUM_PARTITION_EXPONENT, 1, nullptr, false, this->_executor->ex(), false))
+                                  hedge::db::index_ops::flush_memtable(
+                                      _base_path, begin, end, NUM_PARTITION_EXPONENT, 1, nullptr, false, this->_executor->ex(), false))
                                   .get();
             ASSERT_TRUE(flush1_res.has_value()) << "Flush 1 failed: " << flush1_res.error().to_string();
             ssts1 = std::move(flush1_res.value());

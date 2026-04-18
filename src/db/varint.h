@@ -9,24 +9,19 @@
 namespace hedge
 {
 
-    /**
-     * Maximum length (in bytes) of the varint encoding of a 32-bit value.
-     */
     constexpr size_t MAX_VARINT_LENGTH_32 = 5;
-
-    /**
-     * Maximum length (in bytes) of the varint encoding of a 64-bit value.
-     */
     constexpr size_t MAX_VARINT_LENGTH_64 = 10;
+    constexpr int32_t VALUE_MASK = 0x7f;
+    constexpr int32_t CONTINUATION_BIT = 0x80;
 
-    // Encode value as varint (from protobuf)
+    // Encode value as varint (implementation from protobuf)
     template <typename T>
         requires std::is_unsigned_v<T>
     uint8_t* unsafe_varint(T value, uint8_t* ptr)
     {
-        while(value >= 0x80) [[likely]]
+        while(value >= CONTINUATION_BIT) [[likely]]
         {
-            *ptr = static_cast<uint8_t>(value | 0x80);
+            *ptr = static_cast<uint8_t>(value | CONTINUATION_BIT);
             value >>= 7;
             ++ptr;
         }
@@ -45,10 +40,10 @@ namespace hedge
         return (std::bit_width(value) + 6U) / 7U;
     }
 
-    // Decode from varint to uint64 (from folly)
+    // Decode from varint to uint64 (implementation from folly)
     template <class T>
         requires std::is_same_v<std::remove_cv_t<T>, char> ||
-                     std::is_same_v<std::remove_cv_t<T>, unsigned char>
+                 std::is_same_v<std::remove_cv_t<T>, unsigned char>
     inline hedge::expected<std::pair<uint64_t, size_t>> try_decode_varint(const std::span<T>& data) // NOLINT: clangtidy(readability-function-cognitive-complexity)
     {
         const auto* begin = reinterpret_cast<const uint8_t*>(data.begin().base());
@@ -63,62 +58,62 @@ namespace hedge
             do
             {
                 b = *p++;
-                val = (b & 0x7f);
-                if((b & 0x80) == 0)
+                val = (b & VALUE_MASK);
+                if((b & CONTINUATION_BIT) == 0)
                 {
                     break;
                 }
                 b = *p++;
-                val |= (b & 0x7f) << 7;
-                if((b & 0x80) == 0)
+                val |= (b & VALUE_MASK) << 7;
+                if((b & CONTINUATION_BIT) == 0)
                 {
                     break;
                 }
                 b = *p++;
-                val |= (b & 0x7f) << 14;
-                if((b & 0x80) == 0)
+                val |= (b & VALUE_MASK) << 14;
+                if((b & CONTINUATION_BIT) == 0)
                 {
                     break;
                 }
                 b = *p++;
-                val |= (b & 0x7f) << 21;
-                if((b & 0x80) == 0)
+                val |= (b & VALUE_MASK) << 21;
+                if((b & CONTINUATION_BIT) == 0)
                 {
                     break;
                 }
                 b = *p++;
-                val |= (b & 0x7f) << 28;
-                if((b & 0x80) == 0)
+                val |= (b & VALUE_MASK) << 28;
+                if((b & CONTINUATION_BIT) == 0)
                 {
                     break;
                 }
                 b = *p++;
-                val |= (b & 0x7f) << 35;
-                if((b & 0x80) == 0)
+                val |= (b & VALUE_MASK) << 35;
+                if((b & CONTINUATION_BIT) == 0)
                 {
                     break;
                 }
                 b = *p++;
-                val |= (b & 0x7f) << 42;
-                if((b & 0x80) == 0)
+                val |= (b & VALUE_MASK) << 42;
+                if((b & CONTINUATION_BIT) == 0)
                 {
                     break;
                 }
                 b = *p++;
-                val |= (b & 0x7f) << 49;
-                if((b & 0x80) == 0)
+                val |= (b & VALUE_MASK) << 49;
+                if((b & CONTINUATION_BIT) == 0)
                 {
                     break;
                 }
                 b = *p++;
-                val |= (b & 0x7f) << 56;
-                if((b & 0x80) == 0)
+                val |= (b & VALUE_MASK) << 56;
+                if((b & CONTINUATION_BIT) == 0)
                 {
                     break;
                 }
                 b = *p++;
                 val |= (b & 0x01) << 63;
-                if((b & 0x80) == 0)
+                if((b & CONTINUATION_BIT) == 0)
                 {
                     break;
                 }
@@ -128,9 +123,9 @@ namespace hedge
         else
         {
             int shift = 0;
-            while(p != end && (*p & 0x80))
+            while(p != end && (*p & CONTINUATION_BIT))
             {
-                val |= static_cast<uint64_t>(*p++ & 0x7f) << shift;
+                val |= static_cast<uint64_t>(*p++ & VALUE_MASK) << shift;
                 shift += 7;
             }
             if(p == end)

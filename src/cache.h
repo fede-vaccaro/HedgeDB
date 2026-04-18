@@ -7,7 +7,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <shared_mutex>
 #include <stdexcept>
@@ -238,43 +237,6 @@ namespace hedge::db
 
         std::vector<std::optional<page_cache::write_page_guard>> get_write_slots_range(uint32_t id, size_t start_page_index, size_t num_pages);
         std::vector<std::optional<page_cache::awaitable_page_guard>> lookup_range(uint32_t id, size_t start_page_index, size_t num_pages, bool hint_evict);
-    };
-
-    class point_cache
-    {
-        async::rw_spinlock _m{};
-        tsl::robin_map<uuid_t, value_ptr_t> _cache;
-        size_t _max_page_capacity;
-
-    public:
-        explicit point_cache(size_t bytes) : _max_page_capacity(hedge::ceil(bytes, sizeof(index_entry_t)))
-        {
-            this->_cache.reserve(this->_max_page_capacity);
-        }
-
-        void put(const uuid_t& key, const value_ptr_t& value_ptr)
-        {
-            std::lock_guard lk(this->_m);
-            if(this->_cache.size() >= this->_max_page_capacity)
-                this->_cache.erase(this->_cache.begin());
-
-            this->_cache[key] = value_ptr;
-        }
-
-        std::optional<value_ptr_t> lookup(uuid_t key)
-        {
-            std::shared_lock lk(this->_m);
-            auto it = this->_cache.find(key);
-            if(it == this->_cache.end())
-                return std::nullopt;
-
-            return it->second;
-        }
-
-        size_t capacity() const
-        {
-            return this->_max_page_capacity;
-        }
     };
 
 } // namespace hedge::db

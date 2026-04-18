@@ -187,7 +187,8 @@ struct range_scan_test : public ::testing::TestWithParam<std::tuple<size_t, size
 
 TEST_P(range_scan_test, test_flush_and_lookup_16b_keys)
 {
-    auto memtable = hedge::db::memtable_impl3_t{1024 * 1024 * 128};
+    std::atomic_size_t seq_nr{};
+    auto memtable = hedge::db::skiplist_wrapper{&seq_nr, 1024 * 1024 * 128};
 
     std::cout << "Generating " << this->N_KEYS << " keys..." << std::endl;
     for(size_t j = 0; j < this->N_KEYS; ++j)
@@ -202,9 +203,12 @@ TEST_P(range_scan_test, test_flush_and_lookup_16b_keys)
     std::cout << "Keys generated." << std::endl;
 
     auto t0 = std::chrono::high_resolution_clock::now();
-    auto result_future = tmc::post_waitable(*_executor, hedge::db::index_ops::flush_mem_index2_parallel(
+    auto begin = memtable.accessor().cbegin();
+    auto end = memtable.accessor().cend();
+    auto result_future = tmc::post_waitable(*_executor, hedge::db::index_ops::flush_memtable(
                                                             this->_base_path,
-                                                            &memtable,
+                                                            begin,
+                                                            end,
                                                             this->NUM_PARTITION_EXPONENT,
                                                             0, // flush_iteration
                                                             nullptr,
@@ -334,7 +338,8 @@ TEST_P(range_scan_test, test_flush_and_lookup_16b_keys)
 
 TEST_P(range_scan_test, test_flush_and_lookup_variable_keys)
 {
-    auto memtable = hedge::db::memtable_impl3_t{1024 * 1024 * 128};
+    std::atomic_size_t seq_nr{};
+    auto memtable = hedge::db::skiplist_wrapper{&seq_nr, 1024 * 1024 * 128};
 
     std::cout << "Generating " << this->N_KEYS << " keys with variable length..." << std::endl;
     for(size_t j = 0; j < this->N_KEYS; ++j)
@@ -349,16 +354,20 @@ TEST_P(range_scan_test, test_flush_and_lookup_variable_keys)
     std::cout << "Keys generated." << std::endl;
 
     auto t0 = std::chrono::high_resolution_clock::now();
-    auto result = tmc::post_waitable(*_executor, hedge::db::index_ops::flush_mem_index2_parallel(
-                                                     this->_base_path,
-                                                     &memtable,
-                                                     this->NUM_PARTITION_EXPONENT,
-                                                     0, // flush_iteration
-                                                     nullptr,
-                                                     false, // use_odirect
-                                                     this->_executor->ex(),
-                                                     false // fdatasync_ssts
-                                                     ))
+    auto begin = memtable.accessor().cbegin();
+    auto end = memtable.accessor().cend();
+    auto result = tmc::post_waitable(*_executor,
+                                     hedge::db::index_ops::flush_memtable(
+                                         this->_base_path,
+                                         begin,
+                                         end,
+                                         this->NUM_PARTITION_EXPONENT,
+                                         0, // flush_iteration
+                                         nullptr,
+                                         false, // use_odirect
+                                         this->_executor->ex(),
+                                         false // fdatasync_ssts
+                                         ))
                       .get();
 
     auto t1 = std::chrono::high_resolution_clock::now();
@@ -419,7 +428,8 @@ TEST_P(range_scan_test, test_flush_and_lookup_variable_keys)
 
 TEST_P(range_scan_test, test_load_from_disk)
 {
-    auto memtable = hedge::db::memtable_impl3_t{1024 * 1024 * 128};
+    std::atomic_size_t seq_nr{};
+    auto memtable = hedge::db::skiplist_wrapper{&seq_nr, 1024 * 1024 * 128};
 
     for(size_t j = 0; j < this->N_KEYS; ++j)
     {
@@ -428,16 +438,23 @@ TEST_P(range_scan_test, test_load_from_disk)
         memtable.insert(this->_keys.back(), buffer);
     }
 
-    auto result = tmc::post_waitable(*_executor, hedge::db::index_ops::flush_mem_index2_parallel(
-                                                     this->_base_path,
-                                                     &memtable,
-                                                     this->NUM_PARTITION_EXPONENT,
-                                                     0,
-                                                     nullptr,
-                                                     false,
-                                                     this->_executor->ex(),
-                                                     false))
-                      .get();
+    auto begin = memtable.accessor().cbegin();
+    auto end = memtable.accessor().cend();
+
+    auto result =
+        tmc::post_waitable(
+            *_executor,
+            hedge::db::index_ops::flush_memtable(
+                this->_base_path,
+                begin,
+                end,
+                this->NUM_PARTITION_EXPONENT,
+                0,
+                nullptr,
+                false,
+                this->_executor->ex(),
+                false))
+            .get();
 
     ASSERT_TRUE(result.has_value()) << "Flush failed: " << result.error().to_string();
 
@@ -471,7 +488,16 @@ TEST_P(range_scan_test, test_load_from_disk)
         auto it = loaded_ssts.find(partition_id);
         if(it != loaded_ssts.end())
         {
-            auto f = tmc::post_waitable(*this->_executor, lookup_task_factory(j, key, it->second, *this, found_count), 0, j % this->_executor->num_threads());
+            auto f = tmc::post_waitable(
+                *this->_executor,
+                lookup_task_factory(
+                    j,
+                    key,
+                    it->second,
+                    *this,
+                    found_count),
+                0,
+                j % this->_executor->num_threads());
             lookup_futures.push_back(std::move(f));
         }
     }
@@ -484,7 +510,8 @@ TEST_P(range_scan_test, test_load_from_disk)
 
 TEST_P(range_scan_test, test_flush_succeeds)
 {
-    auto memtable = hedge::db::memtable_impl3_t{1024 * 1024 * 128};
+    std::atomic_size_t seq_nr{};
+    auto memtable = hedge::db::skiplist_wrapper{&seq_nr, 1024 * 1024 * 128};
 
     for(size_t j = 0; j < this->N_KEYS; ++j)
     {
@@ -499,16 +526,22 @@ TEST_P(range_scan_test, test_flush_succeeds)
         memtable.insert(key, buffer);
     }
 
-    auto result = tmc::post_waitable(*_executor, hedge::db::index_ops::flush_mem_index2_parallel(
-                                                     this->_base_path,
-                                                     &memtable,
-                                                     this->NUM_PARTITION_EXPONENT,
-                                                     0,       // flush_iteration
-                                                     nullptr, // cache
-                                                     false,   // use_odirect
-                                                     this->_executor->ex(),
-                                                     false // fdatasync_ssts
-                                                     ))
+    auto begin = memtable.accessor().cbegin();
+    auto end = memtable.accessor().cend();
+
+    auto result = tmc::post_waitable(
+                      *_executor,
+                      hedge::db::index_ops::flush_memtable(
+                          this->_base_path,
+                          begin,
+                          end,
+                          this->NUM_PARTITION_EXPONENT,
+                          0,       // flush_iteration
+                          nullptr, // cache
+                          false,   // use_odirect
+                          this->_executor->ex(),
+                          false // fdatasync_ssts
+                          ))
                       .get();
 
     ASSERT_TRUE(result.has_value()) << "Flush failed with error: " << result.error().to_string();

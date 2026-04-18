@@ -119,6 +119,7 @@ namespace hedge::db
     {
         // Loading from an atomic shared every time is slow AF since it is (at the time being) implemented through a spinlock
         // This is a thread-local cache
+        // TODO: thread_local might get tricky with work stealing
         thread_local std::shared_ptr<rw_sync_table_t> local_memtable_ref = this->_table.ref().load(std::memory_order::relaxed);
 
         static std::atomic_size_t THREADS{0};
@@ -297,10 +298,13 @@ namespace hedge::db
         while(memtable_to_flush->any_active_writer()) // Wait until every writer is done with the object
             std::this_thread::yield();
 
+        auto accessor = memtable_to_flush->ptr()->accessor();
+
         // The flush procedure generates 2^num_partition_exponent SSTs (1 per partition)
-        auto partitioned_sorted_indices = co_await index_ops::flush_mem_index2_parallel(
+        auto partitioned_sorted_indices = co_await index_ops::flush_memtable(
             this->_indices_path,
-            memtable_to_flush.get()->ptr(),
+            accessor.cbegin(),
+            accessor.cend(),
             this->_num_partition_exponent,
             curr_flush_epoch,
             this->_cache,

@@ -15,11 +15,6 @@ namespace hedge::db
     class arena_allocator
     {
     public:
-        /**
-         * @brief Constructs an arena allocator.
-         * @param budget Maximum bytes allowed to allocate.
-         * @param extent_bytes_hint Desired size of each memory block (extent) in bytes.
-         */
         arena_allocator(size_t budget, size_t extent_bytes_hint = 4 * 1024 * 1024)
             : _budget(budget)
         {

@@ -90,7 +90,7 @@ set(DB_SOURCES
     src/db/block.cc
     src/db/sst.h
     src/db/sst.cc
-    src/db/index_ops2.cc
+    src/db/index_ops.cc
     src/db/qf.cc
     src/db/quotient_filter.cc
     src/db/scan_iterator.cc
@@ -109,6 +109,7 @@ set(DB_SOURCES
     src/db/database.h
     src/db/sst_manager.h
     src/db/sst_manager.cc
+    src/db/sst_manager_loader.cc
     src/cache.h
     src/cache.cc
 )
@@ -116,7 +117,7 @@ set(DB_SOURCES
 set(IO_EXECUTOR_SRCS 
     src/io/static_pool.cc
     src/io/io_executor.cc
-    src/async/tmc_defs.cc
+    src/async/tmc.cc
     src/perf_counter.cc
 )
 
@@ -254,7 +255,6 @@ target_link_libraries(rolling_buffer_test uring gtest gtest_main atomic)
 add_executable(single_buffer_arena_allocator_test test/single_buffer_arena_allocator.spec.cc)
 target_link_libraries(single_buffer_arena_allocator_test gtest gtest_main)
 
-
 # debug test
 add_executable(index_merge ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_merge.spec.cc)
 target_link_libraries(index_merge gtest gtest_main uring atomic hwloc xxhash)
@@ -262,7 +262,6 @@ target_link_libraries(index_merge gtest gtest_main uring atomic hwloc xxhash)
 # concurrent_skiplist tests
 add_executable(concurrent_skiplist_test test/concurrent_skiplist.spec.cc)
 target_link_libraries(concurrent_skiplist_test gtest gtest_main atomic tcmalloc)
-
 
 # async cond var test
 add_executable(async_cond_var_test ${IO_EXECUTOR_SRCS} test/async_cond_var_test.cc)

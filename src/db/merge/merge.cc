@@ -81,7 +81,9 @@ namespace hedge::db
             {
                 return acc + idx->_footer.indexed_keys;
             });
-        size_t max_new_meta_index_entries = hedge::ceil(max_new_index_keys, INDEX_PAGE_NUM_ENTRIES);
+
+        constexpr size_t ENTRIES_PER_PAGE_ESTIMATE = 32; // Rough assumption with 24 byte keys and 100 byte values
+        size_t meta_index_entries_estimate = hedge::ceil(max_new_index_keys, ENTRIES_PER_PAGE_ESTIMATE);
 
         // Create quotient filter (slightly oversized due to dedup — acceptable)
         auto maybe_qf = create_qf_for_key_count(max_new_index_keys);
@@ -117,9 +119,9 @@ namespace hedge::db
         size_t bytes_written = 0;
 
         // Meta-index entries collected during the merge
-        // Thes are respectively the internal representation and the serialized version of it
-        auto merged_meta_index = page_aligned_buffer<key_t>(0, max_new_meta_index_entries);
-        auto merged_meta_index_bytes = page_aligned_buffer<uint8_t>(0, max_new_meta_index_entries * sizeof(key_t));
+        // Thes are respectively the internal representation held in memory for lookup and the serialized version of it
+        auto merged_meta_index = page_aligned_buffer<key_t>(0, meta_index_entries_estimate);
+        auto merged_meta_index_bytes = page_aligned_buffer<uint8_t>(0, meta_index_entries_estimate * sizeof(key_t));
 
         auto* rbufs_begin = rbufs.begin();
         auto* rbufs_end = rbufs.end();
@@ -245,6 +247,12 @@ namespace hedge::db
             }
         }
 
+        auto is_tombstone = [](const merge_entry_t& entry) -> bool
+        {
+            assert(entry.value.size() > 0);
+            return static_cast<value_type>(entry.value.data()[0]) == value_type::TOMBSTONE;
+        };
+
         // Outer loop, interrupted when both buffers are EOF
         [[maybe_unused]] size_t i = 0;
         while(!key_heap.empty())
@@ -297,14 +305,14 @@ namespace hedge::db
                 assert(last_written_key < new_item.key);
                 last_written_key = new_item.key;
 
-                if(config.discard_deleted_keys && static_cast<value_type>(new_item.value.data()[0]) == value_type::TOMBSTONE)
+                if(config.discard_deleted_keys && is_tombstone(new_item))
                 {
                     filtered_keys++;
                     continue;
                 }
 
                 if(qf.has_value())
-                    qf->insert(xxh64::hash((const char*)new_item.key.data(), new_item.key.size(), 0xDEADBEEF));
+                    qf->insert(xxh64::hash((const char*)new_item.key.data(), new_item.key.size(), sst::QF_SEED));
 
                 if(!try_push_kv(new_item)) [[unlikely]]
                 {
@@ -314,8 +322,6 @@ namespace hedge::db
                 }
             }
         }
-
-        prof::get<"merge_cache_bulk_writes_count">().add(0, 1);
 
         // Step 2: Handle remaining keys from the non-exhausted view, keeping in consideration the deduplicator --
         // The deduplicator maintains a 1-item lag.
@@ -335,14 +341,14 @@ namespace hedge::db
         {
             assert(last_written_key < new_item.key);
 
-            if(config.discard_deleted_keys && static_cast<value_type>(new_item.value.data()[0]) == value_type::TOMBSTONE)
+            if(config.discard_deleted_keys && is_tombstone(new_item))
             {
                 filtered_keys++;
                 continue;
             }
 
             if(qf.has_value())
-                qf->insert(xxh64::hash((const char*)new_item.key.data(), new_item.key.size(), 0xDEADBEEF));
+                qf->insert(xxh64::hash((const char*)new_item.key.data(), new_item.key.size(), sst::QF_SEED));
 
             if(!try_push_kv(new_item)) [[unlikely]]
             {
@@ -502,7 +508,7 @@ namespace hedge::db
 
         std::optional<page_aligned_buffer<key_t>> super_index;
 
-        if(merged_meta_index.size() > KEYS_PER_META_INDEX_PAGE * SUPER_INDEX_ENABLED_THRESHOLD)
+        if(merged_meta_index.size() > KEYS_PER_META_INDEX_PAGE * sst::SUPER_INDEX_ENABLE_THRESHOLD)
             super_index = index_ops::create_super_index<key_t, REF_PAGE_SIZE>(merged_meta_index);
 
         merged_meta_index.shrink_to_fit();

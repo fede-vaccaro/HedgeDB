@@ -52,7 +52,7 @@ namespace hedge::db
             &db._sst_manager->flush_iteration(),
             flush_executor,
             [&sst_mgr = *db._sst_manager](std::vector<sst> indices) -> tmc::task<void>
-            { return sst_mgr.push_new_ssts(std::move(indices)); },
+            { return sst_mgr.push_new_ssts_to_l0(std::move(indices)); },
             [&sst_mgr = *db._sst_manager]()
             { sst_mgr.schedule_compaction(false); },
             db._page_cache,
@@ -95,7 +95,6 @@ namespace hedge::db
                 .max_merge_width = config.max_merge_width,
                 .bucket_ratio = config.bucket_ratio,
                 .compaction_read_ahead_size_bytes = config.compaction_read_ahead_size_bytes,
-                ._compaction_io_workers = config.compaction_io_workers,
                 .use_odirect_for_indices = config.use_odirect_for_indices,
                 .indices_path = db->_indices_path,
             },
@@ -121,10 +120,6 @@ namespace hedge::db
             return hedge::error("Failed to create next in pipeline value table: " + pipelined_value_table.error().to_string());
 
         db->_pipelined_value_table = std::move(pipelined_value_table.value());
-
-        // Init point cache (avoid this)
-        if(config.index_point_cache_size_bytes > 1024 * 1024 * 1) // Mininum 1MB entry cache
-            db->_index_point_cache = std::make_shared<point_cache>(config.index_point_cache_size_bytes);
 
         // reserve value tables map
         db->_value_tables.reserve(4096);
@@ -172,7 +167,6 @@ namespace hedge::db
                 .max_merge_width = config.max_merge_width,
                 .bucket_ratio = config.bucket_ratio,
                 .compaction_read_ahead_size_bytes = config.compaction_read_ahead_size_bytes,
-                ._compaction_io_workers = config.compaction_io_workers,
                 .use_odirect_for_indices = config.use_odirect_for_indices,
                 .indices_path = db->_indices_path,
             },
@@ -396,7 +390,7 @@ namespace hedge::db
         const key_t& bound_key = lower ? *lower : *upper;
         size_t partition_id = this->_find_matching_partition_for_key(bound_key);
 
-        auto maybe_partition = this->_sst_manager->partition_snapshot(partition_id);
+        auto maybe_partition = this->_sst_manager->acquire_partition_snapshot(partition_id);
         if(!maybe_partition)
             return hedge::error(maybe_partition.error());
 
