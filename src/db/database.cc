@@ -399,9 +399,9 @@ namespace hedge::db
         return scan_iterator::from_partition(mem, &partition, std::move(lower), std::move(upper));
     }
 
-    tmc::task<hedge::status> database::remove_async(const key_t& /* key */)
+    tmc::task<hedge::status> database::remove_async(const key_t& key)
     {
-        co_return hedge::error("remove_async not implemented yet");
+        return this->_memtable->put_async(key, {}, hedge::value_type::TOMBSTONE);
     }
 
     hedge::expected<std::shared_ptr<value_table>> database::_rotate_value_table(std::shared_ptr<value_table> rotating)

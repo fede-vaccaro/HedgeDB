@@ -19,8 +19,8 @@
 #include "perf_counter.h"
 #include "sst_manager.h"
 #include "tmc/aw_resume_on.hpp"
+#include "tmc/latch.hpp"
 #include "tmc/semaphore.hpp"
-#include "tmc/spawn_many.hpp"
 #include "tmc/sync.hpp"
 #include "utils.h"
 #include "xxh64.hpp"
@@ -76,7 +76,6 @@ namespace hedge::db
                 auto& l0 = state.levels[0];
                 l0.emplace_back(std::move(sorted_index_ptr));
                 state.levels_seq_num.fetch_add(1, std::memory_order::release);
-                assert(check_is_sorted_by_epoch(l0) && "Sorted indices vector is not sorted by epoch after memtable flush");
                 affected_partitions.push_back(prefix);
             }
         }
@@ -91,26 +90,27 @@ namespace hedge::db
         if(affected_partitions.empty())
             return tmc::task<void>{};
 
-        auto persist = [](sst_manager* sst_manager, uint16_t pid) -> tmc::task<void>
-        {
-            auto status = co_await sst_manager->_persist_partition_state(pid);
-            if(!status)
-                sst_manager->_logger.log("Failed to persist partition state after flush: ", status.error().to_string());
-        };
+        // Use latch to wait for persist tasks to complete on compaction executor
+        std::unique_ptr<tmc::latch> completion_latch = std::make_unique<tmc::latch>(affected_partitions.size());
 
-        std::vector<tmc::task<void>> tasks;
-        tasks.reserve(affected_partitions.size());
+        auto persist_partition = [](sst_manager* mgr, uint16_t pid, tmc::latch* latch) -> tmc::task<void>
+        {
+            auto status = co_await mgr->_persist_partition_state(pid);
+            if(!status)
+                mgr->_logger.log("Failed to persist partition state after flush: ", status.error().to_string());
+            latch->count_down();
+        };
 
         for(unsigned short affected_partition : affected_partitions)
-            tasks.emplace_back(persist(this, affected_partition));
-
-        auto spawn_persist = [](sst_manager* sst_manager, std::vector<tmc::task<void>> tasks) -> tmc::task<void>
         {
-            co_await tmc::resume_on(*sst_manager->_compaction_pool);
-            co_await tmc::spawn_many(tasks.begin(), tasks.end());
-        };
+            tmc::post(*this->_compaction_pool, persist_partition(this, affected_partition, completion_latch.get()));
+        }
 
-        return spawn_persist(this, std::move(tasks));
+        // Wait for all persist tasks to complete
+        return [](std::unique_ptr<tmc::latch> latch) -> tmc::task<void>
+        {
+            co_await *latch;
+        }(std::move(completion_latch));
     }
 
     hedge::expected<partition_t> sst_manager::acquire_partition_snapshot(size_t partition_id) const

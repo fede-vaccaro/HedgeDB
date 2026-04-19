@@ -76,7 +76,7 @@ namespace hedge::db
 
         [[nodiscard]] std::optional<std::span<const uint8_t>> get(const key_t& key) const;
 
-        Accessor accessor()  { return Accessor(this); }
+        Accessor accessor() { return Accessor(this); }
 
         [[nodiscard]] uint64_t seq_nr() const
         {
@@ -169,8 +169,8 @@ namespace hedge::db
         std::map<size_t, rw_sync_table_ptr_t> _pending_flushes;
 
         // Executors
+        std::shared_ptr<tmc::semaphore> _can_write = std::make_shared<tmc::semaphore>(1);
         std::unique_ptr<tmc::ex_cpu_st> _flusher;
-        std::optional<tmc::ex_braid> _braid;
         std::shared_ptr<io::io_executor> _flush_executor;
 
         // Logger
@@ -209,7 +209,7 @@ namespace hedge::db
 
         // MVCC snapshot for consistent range scans
         snapshot acquire_snapshot();
-        
+
         hedge::status replay_wal();
 
         [[nodiscard]] size_t wal_epoch() const
@@ -222,7 +222,10 @@ namespace hedge::db
 
         [[nodiscard]] std::shared_ptr<rw_sync_table_t> _make_memtable();
         tmc::task<bool> _flush(rw_sync_table_ptr_t expected_table);
-        tmc::task<void> _flush_inner(size_t curr_flush_epoch, rw_sync_table_ptr_t memtable_to_flush);
+        tmc::task<void> _flush_inner(size_t curr_flush_epoch,
+                                     rw_sync_table_ptr_t memtable_to_flush,
+                                     std::shared_ptr<tmc::semaphore> can_write,
+                                     std::shared_ptr<tmc::semaphore> next_can_write);
     };
 
 } // namespace hedge::db

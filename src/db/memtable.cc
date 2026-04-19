@@ -19,6 +19,7 @@
 #include "memtable.h"
 #include "tmc/atomic_condvar.hpp"
 #include "tmc/ex_cpu_st.hpp"
+#include "tmc/semaphore.hpp"
 #include "tmc/spawn.hpp"
 #include "tmc/sync.hpp"
 #include "types.h"
@@ -85,11 +86,6 @@ namespace hedge::db
         this->_table.ref()
             .store(this->_make_memtable());
         this->_pipelined_table.ref().store(this->_make_memtable());
-
-        // Initialize braid
-        tmc::post_waitable(*this->_flusher, [](memtable* memtable) -> tmc::task<void>
-                           { memtable->_braid.emplace(); co_return; }(this))
-            .wait();
     }
 
     memtable::~memtable()
@@ -276,11 +272,13 @@ namespace hedge::db
             // Publish new memtable to readers
             this->_table_switch_epoch.fetch_add(1, std::memory_order::release);
             this->_pipelined_table.ref().store(this->_make_memtable(), std::memory_order_relaxed);
+            auto next_can_write = std::make_shared<tmc::semaphore>(0);
+            auto can_write = std::exchange(this->_can_write, next_can_write);
 
             // Launch flush job on the flusher executor
-            tmc::spawn(this->_flush_inner(curr_flush_epoch, memtable_to_flush))
+            tmc::spawn(this->_flush_inner(curr_flush_epoch, memtable_to_flush, can_write, next_can_write))
                 // .with_priority(0)
-                .run_on(*this->_braid)
+                .run_on(*this->_flush_executor)
                 .detach();
 
             // Release mutex
@@ -291,7 +289,11 @@ namespace hedge::db
         co_return false;
     }
 
-    tmc::task<void> memtable::_flush_inner(size_t curr_flush_epoch, rw_sync_table_ptr_t memtable_to_flush)
+    tmc::task<void> memtable::_flush_inner(
+        size_t curr_flush_epoch,
+        rw_sync_table_ptr_t memtable_to_flush,
+        std::shared_ptr<tmc::semaphore> can_write,
+        std::shared_ptr<tmc::semaphore> next_can_write)
     {
         auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -319,9 +321,11 @@ namespace hedge::db
             co_return;
         }
 
-        tmc::task<void> update_manifest_callback{};
+        // Acquire permission to push (for respecting new SSTs chronological ordering)
+        co_await *can_write;
 
         // Update LSM-tree with this->_push_new_ssts_callback
+        tmc::task<void> update_manifest_callback{};
         {
             std::unique_lock lk(this->_pending_flushes_mutex);
             update_manifest_callback = this->_push_new_ssts_callback(std::move(partitioned_sorted_indices.value()));
@@ -330,6 +334,9 @@ namespace hedge::db
             this->_pending_flushes.erase(it); // LSM-tree updated, can safely erase the memtable from memory
             this->_pending_flushes_cv_sync.notify_all();
         }
+
+        // Give permission to the next flush
+        next_can_write->release();
 
         // Avoids co_awaiting while holding lock
         co_await std::move(update_manifest_callback);

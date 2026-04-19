@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10) 
+cmake_minimum_required(VERSION 3.20)
 project(hedgeDB CXX)
 
 enable_testing()
@@ -61,29 +61,40 @@ elseif (CMAKE_BUILD_TYPE MATCHES "Release")
     set(CMAKE_CXX_FLAGS "-O2 -g -fno-omit-frame-pointer")
 endif()
 
-add_definitions(
-    # -DTMC_PRIORITY_COUNT=5
-    -DTMC_USE_HWLOC
-)
+# add_compile_definitions(-DTMC_PRIORITY_COUNT=5)
 
-set(PUBLIC_INCLUDES 
+find_library(HWLOC_LIB hwloc)
+if(HWLOC_LIB)
+    message(STATUS "hwloc found")
+    add_compile_definitions(-DTMC_USE_HWLOC)
+else()
+    message(STATUS "hwloc not found — TMC_USE_HWLOC disabled")
+endif()
+
+set(PUBLIC_INCLUDES
     "include"
     "include/api"
     "include/async"
 )
 
-include_directories(PUBLIC ${PUBLIC_INCLUDES})
-include_directories(PRIVATE "src")
+include_directories(${PUBLIC_INCLUDES})
+include_directories("src")
 
-include_directories(PUBLIC ${tsl_robin_map_SOURCE_DIR}/include)
-include_directories(PUBLIC ${tsl_sparse_map_SOURCE_DIR}/include)
-include_directories(PUBLIC ${xxhashct_SOURCE_DIR})
-include_directories(PUBLIC "/home/federico/TooManyCooks/include")
+include_directories(${tsl_robin_map_SOURCE_DIR}/include)
+include_directories(${tsl_sparse_map_SOURCE_DIR}/include)
+include_directories(${xxhashct_SOURCE_DIR})
+include_directories("/home/federico/TooManyCooks/include")
 
+
+set(IO_EXECUTOR_SRCS
+    src/io/static_pool.cc
+    src/io/io_executor.cc
+    src/async/tmc.cc
+    src/perf_counter.cc
+)
 
 set(DB_SOURCES
     src/types.h
-    src/perf_counter.cc
     src/utils.cc
     src/utils.h
     src/db/block.h
@@ -114,78 +125,86 @@ set(DB_SOURCES
     src/cache.cc
 )
 
-set(IO_EXECUTOR_SRCS 
-    src/io/static_pool.cc
-    src/io/io_executor.cc
-    src/async/tmc.cc
-    src/perf_counter.cc
-)
+# hedgedb_io: async I/O executor (io_uring + TooManyCooks)
+add_library(hedgedb_io STATIC ${IO_EXECUTOR_SRCS})
+target_link_libraries(hedgedb_io PUBLIC uring atomic)
+if(HWLOC_LIB)
+    target_link_libraries(hedgedb_io PUBLIC hwloc)
+endif()
 
-# executor_read_test.cc
-add_executable(executor_read_test ${IO_EXECUTOR_SRCS} src/executor_read_test.cc)
-target_link_libraries(executor_read_test uring tcmalloc)
+# hedgedb: full DB static library
+add_library(hedgedb STATIC ${DB_SOURCES})
+target_link_libraries(hedgedb PUBLIC hedgedb_io xxhash)
+
+
+# executor_read_test
+add_executable(executor_read_test src/executor_read_test.cc)
+target_link_libraries(executor_read_test hedgedb_io tcmalloc)
 
 # skiplist_executor_test — benchmarks executor + skiplist insert without full DB machinery
-add_executable(skiplist_executor_test ${IO_EXECUTOR_SRCS} src/skiplist_executor_test.cc)
-target_link_libraries(skiplist_executor_test uring tcmalloc atomic)
+add_executable(skiplist_executor_test src/skiplist_executor_test.cc)
+target_link_libraries(skiplist_executor_test hedgedb_io tcmalloc)
 
 # memtable_perf_test — benchmarks executor + memtable::put() (adds rw_sync + value arenas)
-add_executable(memtable_perf_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/memtable_perf_test.cc)
-target_link_libraries(memtable_perf_test uring tcmalloc atomic hwloc)
+add_executable(memtable_perf_test src/memtable_perf_test.cc)
+target_link_libraries(memtable_perf_test hedgedb tcmalloc)
 
 # memtable_perf_test_threads — same benchmark but using N plain std::threads instead of executors
-add_executable(memtable_perf_test_threads ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/memtable_perf_test_threads.cc)
-target_link_libraries(memtable_perf_test_threads uring tcmalloc atomic)
+add_executable(memtable_perf_test_threads src/memtable_perf_test_threads.cc)
+target_link_libraries(memtable_perf_test_threads hedgedb tcmalloc)
 
 # database_perf_test — full database write+read benchmark (no gtest)
-add_executable(database_perf_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/database_perf_test.cc)
-target_link_libraries(database_perf_test uring tcmalloc atomic hwloc xxhash)
+add_executable(database_perf_test src/database_perf_test.cc)
+target_link_libraries(database_perf_test hedgedb tcmalloc)
 
 # database_perf_test_threads — same benchmark but using N plain std::threads + sync_submit instead of executor task loop
-add_executable(database_perf_test_threads ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/database_perf_test_threads.cc)
-target_link_libraries(database_perf_test_threads uring tcmalloc atomic)
+add_executable(database_perf_test_threads src/database_perf_test_threads.cc)
+target_link_libraries(database_perf_test_threads hedgedb tcmalloc)
 
 # database_perf_test_mixed — 50/50 mixed read+write benchmark
-add_executable(database_perf_test_mixed ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/database_perf_test_mixed.cc)
-target_link_libraries(database_perf_test_mixed uring tcmalloc atomic hwloc xxhash)
+add_executable(database_perf_test_mixed src/database_perf_test_mixed.cc)
+target_link_libraries(database_perf_test_mixed hedgedb tcmalloc)
 
-# database_perf_test_mixed — 50/50 mixed read+write benchmark
-add_executable(database_perf_test_mixed_batch ${DB_SOURCES} ${IO_EXECUTOR_SRCS} src/database_perf_test_mixed_batch.cc)
-target_link_libraries(database_perf_test_mixed_batch uring tcmalloc atomic)
+# database_perf_test_mixed_batch — 50/50 mixed read+write benchmark
+add_executable(database_perf_test_mixed_batch src/database_perf_test_mixed_batch.cc)
+target_link_libraries(database_perf_test_mixed_batch hedgedb tcmalloc)
+
+# benchtool — unified benchmark CLI (write / read / rw / range modes)
+add_executable(benchtool src/benchtool.cc)
+target_link_libraries(benchtool hedgedb tcmalloc)
 
 
 # executor tests
-add_executable(executor_test ${IO_EXECUTOR_SRCS} test/io_executor.spec.cc)
-target_link_libraries(executor_test uring gtest gtest_main)
+add_executable(executor_test test/io_executor.spec.cc)
+target_link_libraries(executor_test hedgedb_io gtest gtest_main)
 
 # index (merge) tests
-add_executable(index_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index.spec.cc)
-target_link_libraries(index_test gtest gtest_main uring atomic)
+add_executable(index_test test/index.spec.cc)
+target_link_libraries(index_test hedgedb gtest gtest_main)
 
 # index2 tests
-add_executable(index2_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index2.spec.cc)
-target_link_libraries(index2_test gtest gtest_main uring atomic hwloc)
+add_executable(index2_test test/index2.spec.cc)
+target_link_libraries(index2_test hedgedb gtest gtest_main)
 
 # parallel flush tests
-add_executable(index_test_parallel_flush ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_test.cc)
-target_link_libraries(index_test_parallel_flush gtest gtest_main uring atomic)
+add_executable(index_test_parallel_flush test/index_test.cc)
+target_link_libraries(index_test_parallel_flush hedgedb gtest gtest_main)
 
 # index (delete and merge) tests
-add_executable(index_delete_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_delete.spec.cc)
-target_link_libraries(index_delete_test gtest gtest_main uring atomic)
+add_executable(index_delete_test test/index_delete.spec.cc)
+target_link_libraries(index_delete_test hedgedb gtest gtest_main)
 
-# paginated_view tests
-add_executable(file_reader_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/file_reader.spec.cc)
-target_link_libraries(file_reader_test uring gtest gtest_main atomic)
+# file_reader tests
+add_executable(file_reader_test test/file_reader.spec.cc)
+target_link_libraries(file_reader_test hedgedb gtest gtest_main)
 
-# paginated_view tests
-add_executable(file_reader2_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/file_reader2.spec.cc)
-target_link_libraries(file_reader2_test uring gtest gtest_main atomic hwloc)
+# file_reader2 tests
+add_executable(file_reader2_test test/file_reader2.spec.cc)
+target_link_libraries(file_reader2_test hedgedb gtest gtest_main)
 
-# value_table tests
-set(VALUE_TABLE_TEST_SRCS 
+# value_table tests — uses file_reader.cc which is not in DB_SOURCES
+set(VALUE_TABLE_TEST_SRCS
     src/types.h
-    src/perf_counter.cc
     src/utils.cc
     src/utils.h
     src/fs/fs.hpp
@@ -198,33 +217,36 @@ set(VALUE_TABLE_TEST_SRCS
     src/cache.h
     src/cache.cc
 )
-add_executable(value_table_test ${IO_EXECUTOR_SRCS} ${VALUE_TABLE_TEST_SRCS} test/value_table.spec.cc)
-target_link_libraries(value_table_test uring gtest gtest_main)
+add_executable(value_table_test ${VALUE_TABLE_TEST_SRCS} test/value_table.spec.cc)
+target_link_libraries(value_table_test hedgedb_io gtest gtest_main)
 
 # worker tests
-add_executable(worker_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/worker.spec.cc)
-target_link_libraries(worker_test uring gtest gtest_main atomic)
+add_executable(worker_test test/worker.spec.cc)
+target_link_libraries(worker_test hedgedb gtest gtest_main)
 
 # mpsc tests
 add_executable(mpsc_test test/mpsc.spec.cc)
 target_link_libraries(mpsc_test gtest gtest_main)
 
 # cache tests
-add_executable(cache_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/cache.spec.cc)
-target_link_libraries(cache_test uring gtest gtest_main atomic)
+add_executable(cache_test test/cache.spec.cc)
+target_link_libraries(cache_test hedgedb gtest gtest_main)
 
 # database tests
-add_executable(database_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/database.spec.cc)
-target_link_libraries(database_test uring gtest gtest_main atomic tcmalloc tbb)
+add_executable(database_test test/database.spec.cc)
+target_link_libraries(database_test hedgedb gtest gtest_main tcmalloc tbb)
+
+# version history test
+add_executable(version_history_test test/version_history.spec.cc)
+target_link_libraries(version_history_test hedgedb gtest gtest_main tbb)
 
 # WAL replay tests
-add_executable(wal_replay_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/wal_replay.spec.cc)
-target_link_libraries(wal_replay_test uring gtest gtest_main atomic tcmalloc hwloc xxhash)
+add_executable(wal_replay_test test/wal_replay.spec.cc)
+target_link_libraries(wal_replay_test hedgedb gtest gtest_main tcmalloc)
 
 # skiplist tests
 add_executable(skiplist_test test/skiplist.spec.cc)
 target_link_libraries(skiplist_test gtest gtest_main)
-
 
 # varint tests
 add_executable(varint_test test/varint.spec.cc)
@@ -238,7 +260,6 @@ target_link_libraries(key_test gtest gtest_main)
 add_executable(block_test src/db/block.cc test/block.spec.cc)
 target_link_libraries(block_test gtest gtest_main)
 
-
 # page_aligned_buffer tests
 add_executable(page_aligned_buffer_test test/page_aligned_buffer.spec.cc src/utils.cc)
 target_link_libraries(page_aligned_buffer_test gtest gtest_main)
@@ -248,28 +269,28 @@ add_executable(error_test test/error.spec.cc)
 target_link_libraries(error_test gtest gtest_main)
 
 # rolling_buffer tests
-add_executable(rolling_buffer_test ${IO_EXECUTOR_SRCS} ${DB_SOURCES} test/rolling_buffer.spec.cc)
-target_link_libraries(rolling_buffer_test uring gtest gtest_main atomic)
+add_executable(rolling_buffer_test test/rolling_buffer.spec.cc)
+target_link_libraries(rolling_buffer_test hedgedb gtest gtest_main)
 
 # single_buffer_arena_allocator tests
 add_executable(single_buffer_arena_allocator_test test/single_buffer_arena_allocator.spec.cc)
 target_link_libraries(single_buffer_arena_allocator_test gtest gtest_main)
 
 # debug test
-add_executable(index_merge ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/index_merge.spec.cc)
-target_link_libraries(index_merge gtest gtest_main uring atomic hwloc xxhash)
+add_executable(index_merge test/index_merge.spec.cc)
+target_link_libraries(index_merge hedgedb gtest gtest_main tcmalloc)
 
 # concurrent_skiplist tests
 add_executable(concurrent_skiplist_test test/concurrent_skiplist.spec.cc)
 target_link_libraries(concurrent_skiplist_test gtest gtest_main atomic tcmalloc)
 
 # async cond var test
-add_executable(async_cond_var_test ${IO_EXECUTOR_SRCS} test/async_cond_var_test.cc)
-target_link_libraries(async_cond_var_test uring atomic tcmalloc)
+add_executable(async_cond_var_test test/async_cond_var_test.cc)
+target_link_libraries(async_cond_var_test hedgedb_io tcmalloc)
 
-add_executable(async_cond_var_notify_test ${IO_EXECUTOR_SRCS} test/async_cond_var_notify_test.cc)
-target_link_libraries(async_cond_var_notify_test uring atomic tcmalloc)
+add_executable(async_cond_var_notify_test test/async_cond_var_notify_test.cc)
+target_link_libraries(async_cond_var_notify_test hedgedb_io tcmalloc)
 
 # range scan tests
-add_executable(range_scan_test ${DB_SOURCES} ${IO_EXECUTOR_SRCS} test/range_scan.spec.cc)
-target_link_libraries(range_scan_test gtest gtest_main uring atomic hwloc tcmalloc)
+add_executable(range_scan_test test/range_scan.spec.cc)
+target_link_libraries(range_scan_test hedgedb gtest gtest_main tcmalloc)

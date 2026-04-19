@@ -311,9 +311,6 @@ namespace hedge::db
 
         log.log("WAL replay: replayed ", replayed, " entries from ", files.size(), " WAL files");
 
-        for(const auto& wf : files)
-            std::filesystem::remove(wf.path);
-
         return hedge::ok();
     }
 
