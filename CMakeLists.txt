@@ -114,8 +114,6 @@ set(DB_SOURCES
     src/fs/fs.hpp
     src/fs/fs.cc
     src/fs/file_reader2.cc
-    src/db/value_table.cc
-    src/db/value_table.h
     src/db/database.cc
     src/db/database.h
     src/db/sst_manager.h
@@ -201,24 +199,6 @@ target_link_libraries(file_reader_test hedgedb gtest gtest_main)
 # file_reader2 tests
 add_executable(file_reader2_test test/file_reader2.spec.cc)
 target_link_libraries(file_reader2_test hedgedb gtest gtest_main)
-
-# value_table tests — uses file_reader.cc which is not in DB_SOURCES
-set(VALUE_TABLE_TEST_SRCS
-    src/types.h
-    src/utils.cc
-    src/utils.h
-    src/fs/fs.hpp
-    src/fs/fs.cc
-    src/fs/file_reader.cc
-    src/fs/file_reader2.cc
-    src/fs/file_reader.h
-    src/db/value_table.cc
-    src/db/value_table.h
-    src/cache.h
-    src/cache.cc
-)
-add_executable(value_table_test ${VALUE_TABLE_TEST_SRCS} test/value_table.spec.cc)
-target_link_libraries(value_table_test hedgedb_io gtest gtest_main)
 
 # worker tests
 add_executable(worker_test test/worker.spec.cc)

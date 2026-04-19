@@ -16,7 +16,6 @@
 #include "sst_manager.h"
 #include "tmc/task.hpp"
 #include "types.h"
-#include "value_table.h"
 
 namespace hedge::db
 {
@@ -89,19 +88,6 @@ namespace hedge::db
         // --- Value tables ---
         alignas(64) mutable std::shared_mutex _value_tables_mutex{}; ///< Protects access to the `_value_tables` map.
         std::atomic_size_t _last_table_id{0};                        ///< Atomic ID counter for the next value_table file to be created.
-        /// Map storing shared pointers to older, non-current value_table files, keyed by their ID.
-        tsl::robin_map<uint32_t, std::shared_ptr<value_table>> _value_tables;
-
-        // --- Current/Mutable State ---
-        /// Shared pointer to the currently active value_table file where new values are written.
-        std::atomic<std::shared_ptr<value_table>> _current_value_table;
-        std::atomic<std::shared_ptr<value_table>> _pipelined_value_table; // TODO: switch to hedge::expected<...> for signaling potential flush errors
-
-        // --- Write buffers ---
-        /// Each thread should have
-        static constexpr size_t WRITE_BUFFER_DEFAULT_SIZE = 16 * 4096;
-        inline static std::atomic_size_t _thread_count{0};
-        std::vector<std::unique_ptr<thread_write_buffer>> _write_buffers;
 
         // Memtable & flushes
         std::optional<memtable> _memtable;
@@ -213,15 +199,6 @@ namespace hedge::db
         [[nodiscard]] size_t _find_matching_partition_for_key(const key_t& key) const;
 
         /**
-         * @brief Closes the current value table, moves it to the map of older tables, and creates a new active value table.
-         * Called when the current value table is full.
-         * @param rotating Which table pointer we need to rotate. It will be compared with this->_current_value_table in case
-         *                 another thread had already rotate it.
-         * @return Status indicating success or failure.
-         */
-        hedge::expected<std::shared_ptr<value_table>> _rotate_value_table(std::shared_ptr<value_table> rotating);
-
-        /**
          * @brief Internal helper to find the most recent `value_ptr_t` and the corresponding `value_table` for a key.
          * Searches memtable, then relevant sorted_indices. Handles deleted entries.
          * @param key The key to locate.
@@ -229,8 +206,6 @@ namespace hedge::db
          * @return An async task resolving to an expected containing the pair {value_ptr, value_table_ptr} or an error (e.g., KEY_NOT_FOUND, DELETED).
          */
         tmc::task<expected<value_t>> _find_value(const key_t& key);
-
-        std::shared_ptr<value_table> _find_value_table_by_id(uint32_t id);
 
         // Shared initialization helpers used by both make_new and load.
         static hedge::status _validate_config(const db_config& config);
