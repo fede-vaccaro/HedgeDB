@@ -43,8 +43,8 @@ struct _NullStream
 #define FOLLY_LIKELY(x) __builtin_expect(!!(x), 1)
 #endif
 
-#include "async/io_executor.h"
 #include "db/memtable.h"
+#include "io/io_executor.h"
 #include "types.h"
 
 // ---------------------------------------------------------------------------
@@ -53,21 +53,21 @@ struct _NullStream
 
 static hedge::key_t make_key(uint64_t)
 {
-    std::array<uint8_t, 24> bytes{};
+    std::array<std::byte, 24> bytes{};
     thread_local std::mt19937_64 rng{std::random_device{}()};
-    std::uniform_int_distribution<uint8_t> dist;
+    std::uniform_int_distribution<uint8_t> dist{0, 255};
     for(auto& byte : bytes)
-        byte = dist(rng);
+        byte = static_cast<std::byte>(dist(rng));
     return hedge::key_t(bytes);
 }
 
-static const std::vector<uint8_t> DUMMY_VALUE = []()
+static const std::vector<std::byte> DUMMY_VALUE = []()
 {
-    std::vector<uint8_t> dummy(100);
+    std::vector<std::byte> dummy(100);
     std::mt19937_64 rng{std::random_device{}()};
-    std::uniform_int_distribution<uint8_t> dist;
+    std::uniform_int_distribution<uint8_t> dist{0, 255};
     for(auto& byte : dummy)
-        byte = dist(rng);
+        byte = static_cast<std::byte>(dist(rng));
     return dummy;
 }();
 
@@ -109,13 +109,12 @@ int main()
     for(size_t tid = 0; tid < N_THREADS; ++tid)
     {
         threads.emplace_back([&mt, tid]()
-        {
+                             {
             // hedge::async::executor_context::set_affinity(tid).resume();
             for(size_t i = tid; i < N; i += N_THREADS)
             {
                 mt.put_sync(make_key(i), DUMMY_VALUE, hedge::value_type::IN_PLACE_VALUE);
-            }
-        });
+            } });
     }
 
     for(auto& t : threads)

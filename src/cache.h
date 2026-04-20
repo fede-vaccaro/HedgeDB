@@ -98,7 +98,7 @@ namespace hedge::db
         struct read_page_guard
         {
             read_page_guard() = default;
-            read_page_guard(uint8_t* data, size_t idx, _metadata* frame);
+            read_page_guard(std::byte* data, size_t idx, _metadata* frame);
             ~read_page_guard();
 
             read_page_guard(const read_page_guard&) = delete;
@@ -107,13 +107,13 @@ namespace hedge::db
             read_page_guard(read_page_guard&& other) noexcept;
             read_page_guard& operator=(read_page_guard&& other) noexcept;
 
-            uint8_t* data{nullptr};
+            std::byte* data{nullptr};
             size_t offset{0}; // TODO: REMOVE THIS. This field is only used for debugging and testing purposes, it is not used for any logic in the cache implementation.
 
             [[nodiscard]] const _metadata* frame() const { return this->_frame; }
 
-            [[nodiscard]] const uint8_t* begin() const { return this->data + offset; }
-            [[nodiscard]] const uint8_t* end() const { return this->data + +offset + PAGE_SIZE_IN_BYTES; }
+            [[nodiscard]] const std::byte* begin() const { return this->data + offset; }
+            [[nodiscard]] const std::byte* end() const { return this->data + offset + PAGE_SIZE_IN_BYTES; }
 
         private:
             friend struct awaitable_page_guard;
@@ -124,7 +124,7 @@ namespace hedge::db
         struct write_page_guard
         {
             write_page_guard() = default;
-            write_page_guard(uint8_t* data, size_t idx, _metadata* frame);
+            write_page_guard(std::byte* data, size_t idx, _metadata* frame);
             ~write_page_guard();
 
             write_page_guard(const write_page_guard&) = delete;
@@ -133,7 +133,7 @@ namespace hedge::db
             write_page_guard(write_page_guard&& other) noexcept;
             write_page_guard& operator=(write_page_guard&& other) noexcept;
 
-            uint8_t* data{nullptr};
+            std::byte* data{nullptr};
             size_t idx{0};
 
         private:

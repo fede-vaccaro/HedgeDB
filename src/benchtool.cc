@@ -35,7 +35,7 @@ namespace hedge::db
     static constexpr uint64_t OP_SEED = 0x12345678;
     static constexpr size_t NVALUES = 1024;
 
-    using values_t = std::vector<std::vector<uint8_t>>;
+    using values_t = std::vector<std::vector<std::byte>>;
 
     struct bench_config
     {
@@ -99,7 +99,7 @@ namespace hedge::db
             std::mt19937 gen(static_cast<uint32_t>(slot));
             std::uniform_int_distribution<uint8_t> dist(0, 255);
             for(auto& b : values[slot])
-                b = dist(gen);
+                b = static_cast<std::byte>(dist(gen));
         }
         return values;
     }
@@ -163,7 +163,7 @@ namespace hedge::db
     }
 
     static void run_load(const std::shared_ptr<database>& db, const values_t& values,
-                          size_t n, size_t vsize)
+                         size_t n, size_t vsize)
     {
         auto worker = [](size_t tid, size_t n,
                          const std::shared_ptr<database>& db, const values_t& values) -> tmc::task<void>

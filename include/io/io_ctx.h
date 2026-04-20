@@ -86,7 +86,7 @@ namespace hedge::io
             return &this->_uring;
         }
 
-        void register_page_buffers(const std::vector<uint8_t*>& buffers)
+        void register_page_buffers(const std::vector<std::byte*>& buffers)
         {
             this->_registered_page_buffers.resize(buffers.size());
             size_t c = 0;

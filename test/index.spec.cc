@@ -6,7 +6,7 @@
 
 #include <gtest/gtest.h>
 
-#include "async/io_executor.h"
+#include "io/io_executor.h"
 #include "async/wait_group.h"
 #include "cache.h"
 #include "db/index_ops.h"
@@ -17,7 +17,7 @@
 
 uint32_t uuid_fake_size(const uuids::uuid& uuid)
 {
-    const auto& uuids_as_std_array = reinterpret_cast<const std::array<uint8_t, 16>&>(uuid);
+    const auto& uuids_as_std_array = reinterpret_cast<const std::array<std::byte, 16>&>(uuid);
     return uuids_as_std_array[0] + (uuids_as_std_array[1] % 125); // Just a fake size based on the first two bytes
 };
 

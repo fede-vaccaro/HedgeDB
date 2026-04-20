@@ -27,14 +27,14 @@ namespace hedge::db
         if(ptr == nullptr)
             throw std::runtime_error("Failed to allocate memory for page cache");
 
-        auto* uint_ptr = static_cast<uint8_t*>(ptr);
-        std::fill_n(uint_ptr, this->_max_page_capacity * PAGE_SIZE_IN_BYTES, 0);
+        auto* uint_ptr = static_cast<std::byte*>(ptr);
+        std::fill_n(uint_ptr, this->_max_page_capacity * PAGE_SIZE_IN_BYTES, std::byte(0));
         this->_data = buffer_t(uint_ptr, std::free);
     }
 
     // --- read_page_guard Implementation ---
 
-    page_cache::read_page_guard::read_page_guard(uint8_t* data, size_t idx, _metadata* frame)
+    page_cache::read_page_guard::read_page_guard(std::byte* data, size_t idx, _metadata* frame)
         : data(data), offset(idx), _frame(frame)
     {
         assert(this->_frame != nullptr);
@@ -69,7 +69,7 @@ namespace hedge::db
 
     // --- write_page_guard Implementation ---
 
-    page_cache::write_page_guard::write_page_guard(uint8_t* data, size_t idx, _metadata* frame)
+    page_cache::write_page_guard::write_page_guard(std::byte* data, size_t idx, _metadata* frame)
         : data(data), idx(idx), _frame(frame)
     {
         assert(this->_frame != nullptr);

@@ -54,17 +54,17 @@ namespace hedge::db
         return h % NUM_CACHED_VALUES;
     }
 
-    static std::unordered_map<size_t, std::vector<uint8_t>> pregenerate_values(size_t payload_size)
+    static std::unordered_map<size_t, std::vector<std::byte>> pregenerate_values(size_t payload_size)
     {
-        std::unordered_map<size_t, std::vector<uint8_t>> values;
+        std::unordered_map<size_t, std::vector<std::byte>> values;
         values.reserve(NUM_CACHED_VALUES);
         for(size_t slot = 0; slot < NUM_CACHED_VALUES; ++slot)
         {
-            std::vector<uint8_t> v(payload_size);
+            std::vector<std::byte> v(payload_size);
             std::mt19937 gen(static_cast<uint32_t>(slot));
             std::uniform_int_distribution<uint8_t> dist(0, 255);
             for(auto& b : v)
-                b = dist(gen);
+                b = static_cast<std::byte>(dist(gen));
             values[slot] = std::move(v);
         }
         return values;

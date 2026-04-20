@@ -17,8 +17,8 @@ namespace hedge::db
     public:
         static hedge::expected<quotient_filter> make(uint32_t q, uint32_t r);
 
-        static hedge::expected<quotient_filter> load(const uint8_t* header_data,
-                                                     const uint8_t* table_data,
+        static hedge::expected<quotient_filter> load(const std::byte* header_data,
+                                                     const std::byte* table_data,
                                                      size_t table_size);
 
         quotient_filter(quotient_filter&& other) noexcept
@@ -72,9 +72,9 @@ namespace hedge::db
 
         void clear();
 
-        [[nodiscard]] std::span<const uint8_t> data_as_byte_span() const;
+        [[nodiscard]] std::span<const std::byte> data_as_byte_span() const;
 
-        [[nodiscard]] std::span<const uint8_t> header_as_byte_span() const;
+        [[nodiscard]] std::span<const std::byte> header_as_byte_span() const;
 
     private:
         void _free();

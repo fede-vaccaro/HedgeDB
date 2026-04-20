@@ -7,8 +7,8 @@
 #include <iostream>
 #include <vector>
 
-#include "async/io_executor.h"
 #include "async/task.h"
+#include "io/io_executor.h"
 
 using namespace hedge::async;
 
@@ -31,16 +31,16 @@ struct test_executor : public ::testing::Test
 
 constexpr size_t PAGE_SIZE = 4096;
 
-std::unique_ptr<uint8_t> aligned_alloc(size_t size)
+std::unique_ptr<std::byte> aligned_alloc(size_t size)
 {
-    uint8_t* ptr = nullptr;
+    std::byte* ptr = nullptr;
     if(posix_memalign((void**)&ptr, PAGE_SIZE, size) != 0) // todo: preallocate some memory for 4 KB pages
     {
         perror("posix_memalign failed");
         throw std::runtime_error("Failed to allocate aligned memory for buffers");
     }
 
-    return std::unique_ptr<uint8_t>(ptr);
+    return std::unique_ptr<std::byte>(ptr);
 }
 
 TEST_F(test_executor, test_read_simple)
@@ -97,7 +97,10 @@ TEST_F(test_executor, test_write_simple)
     ASSERT_NE(fd, -1) << "Failed to open file: " << strerror(errno);
 
     std::string input_data = "Hello, World!";
-    std::vector<uint8_t> buffer(input_data.begin(), input_data.end());
+    std::vector<std::byte> buffer;
+    buffer.reserve(input_data.size());
+    for(char c : input_data)
+        buffer.push_back(static_cast<std::byte>(c));
 
     auto fallocate_res = fallocate(fd, 0, 0, buffer.size());
     ASSERT_EQ(fallocate_res, 0) << "Failed to preallocate file space: " << strerror(errno);
@@ -164,7 +167,7 @@ TEST_F(test_executor, test_open_fallocate_write)
             co_return;
         }
 
-        uint8_t* input_data_ptr = reinterpret_cast<uint8_t*>(input_data.data());
+        std::byte* input_data_ptr = reinterpret_cast<std::byte*>(input_data.data());
 
         auto write_response = co_await this->_executor->submit_request(write_request{response.file_descriptor, input_data_ptr, input_data.size(), 0});
 

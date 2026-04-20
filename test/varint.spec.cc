@@ -26,10 +26,10 @@ namespace hedge::test
 
     TEST_F(VarintTest, UnsafeVarintEncode32)
     {
-        uint8_t buffer[MAX_VARINT_LENGTH_32];
+        std::byte buffer[MAX_VARINT_LENGTH_32];
 
         // 0
-        uint8_t* end = unsafe_varint(0U, buffer);
+        std::byte* end = unsafe_varint(0U, buffer);
         EXPECT_EQ(end - buffer, 1);
         EXPECT_EQ(buffer[0], 0);
 
@@ -59,10 +59,10 @@ namespace hedge::test
 
     TEST_F(VarintTest, UnsafeVarintEncode64)
     {
-        uint8_t buffer[MAX_VARINT_LENGTH_64];
+        std::byte buffer[MAX_VARINT_LENGTH_64];
 
         // Max 64-bit
-        uint8_t* end = unsafe_varint(std::numeric_limits<uint64_t>::max(), buffer);
+        std::byte* end = unsafe_varint(std::numeric_limits<uint64_t>::max(), buffer);
         EXPECT_EQ(end - buffer, 10);
         for(int i = 0; i < 9; ++i)
         {
@@ -83,11 +83,11 @@ namespace hedge::test
             test_values.push_back(static_cast<uint32_t>(rng()));
         }
 
-        uint8_t buffer[MAX_VARINT_LENGTH_32];
+        std::byte buffer[MAX_VARINT_LENGTH_32];
         for(uint32_t val : test_values)
         {
-            uint8_t* end = unsafe_varint(val, buffer);
-            std::span<uint8_t> span(buffer, end - buffer);
+            std::byte* end = unsafe_varint(val, buffer);
+            std::span<std::byte> span(buffer, end - buffer);
             auto res = try_decode_varint(span);
             ASSERT_TRUE(res.has_value()) << "Failed to decode value: " << val;
             EXPECT_EQ(res.value().first, val);
@@ -108,11 +108,11 @@ namespace hedge::test
             test_values.push_back(rng());
         }
 
-        uint8_t buffer[MAX_VARINT_LENGTH_64];
+        std::byte buffer[MAX_VARINT_LENGTH_64];
         for(uint64_t val : test_values)
         {
-            uint8_t* end = unsafe_varint(val, buffer);
-            std::span<uint8_t> span(buffer, end - buffer);
+            std::byte* end = unsafe_varint(val, buffer);
+            std::span<std::byte> span(buffer, end - buffer);
             auto res = try_decode_varint(span);
             ASSERT_TRUE(res.has_value()) << "Failed to decode value: " << val;
             EXPECT_EQ(res.value().first, val);
@@ -122,7 +122,7 @@ namespace hedge::test
     TEST_F(VarintTest, DecodeFastPathExplicit)
     {
         // Make a buffer larger than 10 bytes to trigger fast path
-        uint8_t buffer[20];
+        std::byte buffer[20];
 
         // Encode 12345
         // 12345 = 0x3039
@@ -133,12 +133,12 @@ namespace hedge::test
         // Encode: 0x39 | 0x80 = 0xB9, 0x60
 
         uint64_t val = 12345;
-        uint8_t* end = unsafe_varint(val, buffer);
+        std::byte* end = unsafe_varint(val, buffer);
         // Fill remainder with garbage
         std::fill(end, buffer + 20, 0xCC);
 
         // Pass large span
-        std::span<uint8_t> span(buffer, 20);
+        std::span<std::byte> span(buffer, 20);
         auto res = try_decode_varint(span);
         ASSERT_TRUE(res.has_value());
         EXPECT_EQ(res.value().first, val);
@@ -147,8 +147,8 @@ namespace hedge::test
     TEST_F(VarintTest, DecodeFailTooFewBytes)
     {
         // A single byte with MSB set, but no more bytes
-        uint8_t buffer[] = {0x80};
-        std::span<uint8_t> span(buffer, 1);
+        std::byte buffer[] = {0x80};
+        std::span<std::byte> span(buffer, 1);
         auto res = try_decode_varint(span);
         EXPECT_FALSE(res.has_value());
         EXPECT_EQ(res.error().to_string(), "too few bytes");
@@ -157,10 +157,10 @@ namespace hedge::test
     TEST_F(VarintTest, DecodeFailTooManyBytes)
     {
         // 10 bytes all with MSB set (continuation)
-        uint8_t buffer[10];
+        std::byte buffer[10];
         std::fill(std::begin(buffer), std::end(buffer), 0x80);
 
-        std::span<uint8_t> span(buffer, 10);
+        std::span<std::byte> span(buffer, 10);
         // This hits the fast path because size >= 10
         auto res = try_decode_varint(span);
         EXPECT_FALSE(res.has_value());
@@ -171,7 +171,7 @@ namespace hedge::test
     {
         // Test all possible lengths (1 to 10 bytes) in fast path
         // We need a buffer >= 10 bytes to trigger fast path.
-        uint8_t buffer[20];
+        std::byte buffer[20];
 
         // Values that require 1, 2, ..., 10 bytes
         // 1 byte: 1
@@ -186,14 +186,14 @@ namespace hedge::test
 
             // Encode manually or using unsafe_varint?
             // Using unsafe_varint is fine as we trust it (tested above)
-            uint8_t* end = unsafe_varint(val, buffer);
+            std::byte* end = unsafe_varint(val, buffer);
             size_t encoded_len = end - buffer;
             EXPECT_EQ(encoded_len, i + 1) << "Length mismatch for i=" << i;
 
             // Fill rest with garbage
             std::fill(end, buffer + 20, 0xAA);
 
-            std::span<uint8_t> span(buffer, 20);
+            std::span<std::byte> span(buffer, 20);
             auto res = try_decode_varint(span);
             ASSERT_TRUE(res.has_value()) << "Failed for length " << (i + 1);
             EXPECT_EQ(res.value().first, val);

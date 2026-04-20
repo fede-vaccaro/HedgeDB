@@ -25,7 +25,7 @@ namespace
         size_t epoch;
         uint64_t seq_nr;
         hedge::key_t key;
-        std::vector<uint8_t> value;
+        std::vector<std::byte> value;
     };
 
     struct wal_file_info
@@ -45,7 +45,7 @@ namespace
         if(file_size == 0)
             throw std::runtime_error("wal file " + path.string() + " is empty");
 
-        std::vector<uint8_t> buffer(file_size);
+        std::vector<std::byte> buffer(file_size);
         ssize_t bytes_read = ::pread(file.fd(), buffer.data(), file_size, 0);
         if(bytes_read <= 0)
             throw std::runtime_error("failed to read wal file " + path.string());
@@ -88,8 +88,8 @@ namespace
                 break;
             }
 
-            uint8_t encoded_key_size;
-            if(!read_from_buf(&encoded_key_size, sizeof(uint8_t)))
+            std::byte encoded_key_size;
+            if(!read_from_buf(&encoded_key_size, sizeof(std::byte)))
             {
                 co_yield hedge::error(std::format("incomplete WAL entry key size in file {} at offset {}", path.string(), offset()));
                 break;
@@ -98,7 +98,7 @@ namespace
             size_t key_size = hedge::decode_key_size(encoded_key_size);
             if(key_size > hedge::MAX_KEY_LEN)
             {
-                co_yield hedge::error(std::format("invalid encoded key size {} in WAL entry in file {} at offset {}", encoded_key_size, path.string(), offset()));
+                co_yield hedge::error(std::format("invalid encoded key size {} in WAL entry in file {} at offset {}", std::to_integer<int>(encoded_key_size), path.string(), offset()));
                 break;
             }
 
@@ -116,7 +116,7 @@ namespace
                 break;
             }
 
-            std::vector<uint8_t> value(value_size);
+            std::vector<std::byte> value(value_size);
             if(!read_from_buf(value.data(), value_size))
             {
                 co_yield hedge::error(std::format("incomplete WAL entry value in file {} at offset {}", path.string(), offset()));
@@ -132,7 +132,7 @@ namespace
 
             // Recompute checksum and compare
             hasher.update(&seq_nr, sizeof(uint64_t));
-            hasher.update(&encoded_key_size, sizeof(uint8_t));
+            hasher.update(&encoded_key_size, sizeof(std::byte));
             hasher.update(key.data(), key.size());
             hasher.update(&value_size, sizeof(uint16_t));
             hasher.update(value.data(), value_size);
@@ -247,7 +247,7 @@ namespace hedge::db
     }
 
     hedge::status wal::_write_entry(int32_t fd, uint64_t seq_nr,
-                                    const key_t& key, std::span<const uint8_t> value)
+                                    const key_t& key, std::span<const std::byte> value)
     {
         uint8_t encoded_key_size = hedge::encode_key_size(key.size());
         auto value_size = static_cast<uint16_t>(value.size());
@@ -257,9 +257,9 @@ namespace hedge::db
         std::array<iovec, 6> entry{
             iovec{.iov_base = &seq_nr, .iov_len = sizeof(uint64_t)},
             iovec{.iov_base = &encoded_key_size, .iov_len = sizeof(uint8_t)},
-            iovec{.iov_base = const_cast<uint8_t*>(key.data()), .iov_len = key.size()},
+            iovec{.iov_base = const_cast<std::byte*>(key.data()), .iov_len = key.size()},
             iovec{.iov_base = &value_size, .iov_len = sizeof(uint16_t)},
-            iovec{.iov_base = const_cast<uint8_t*>(value.data()), .iov_len = value.size()},
+            iovec{.iov_base = const_cast<std::byte*>(value.data()), .iov_len = value.size()},
             iovec{.iov_base = &checksum, .iov_len = sizeof(uint32_t)}};
 
         // Update hasher with all entry components except the checksum itself
@@ -286,13 +286,13 @@ namespace hedge::db
     }
 
     hedge::status wal::append(size_t thread_idx, uint64_t seq_nr,
-                              const key_t& key, std::span<const uint8_t> value)
+                              const key_t& key, std::span<const std::byte> value)
     {
         return _write_entry(_files[thread_idx].fd(), seq_nr, key, value);
     }
 
     hedge::status wal::replay(const std::filesystem::path& path,
-                              const std::function<bool(const key_t&, std::span<const uint8_t>, uint64_t)>& on_entry,
+                              const std::function<bool(const key_t&, std::span<const std::byte>, uint64_t)>& on_entry,
                               logger& log)
     {
         auto files = collect_wal_files(path);

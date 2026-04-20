@@ -28,7 +28,7 @@
 namespace hedge::db
 {
 
-    std::pair<bool, uint64_t> skiplist_wrapper::insert(const key_t& key, std::span<const uint8_t> value)
+    std::pair<bool, uint64_t> skiplist_wrapper::insert(const key_t& key, std::span<const std::byte> value)
     {
         try
         {
@@ -42,7 +42,7 @@ namespace hedge::db
         }
     }
 
-    std::optional<std::span<const uint8_t>> skiplist_wrapper::get(const key_t& key) const
+    std::optional<std::span<const std::byte>> skiplist_wrapper::get(const key_t& key) const
     {
         Accessor acc(const_cast<skiplist_wrapper*>(this));
         auto it = acc.lower_bound(memtable_entry(key, UINT64_MAX, {}));
@@ -111,7 +111,7 @@ namespace hedge::db
             this->_cfg.memory_budget_cap);
     }
 
-    tmc::task<hedge::status> memtable::put_async(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type)
+    tmc::task<hedge::status> memtable::put_async(const key_t& key, std::span<const std::byte> value, hedge::value_type value_type)
     {
         // Loading from an atomic shared every time is slow AF since it is (at the time being) implemented through a spinlock
         // This is a thread-local cache
@@ -154,12 +154,12 @@ namespace hedge::db
 
             auto* value_ptr = memtable->value_arenas[THIS_THREAD_IDX % this->_cfg.num_writer_threads]->allocate_many(value.size() + 1, VALUE_DATA_ALIGNMENT);
             bool ok = value_ptr != nullptr; // nullptr means out of memory budget
-            std::span<uint8_t> value_span(value_ptr, value.size() + 1);
+            std::span<std::byte> value_span(value_ptr, value.size() + 1);
             uint64_t seq_nr;
 
             if(ok)
             {
-                value_span[0] = static_cast<uint8_t>(value_type);
+                value_span[0] = static_cast<std::byte>(value_type);
                 std::memcpy(value_span.data() + 1, value.data(), value.size());
                 std::tie(ok, seq_nr) = memtable->insert(key, value_span); // returns false if memtable run out of memory (budget)
             }
@@ -384,7 +384,7 @@ namespace hedge::db
 
         auto status = wal::replay(
             this->_indices_path,
-            [&](const key_t& key, std::span<const uint8_t> value, uint64_t seq_nr) -> bool
+            [&](const key_t& key, std::span<const std::byte> value, uint64_t seq_nr) -> bool
             {
                 auto* ptr = mt->value_arenas[0]->allocate_many(value.size(), VALUE_DATA_ALIGNMENT);
                 if(ptr == nullptr)

@@ -34,7 +34,7 @@ namespace hedge::db
         size_t footer_page_size = hedge::round_up(sizeof(sst_footer), PAGE_SIZE_IN_BYTES);
         size_t footer_offset = fd.file_size() - footer_page_size;
 
-        page_aligned_buffer<uint8_t> footer_buf(footer_page_size);
+        page_aligned_buffer<std::byte> footer_buf(footer_page_size);
         int res = pread(fd.fd(), footer_buf.data(), footer_page_size, footer_offset);
         if(res < 0 || static_cast<size_t>(res) != footer_page_size)
             return hedge::error("sst::load: failed to read footer from " + path.string());
@@ -52,7 +52,7 @@ namespace hedge::db
         page_aligned_buffer<key_t> meta_index(footer.meta_index_entries);
         if(meta_size > 0)
         {
-            page_aligned_buffer<uint8_t> raw_meta(meta_size);
+            page_aligned_buffer<std::byte> raw_meta(meta_size);
             res = pread(fd.fd(), raw_meta.data(), meta_size, footer.meta_index_offset);
             if(res < 0 || static_cast<size_t>(res) != meta_size)
                 return hedge::error("sst::load: failed to read meta-index from " + path.string());
@@ -69,14 +69,14 @@ namespace hedge::db
         std::optional<quotient_filter> qf;
         if(footer.qf_size > 0)
         {
-            page_aligned_buffer<uint8_t> qf_header_buf(PAGE_SIZE_IN_BYTES);
+            page_aligned_buffer<std::byte> qf_header_buf(PAGE_SIZE_IN_BYTES);
             res = pread(fd.fd(), qf_header_buf.data(), PAGE_SIZE_IN_BYTES, footer.qf_offset);
             if(res < 0 || static_cast<size_t>(res) != PAGE_SIZE_IN_BYTES)
                 return hedge::error("sst::load: failed to read QF header from " + path.string());
 
             size_t data_size = footer.qf_size - PAGE_SIZE_IN_BYTES;
             size_t data_read_size = hedge::ceil_page_align(data_size);
-            page_aligned_buffer<uint8_t> qf_data_buf(data_read_size);
+            page_aligned_buffer<std::byte> qf_data_buf(data_read_size);
             res = pread(fd.fd(), qf_data_buf.data(), data_read_size, footer.qf_offset + PAGE_SIZE_IN_BYTES);
             if(res < 0 || static_cast<size_t>(res) != data_read_size)
                 return hedge::error("sst::load: failed to read QF data from " + path.string());
@@ -186,7 +186,7 @@ namespace hedge::db
         // TODO
     }
 
-    hedge::expected<value_t> sst::_find_in_page(const key_t& key, const uint8_t* page)
+    hedge::expected<value_t> sst::_find_in_page(const key_t& key, const std::byte* page)
     {
         block_decoder reader(page);
         if(!reader.sanity_check())
@@ -230,11 +230,11 @@ namespace hedge::db
                     meta_index_range_end = meta_index_range_begin + last_page_size;
             }
 
-            const auto* prefetch_ptr = reinterpret_cast<const uint8_t*>(meta_index_range_begin);
-            const auto* prefetch_end_ptr = reinterpret_cast<const uint8_t*>(meta_index_range_end);
+            const auto* prefetch_ptr = reinterpret_cast<const std::byte*>(meta_index_range_begin);
+            const auto* prefetch_end_ptr = reinterpret_cast<const std::byte*>(meta_index_range_end);
 
             // // Prefetch meta index page entries
-            for(const uint8_t* ptr = prefetch_ptr; ptr < prefetch_end_ptr; ptr += 64)
+            for(const std::byte* ptr = prefetch_ptr; ptr < prefetch_end_ptr; ptr += 64)
                 __builtin_prefetch(ptr);
         }
 

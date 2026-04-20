@@ -67,7 +67,7 @@ namespace hedge::db
         template <typename T, size_t PAGE_SIZE = PAGE_SIZE_IN_BYTES>
         static page_aligned_buffer<key_t> create_super_index(const page_aligned_buffer<key_t>& meta_index);
 
-        static void append_meta_index_key(page_aligned_buffer<uint8_t>& buffer, const std::span<const uint8_t>& key_span)
+        static void append_meta_index_key(page_aligned_buffer<std::byte>& buffer, const std::span<const std::byte>& key_span)
         {
             size_t buf_size = buffer.size();
 

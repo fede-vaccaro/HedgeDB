@@ -16,7 +16,7 @@ namespace hedge
         explicit single_buffer_arena_allocator(size_t size)
             : _capacity(size),
               _offset(0),
-              _buffer(std::unique_ptr<uint8_t[], decltype(&std::free)>(static_cast<uint8_t*>(std::aligned_alloc(16, size)), &std::free))
+              _buffer(std::unique_ptr<std::byte[], decltype(&std::free)>(static_cast<std::byte*>(std::aligned_alloc(16, size)), &std::free))
         {
             assert(reinterpret_cast<uintptr_t>(this->_buffer.get()) % 16 == 0);
         }
@@ -27,7 +27,7 @@ namespace hedge
         single_buffer_arena_allocator& operator=(single_buffer_arena_allocator&&) = delete;
         ~single_buffer_arena_allocator() = default;
 
-        std::span<uint8_t> allocate(size_t bytes)
+        std::span<std::byte> allocate(size_t bytes)
         {
             constexpr size_t alignment = 16;
             size_t aligned_bytes = (bytes + alignment - 1) & ~(alignment - 1);
@@ -65,6 +65,6 @@ namespace hedge
     private:
         size_t _capacity;
         std::atomic<size_t> _offset;
-        std::unique_ptr<uint8_t[], decltype(&std::free)> _buffer;
+        std::unique_ptr<std::byte[], decltype(&std::free)> _buffer;
     };
 } // namespace hedge

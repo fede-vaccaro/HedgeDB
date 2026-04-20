@@ -66,15 +66,15 @@ namespace hedge::db
 
     public:
         skiplist_wrapper(std::atomic_uint64_t* seq_nr, size_t /*budget*/)
-            : skiplist_t(24, std::allocator<uint8_t>{}),
+            : skiplist_t(24, std::allocator<std::byte>{}),
               _accessor(this),
               _seq_nr(seq_nr)
         {
         }
 
-        std::pair<bool, uint64_t> insert(const key_t& key, std::span<const uint8_t> value);
+        std::pair<bool, uint64_t> insert(const key_t& key, std::span<const std::byte> value);
 
-        [[nodiscard]] std::optional<std::span<const uint8_t>> get(const key_t& key) const;
+        [[nodiscard]] std::optional<std::span<const std::byte>> get(const key_t& key) const;
 
         Accessor accessor() { return Accessor(this); }
 
@@ -88,7 +88,7 @@ namespace hedge::db
     struct memtable_inner : skiplist_wrapper
     {
         alignas(64) std::atomic_size_t bytes_written{0};
-        std::vector<std::unique_ptr<hedge::db::arena_allocator<uint8_t>>> value_arenas; // One-per-thread, the values get stored here
+        std::vector<std::unique_ptr<hedge::db::arena_allocator<std::byte>>> value_arenas; // One-per-thread, the values get stored here
         std::optional<wal> _wal;
 
         memtable_inner(std::atomic_uint64_t* seq_nr,
@@ -103,7 +103,7 @@ namespace hedge::db
         {
             value_arenas.reserve(n_threads);
             for(auto i = 0UL; i < n_threads; ++i)
-                value_arenas.emplace_back(std::make_unique<hedge::db::arena_allocator<uint8_t>>(value_memory_budget));
+                value_arenas.emplace_back(std::make_unique<hedge::db::arena_allocator<std::byte>>(value_memory_budget));
 
             if(use_wal)
             {
@@ -194,7 +194,7 @@ namespace hedge::db
         // This method needs to be asynchronous (::task<...>) because
         // in case of pressure (arriving from the pending compactions or pending flushes)
         // it cooperatively yields (to other task or threads)
-        tmc::task<hedge::status> put_async(const key_t& key, std::span<const uint8_t> value, hedge::value_type value_type);
+        tmc::task<hedge::status> put_async(const key_t& key, std::span<const std::byte> value, hedge::value_type value_type);
 
         std::optional<value_t> get(const key_t& key) const;
 

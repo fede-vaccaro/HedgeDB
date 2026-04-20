@@ -20,7 +20,7 @@
 #include <vector>
 #include <xxh64.hpp>
 
-#include "async/io_executor.h"
+#include "io/io_executor.h"
 #include "async/task.h"
 #include "async/wait_group.h"
 #include "db/database.h"
@@ -33,7 +33,7 @@ namespace hedge::db
     static constexpr size_t NUM_CACHED_VALUES = 1024;
     static constexpr uint32_t BATCH_SIZE = 1;
 
-    using kv_pair_t = std::pair<key_t, std::vector<uint8_t>>;
+    using kv_pair_t = std::pair<key_t, std::vector<std::byte>>;
 
     static key_t make_key(size_t i)
     {
@@ -51,16 +51,16 @@ namespace hedge::db
         return h % NUM_CACHED_VALUES;
     }
 
-    static std::vector<std::vector<uint8_t>> pregenerate_values(size_t payload_size)
+    static std::vector<std::vector<std::byte>> pregenerate_values(size_t payload_size)
     {
-        std::vector<std::vector<uint8_t>> values(NUM_CACHED_VALUES);
+        std::vector<std::vector<std::byte>> values(NUM_CACHED_VALUES);
         for(size_t slot = 0; slot < NUM_CACHED_VALUES; ++slot)
         {
             values[slot].resize(payload_size);
             std::mt19937 gen(static_cast<uint32_t>(slot));
             std::uniform_int_distribution<uint8_t> dist(0, 255);
             for(auto& b : values[slot])
-                b = dist(gen);
+                b = static_cast<std::byte>(dist(gen));
         }
         return values;
     }

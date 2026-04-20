@@ -46,7 +46,7 @@ namespace hedge::fs
         void CreateTestFile(size_t size)
         {
             std::ofstream ofs(TEST_FILE, std::ios::binary);
-            std::vector<uint8_t> buffer(PAGE_SIZE_IN_BYTES);
+            std::vector<std::byte> buffer(PAGE_SIZE_IN_BYTES);
 
             size_t written = 0;
             while(written < size)
@@ -56,7 +56,7 @@ namespace hedge::fs
 
                 for(size_t j = 0; j < PAGE_SIZE_IN_BYTES; ++j)
                 {
-                    buffer[j] = (j < chunk) ? static_cast<uint8_t>((written + j) % 256) : 0;
+                    buffer[j] = (j < chunk) ? static_cast<std::byte>((written + j) % 256) : 0;
                 }
 
                 ofs.write(reinterpret_cast<const char*>(buffer.data()), PAGE_SIZE_IN_BYTES);
@@ -100,7 +100,7 @@ namespace hedge::fs
                     continue;
                 }
 
-                std::span<const uint8_t> data_span(req.buffer.data(), static_cast<size_t>(result));
+                std::span<const std::byte> data_span(req.buffer.data(), static_cast<size_t>(result));
 
                 for(size_t i = 0; i < data_span.size(); ++i)
                 {
@@ -117,7 +117,7 @@ namespace hedge::fs
                     }
                     else
                     {
-                        uint8_t expected = static_cast<uint8_t>(file_abs_offset % 256);
+                        std::byte expected = static_cast<std::byte>(file_abs_offset % 256);
 
                         if(data_span[i] != expected)
                         {

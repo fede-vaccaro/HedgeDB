@@ -124,7 +124,7 @@ namespace hedge::db
         size_t written = 0;
 
         auto header_span = qf.header_as_byte_span();
-        page_aligned_buffer<uint8_t> header_buf(PAGE_SIZE_IN_BYTES);
+        page_aligned_buffer<std::byte> header_buf(PAGE_SIZE_IN_BYTES);
         std::memcpy(header_buf.data(), header_span.data(), header_span.size());
 
         int32_t res = co_await hedge::io::write(fd, header_buf.data(), PAGE_SIZE_IN_BYTES, offset);
@@ -134,7 +134,7 @@ namespace hedge::db
 
         auto data_span = qf.data_as_byte_span();
         size_t data_size = hedge::ceil_page_align(data_span.size());
-        page_aligned_buffer<uint8_t> data_buf(data_size);
+        page_aligned_buffer<std::byte> data_buf(data_size);
         std::memcpy(data_buf.data(), data_span.data(), data_span.size());
 
         res = co_await hedge::io::write(fd, data_buf.data(), data_size, offset + written);
@@ -200,7 +200,7 @@ namespace hedge::db
         skiplist_t::Accessor::const_iterator skiplist_end,
         std::optional<quotient_filter>& qf,
         page_aligned_buffer<key_t>& meta_index,
-        page_aligned_buffer<uint8_t>& encoded_meta_index)
+        page_aligned_buffer<std::byte>& encoded_meta_index)
     {
         constexpr size_t WRITE_BUF_SIZE = 1 * MiB;
 
@@ -288,7 +288,7 @@ namespace hedge::db
         auto file_id = file.id();
 
         auto meta_index = page_aligned_buffer<key_t>(0, sst_estimated_size.meta_index_size / sizeof(key_t));
-        auto encoded_meta_index = page_aligned_buffer<uint8_t>(0, sst_estimated_size.meta_index_size);
+        auto encoded_meta_index = page_aligned_buffer<std::byte>(0, sst_estimated_size.meta_index_size);
 
         // Write index entries using a merge_write_buffer to block encoding.
         auto maybe_index_infos = co_await _write_index(fd, file_id, skiplist_begin, skiplist_end, qf, meta_index, encoded_meta_index);
@@ -336,7 +336,7 @@ namespace hedge::db
         footer_buf[0] = footer;
 
         // Write footer
-        int32_t footer_res = co_await hedge::io::write(fd, reinterpret_cast<uint8_t*>(footer_buf.data()), PAGE_SIZE_IN_BYTES, bytes_written);
+        int32_t footer_res = co_await hedge::io::write(fd, reinterpret_cast<std::byte*>(footer_buf.data()), PAGE_SIZE_IN_BYTES, bytes_written);
         if(footer_res < 0)
             co_return hedge::error("Failed to write footer: " + std::string(strerror(-footer_res)));
         bytes_written += static_cast<size_t>(footer_res);

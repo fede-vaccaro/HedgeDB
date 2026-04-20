@@ -80,7 +80,7 @@ TEST_F(key_test, move_constructor)
 
     // Long string
     key<> long_k1(long_str_val);
-    const uint8_t* original_ptr = long_k1.data();
+    const std::byte* original_ptr = long_k1.data();
     key<> long_k2(std::move(long_k1));
     ASSERT_EQ(static_cast<std::string_view>(long_k2), long_str_val);
     ASSERT_EQ(long_k2.data(), original_ptr);
@@ -125,7 +125,7 @@ TEST_F(key_test, move_assignment)
     // Case 2: long = move(long)
     key<> k_dest_l_l;
     key<> k_src_l_l(long_str_val);
-    const uint8_t* original_ptr_ll = k_src_l_l.data();
+    const std::byte* original_ptr_ll = k_src_l_l.data();
     k_dest_l_l = std::move(k_src_l_l);
     ASSERT_EQ(static_cast<std::string_view>(k_dest_l_l), long_str_val);
     ASSERT_EQ(k_dest_l_l.data(), original_ptr_ll);
@@ -134,7 +134,7 @@ TEST_F(key_test, move_assignment)
     // Case 3: short = move(long)
     key<> k_dest_s_l(short_str_val);
     key<> k_src_s_l(long_str_val);
-    const uint8_t* original_ptr_sl = k_src_s_l.data();
+    const std::byte* original_ptr_sl = k_src_s_l.data();
     k_dest_s_l = std::move(k_src_s_l);
     ASSERT_EQ(static_cast<std::string_view>(k_dest_s_l), long_str_val);
     ASSERT_EQ(k_dest_s_l.data(), original_ptr_sl);

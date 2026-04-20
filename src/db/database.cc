@@ -190,9 +190,9 @@ namespace hedge::db
 
         auto value = std::move(maybe_value.value());
 
-        if(std::holds_alternative<std::vector<uint8_t>>(value))
+        if(std::holds_alternative<std::vector<std::byte>>(value))
         {
-            co_return std::move(std::get<std::vector<uint8_t>>(value));
+            co_return std::move(std::get<std::vector<std::byte>>(value));
         }
 
         if(std::holds_alternative<tombstone_t>(value))

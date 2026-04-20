@@ -55,7 +55,7 @@ namespace hedge::fs
         if(this->_file.has_direct_access() && !hedge::is_page_aligned(page_aligned_bytes_to_read))
             page_aligned_bytes_to_read = hedge::ceil_page_align(page_aligned_bytes_to_read);
 
-        page_aligned_buffer<uint8_t> buffer(page_aligned_bytes_to_read);
+        page_aligned_buffer<std::byte> buffer(page_aligned_bytes_to_read);
 
         auto aw = io::read(this->_file.fd(), buffer.data(), page_aligned_bytes_to_read, this->_current_offset);
 

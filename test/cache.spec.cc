@@ -7,7 +7,7 @@
 
 #include <gtest/gtest.h>
 
-#include "async/io_executor.h"
+#include "io/io_executor.h"
 #include "async/task.h"
 #include "async/wait_group.h"
 #include "cache.h"
@@ -24,7 +24,7 @@ namespace hedge::db
             async::executor_pool::init_static_pool(8, 64);
         }
 
-        static void fill_page(uint8_t* base_ptr, size_t offset, uint64_t seed)
+        static void fill_page(std::byte* base_ptr, size_t offset, uint64_t seed)
         {
             auto* ptr = reinterpret_cast<uint64_t*>(base_ptr + offset);
             size_t count = PAGE_SIZE_IN_BYTES / sizeof(uint64_t);
@@ -34,7 +34,7 @@ namespace hedge::db
             }
         }
 
-        static bool verify_page(const uint8_t* base_ptr, size_t offset, uint64_t seed)
+        static bool verify_page(const std::byte* base_ptr, size_t offset, uint64_t seed)
         {
             const auto* ptr = reinterpret_cast<const uint64_t*>(base_ptr + offset);
             size_t count = PAGE_SIZE_IN_BYTES / sizeof(uint64_t);

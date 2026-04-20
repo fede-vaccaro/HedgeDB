@@ -32,7 +32,7 @@ namespace hedge
         value_ptr_t(const value_ptr_t&) = default;
         value_ptr_t(value_ptr_t&&) = default;
 
-        static std::optional<value_ptr_t> try_from_span(std::span<const uint8_t> span)
+        static std::optional<value_ptr_t> try_from_span(std::span<const std::byte> span)
         {
             if(span.size() != sizeof(value_ptr_t))
                 return std::nullopt;
@@ -49,9 +49,9 @@ namespace hedge
 
         ~value_ptr_t() = default;
 
-        operator std::span<const uint8_t>() const
+        operator std::span<const std::byte>() const
         {
-            return {reinterpret_cast<const uint8_t*>(this), sizeof(value_ptr_t)};
+            return {reinterpret_cast<const std::byte*>(this), sizeof(value_ptr_t)};
         }
 
         [[nodiscard]] bool is_deleted() const
@@ -109,7 +109,7 @@ namespace hedge
     {
     };
 
-    using value_t = std::variant<value_ptr_t, std::vector<uint8_t>, tombstone_t>;
+    using value_t = std::variant<value_ptr_t, std::vector<std::byte>, tombstone_t>;
 
     static constexpr auto sizeof_value_t = sizeof(value_t);
 
@@ -121,7 +121,7 @@ namespace hedge
         UNDEFINED = 255,
     };
 
-    inline hedge::expected<value_t> value_from_span(std::span<const uint8_t> span)
+    inline hedge::expected<value_t> value_from_span(std::span<const std::byte> span)
     {
         const auto type = static_cast<value_type>(*span.data());
         switch(type)
@@ -136,7 +136,7 @@ namespace hedge
             }
             case value_type::IN_PLACE_VALUE:
             {
-                return std::vector<uint8_t>(span.data() + 1, span.data() + span.size());
+                return std::vector<std::byte>(span.data() + 1, span.data() + span.size());
             }
             case value_type::TOMBSTONE:
             {
@@ -149,21 +149,21 @@ namespace hedge
         }
     }
 
-    inline std::span<const uint8_t> value_to_span(const value_t& value)
+    inline std::span<const std::byte> value_to_span(const value_t& value)
     {
         return std::visit(
-            overloaded{[](const value_ptr_t& vp) -> std::span<const uint8_t>
+            overloaded{[](const value_ptr_t& vp) -> std::span<const std::byte>
                        {
-                           return std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(&vp), sizeof(value_ptr_t)};
+                           return std::span<const std::byte>{reinterpret_cast<const std::byte*>(&vp), sizeof(value_ptr_t)};
                        },
-                       [](const std::vector<uint8_t>& vec) -> std::span<const uint8_t>
+                       [](const std::vector<std::byte>& vec) -> std::span<const std::byte>
                        {
-                           return std::span<const uint8_t>{vec};
+                           return std::span<const std::byte>{vec};
                        },
-                       [](const tombstone_t&) -> std::span<const uint8_t>
+                       [](const tombstone_t&) -> std::span<const std::byte>
                        {
-                           static const auto tombstone_marker = static_cast<uint8_t>(value_type::TOMBSTONE);
-                           return std::span<const uint8_t>{&tombstone_marker, 1};
+                           static const auto tombstone_marker = static_cast<std::byte>(value_type::TOMBSTONE);
+                           return std::span<const std::byte>{&tombstone_marker, 1};
                        }},
             value);
     }

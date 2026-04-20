@@ -36,7 +36,7 @@ namespace hedge::fs
         struct awaitable_read_request_t
         {
             hedge::io::aw_io awaitable;          // Awaitable request (just a handler, does not own the memory)
-            page_aligned_buffer<uint8_t> buffer; // Where the read_response result is written to (owned memory)
+            page_aligned_buffer<std::byte> buffer; // Where the read_response result is written to (owned memory)
         };
 
         std::optional<awaitable_read_request_t> next();

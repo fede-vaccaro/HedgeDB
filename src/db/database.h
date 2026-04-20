@@ -106,7 +106,7 @@ namespace hedge::db
 
     public:
         /// Type alias for byte buffers used for values.
-        using byte_buffer_t = std::vector<uint8_t>;
+        using byte_buffer_t = std::vector<std::byte>;
 
         /**
          * @brief Asynchronously retrieves the value associated with a key.

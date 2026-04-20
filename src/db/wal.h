@@ -30,7 +30,7 @@ namespace hedge::db
         explicit wal(const config& cfg);
 
         hedge::status append(size_t thread_idx, uint64_t seq_nr,
-                             const key_t& key, std::span<const uint8_t> value);
+                             const key_t& key, std::span<const std::byte> value);
 
         // Reads all WAL files under `path`, sorted by (epoch, seq_nr).
         // Calls on_entry for each; stops early if it returns false.
@@ -38,7 +38,7 @@ namespace hedge::db
         // on_entry should push the entries into the memtable;
         static hedge::status replay(
             const std::filesystem::path& path,
-            const std::function<bool(const key_t&, std::span<const uint8_t>, uint64_t)>& on_entry,
+            const std::function<bool(const key_t&, std::span<const std::byte>, uint64_t)>& on_entry,
             logger& log);
 
         void remove();
@@ -47,7 +47,7 @@ namespace hedge::db
         std::vector<fs::file> _files;
 
         static hedge::status _write_entry(int32_t fd, uint64_t seq_nr,
-                                          const key_t& key, std::span<const uint8_t> value);
+                                          const key_t& key, std::span<const std::byte> value);
     };
 
 } // namespace hedge::db

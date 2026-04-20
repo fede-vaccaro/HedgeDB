@@ -24,7 +24,7 @@ namespace hedge::db
     // TODO transform to header
     struct sst_footer
     {
-        static constexpr uint32_t CURRENT_FOOTER_VERSION = 1; ///< Current version of the file format.
+        static constexpr uint8_t CURRENT_FOOTER_VERSION = 1; ///< Current version of the file format.
 
         char header[16] = "hedge_FOOTER";        ///< Magic string ("hedge_FOOTER") to identify the footer block.
         uint8_t version{CURRENT_FOOTER_VERSION}; ///< File format version number.
@@ -167,7 +167,7 @@ namespace hedge::db
         }
 
     private:
-        static hedge::expected<value_t> _find_in_page(const key_t& key, const uint8_t* page);
+        static hedge::expected<value_t> _find_in_page(const key_t& key, const std::byte* page);
 
         [[nodiscard]] std::optional<size_t> _find_page_id(const key_t& key) const;
 

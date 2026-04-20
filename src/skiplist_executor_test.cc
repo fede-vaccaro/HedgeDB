@@ -47,12 +47,12 @@ struct _NullStream
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
-#include "db/folly/concurrent_skip_list/concurrent_skiplist.h"
+#include "db/skiplist/concurrent_skip_list/concurrent_skiplist.h"
 #pragma GCC diagnostic pop
 
-#include "async/io_executor.h"
 #include "async/task.h"
 #include "async/wait_group.h"
+#include "io/io_executor.h"
 #include "single_buffer_arena_allocator.h"
 #include "types.h"
 
@@ -96,10 +96,10 @@ private:
 struct memtable_entry
 {
     hedge::key_t key;
-    mutable std::span<const uint8_t> value;
+    mutable std::span<const std::byte> value;
 
     memtable_entry() = default;
-    memtable_entry(hedge::key_t k, std::span<const uint8_t> v) : key(k), value(v) {}
+    memtable_entry(hedge::key_t k, std::span<const std::byte> v) : key(k), value(v) {}
 };
 
 struct memtable_cmp
@@ -109,7 +109,7 @@ struct memtable_cmp
     bool operator()(const memtable_entry& a, const hedge::key_t& b) const { return a.key < b; }
 };
 
-using skiplist_t = folly::ConcurrentSkipList<memtable_entry, memtable_cmp, StdArenaAllocator<uint8_t>>;
+using skiplist_t = folly::ConcurrentSkipList<memtable_entry, memtable_cmp, StdArenaAllocator<std::byte>>;
 
 struct memtable_arena_holder
 {
@@ -125,12 +125,12 @@ struct bench_skiplist : private memtable_arena_holder, public skiplist_t
 
     explicit bench_skiplist(size_t budget)
         : memtable_arena_holder(budget),
-          skiplist_t(24, StdArenaAllocator<uint8_t>(this->arena_)),
+          skiplist_t(24, StdArenaAllocator<std::byte>(this->arena_)),
           _accessor(this)
     {
     }
 
-    bool insert(const hedge::key_t& key, std::span<const uint8_t> value)
+    bool insert(const hedge::key_t& key, std::span<const std::byte> value)
     {
         try
         {
@@ -152,9 +152,9 @@ struct bench_skiplist : private memtable_arena_holder, public skiplist_t
 
 static hedge::key_t make_key(uint64_t i)
 {
-    std::array<uint8_t, 16> bytes{};
+    std::array<std::byte, 16> bytes{};
     for(int j = 0; j < 8; ++j)
-        bytes[15 - j] = static_cast<uint8_t>((i >> (j * 8)) & 0xFF);
+        bytes[15 - j] = static_cast<std::byte>((i >> (j * 8)) & 0xFF);
     return hedge::key_t(bytes);
 }
 
@@ -162,11 +162,11 @@ static hedge::key_t make_key(uint64_t i)
 // Coroutine task — one per insert, mirrors make_put_task in database.spec.cc
 // ---------------------------------------------------------------------------
 
-static const uint8_t DUMMY_VALUE[100]{};
+static const std::byte DUMMY_VALUE[100]{};
 
 hedge::async::task<void> make_insert_task(bench_skiplist* sl, size_t i, hedge::async::wait_group* wg)
 {
-    sl->insert(make_key(i), std::span<const uint8_t>(DUMMY_VALUE, sizeof(DUMMY_VALUE)));
+    sl->insert(make_key(i), std::span<const std::byte>(DUMMY_VALUE, sizeof(DUMMY_VALUE)));
     wg->decr();
     co_return;
 }

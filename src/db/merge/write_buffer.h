@@ -22,7 +22,7 @@ namespace hedge::db
 
     class merge_write_buffer
     {
-        page_aligned_buffer<uint8_t> _buf;
+        page_aligned_buffer<std::byte> _buf;
         db::block_buffer_writer _block_writer;
         size_t _indexed_kvs{};
 
@@ -33,10 +33,10 @@ namespace hedge::db
         {
         }
 
-        hedge::status write_item(std::span<const uint8_t> key,
-                                 std::span<const uint8_t> value,
+        hedge::status write_item(std::span<const std::byte> key,
+                                 std::span<const std::byte> value,
                                  page_aligned_buffer<key_t>& merged_meta_index,
-                                 page_aligned_buffer<uint8_t>& merged_meta_index_bytes)
+                                 page_aligned_buffer<std::byte>& merged_meta_index_bytes)
         {
             auto s = this->_block_writer.push(
                 key, value,

@@ -61,7 +61,7 @@ namespace hedge::db
         constexpr uint64_t V_NEW_SEED = 0xFEEDFACEULL;
         constexpr uint64_t V_NEWEST_SEED = 0xABCDEF01ULL;
 
-        using byte_vec = std::vector<uint8_t>;
+        using byte_vec = std::vector<std::byte>;
         using value_set = std::vector<byte_vec>;
 
         key_t make_key(size_t i)
@@ -89,7 +89,7 @@ namespace hedge::db
                 std::mt19937 gen(static_cast<uint32_t>(slot ^ mix_seed));
                 std::uniform_int_distribution<uint8_t> dist(0, 255);
                 for(auto& b : values[slot])
-                    b = dist(gen);
+                    b = static_cast<std::byte>(dist(gen));
             }
             return values;
         }

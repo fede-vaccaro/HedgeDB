@@ -121,7 +121,7 @@ namespace hedge::db
         // Meta-index entries collected during the merge
         // Thes are respectively the internal representation held in memory for lookup and the serialized version of it
         auto merged_meta_index = page_aligned_buffer<key_t>(0, meta_index_entries_estimate);
-        auto merged_meta_index_bytes = page_aligned_buffer<uint8_t>(0, meta_index_entries_estimate * sizeof(key_t));
+        auto merged_meta_index_bytes = page_aligned_buffer<std::byte>(0, meta_index_entries_estimate * sizeof(key_t));
 
         auto* rbufs_begin = rbufs.begin();
         auto* rbufs_end = rbufs.end();
@@ -438,7 +438,7 @@ namespace hedge::db
 
             // Write QF header (padded to one page)
             auto header_span = qf->header_as_byte_span();
-            page_aligned_buffer<uint8_t> qf_header_buf(PAGE_SIZE_IN_BYTES);
+            page_aligned_buffer<std::byte> qf_header_buf(PAGE_SIZE_IN_BYTES);
             std::memcpy(qf_header_buf.data(), header_span.data(), header_span.size());
 
             auto qf_header_res = co_await hedge::io::write(
@@ -454,7 +454,7 @@ namespace hedge::db
             // Write QF data (page-aligned)
             auto data_span = qf->data_as_byte_span();
             size_t data_write_size = hedge::ceil_page_align(data_span.size());
-            page_aligned_buffer<uint8_t> qf_data_buf(data_write_size);
+            page_aligned_buffer<std::byte> qf_data_buf(data_write_size);
             std::memcpy(qf_data_buf.data(), data_span.data(), data_span.size());
 
             auto qf_data_res = co_await hedge::io::write(
@@ -485,7 +485,7 @@ namespace hedge::db
         {
             auto res = co_await hedge::io::write(
                 output_file.fd(),
-                (uint8_t*)page_aligned_footer.raw_data(),
+                (std::byte*)page_aligned_footer.raw_data(),
                 PAGE_SIZE_IN_BYTES,
                 bytes_written);
 

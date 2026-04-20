@@ -23,12 +23,12 @@ namespace hedge
         {
             size_t mem = hedge::round_up(c * sizeof(T), PAGE_SIZE_IN_BYTES);
 
-            pab._buf = buffer_t(static_cast<uint8_t*>(std::aligned_alloc(PAGE_SIZE_IN_BYTES, mem)), std::free);
+            pab._buf = buffer_t(static_cast<std::byte*>(std::aligned_alloc(PAGE_SIZE_IN_BYTES, mem)), std::free);
             pab._capacity = mem / sizeof(T); // 'mem % sizeof(T) != 0' might not always hold
             pab._size = s;
 
             if constexpr(ZERO_MEMORY)
-                std::fill(pab._buf.get(), pab._buf.get() + mem, 0);
+                std::fill(pab._buf.get(), pab._buf.get() + mem, std::byte{0});
         }
 
         static void _init_buffer(page_aligned_buffer& pab)
@@ -73,7 +73,7 @@ namespace hedge
         page_aligned_buffer(const page_aligned_buffer&) = delete;
         page_aligned_buffer& operator=(const page_aligned_buffer&) = delete;
 
-        std::span<uint8_t> as_byte_span()
+        std::span<std::byte> as_byte_span()
         {
             return {_buf.get(), this->_size * sizeof(T)};
         }

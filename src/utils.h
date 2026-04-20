@@ -17,7 +17,7 @@ namespace hedge
     }
 
     template <typename T>
-    inline std::span<T> view_as(std::vector<uint8_t>& vector)
+    inline std::span<T> view_as(std::vector<std::byte>& vector)
     {
         auto start_ptr = typename std::vector<T>::iterator(reinterpret_cast<T*>(vector.data()));
         auto end_ptr = typename std::vector<T>::iterator(reinterpret_cast<T*>(vector.data() + vector.size()));
@@ -57,7 +57,7 @@ namespace hedge
 
     inline uint16_t extract_prefix(const uuids::uuid& key)
     {
-        const auto* array_view = reinterpret_cast<const uint8_t*>(key.as_bytes().begin().base());
+        const auto* array_view = reinterpret_cast<const std::byte*>(key.as_bytes().begin().base());
 
         size_t prefix = 0;
 
@@ -75,7 +75,7 @@ namespace hedge
         return (value % PAGE_SIZE_IN_BYTES) == 0;
     }
 
-    inline uint16_t extract_prefix(const uint8_t* k)
+    inline uint16_t extract_prefix(const std::byte* k)
     {
         size_t prefix = 0;
 
@@ -98,7 +98,7 @@ namespace hedge
 
     std::vector<std::pair<size_t, std::filesystem::path>> get_prefixes(const std::filesystem::path& base_path, size_t num_space_partitions);
 
-    using buffer_t = std::unique_ptr<uint8_t[], void (*)(void*)>;
+    using buffer_t = std::unique_ptr<std::byte[], void (*)(void*)>;
 
     constexpr buffer_t make_null_buffer()
     {
@@ -107,7 +107,7 @@ namespace hedge
 
     inline buffer_t make_aligned_buffer(size_t n)
     {
-        return {static_cast<uint8_t*>(std::aligned_alloc(PAGE_SIZE_IN_BYTES, n)), std::free};
+        return {static_cast<std::byte*>(std::aligned_alloc(PAGE_SIZE_IN_BYTES, n)), std::free};
     }
 
 } // namespace hedge

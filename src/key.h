@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <array>
-#include <compare>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
@@ -16,7 +15,7 @@
 
 namespace hedge
 {
-    std::string to_hex_string(std::span<const uint8_t> key);
+    std::string to_hex_string(std::span<const std::byte> key);
 
     // key is a custom immutable string type implementing short string optimization up to 31 inlined bytes
     template <size_t MAX_INLINE_LENGTH = 31>
@@ -24,25 +23,25 @@ namespace hedge
     struct key
     {
     private:
-        static constexpr size_t LONG_STRING_FLAG = 0x80;
-        constexpr static size_t LAST_BYTE_IDX = MAX_INLINE_LENGTH;
+        static constexpr std::byte LONG_STRING_FLAG = std::byte(0x80);
+        constexpr static std::byte LAST_BYTE_IDX = std::byte(MAX_INLINE_LENGTH);
 
-        static uint8_t& _flag(key& k)
+        static std::byte& _flag(key& k)
         {
             static_assert(sizeof(key) == 32);
-            return reinterpret_cast<uint8_t*>(&k)[LAST_BYTE_IDX];
+            return reinterpret_cast<std::byte*>(&k)[static_cast<size_t>(LAST_BYTE_IDX)];
         }
 
-        static uint8_t _flag_byte(const key& k)
+        static std::byte _flag_byte(const key& k)
         {
             static_assert(sizeof(key) == 32);
-            return reinterpret_cast<const uint8_t*>(&k)[LAST_BYTE_IDX];
+            return reinterpret_cast<const std::byte*>(&k)[static_cast<size_t>(LAST_BYTE_IDX)];
         }
 
         // The last byte of the Key struct represents:
         // - If the MSB == 1, it flags that the represented string is long
         // - If the MSB == 0, the key is inlined and it also represents the short string length
-        static void _set_flag(key& k, uint8_t v)
+        static void _set_flag(key& k, std::byte v)
         {
             static_assert(sizeof(key) == 32);
             key::_flag(k) = v;
@@ -50,7 +49,7 @@ namespace hedge
 
         static bool _is_long_str(const key& k)
         {
-            return (key::_flag_byte(k) & LONG_STRING_FLAG) != 0;
+            return (key::_flag_byte(k) & LONG_STRING_FLAG) != std::byte(0);
         }
 
         static void _long_str_copy_unsafe(key& dest, const key& src)
@@ -59,7 +58,7 @@ namespace hedge
 
             const auto len = src._storage.variable.long_key_length;
 
-            dest._storage.variable.buf = new uint8_t[len];
+            dest._storage.variable.buf = new std::byte[len];
             dest._storage.variable.long_key_length = len;
 
             std::memcpy(dest._storage.variable.buf, src._storage.variable.buf, len);
@@ -75,7 +74,7 @@ namespace hedge
             if(key::_is_long_str(k) && k._storage.variable.buf != nullptr) [[unlikely]] // Just for trying moving the needle towards the inlined string path
             {
                 delete[] k._storage.variable.buf;
-                key::_set_flag(k, 0);
+                key::_set_flag(k, std::byte(0));
                 k._storage.variable.buf = nullptr;
             }
         }
@@ -91,7 +90,7 @@ namespace hedge
                 dst._storage.variable.buf = std::exchange(src._storage.variable.buf, nullptr);
                 dst._storage.variable.long_key_length = std::exchange(src._storage.variable.long_key_length, 0UL);
                 key::_set_flag(dst, LONG_STRING_FLAG);
-                key::_set_flag(src, 0); // Reset other's flag
+                key::_set_flag(src, std::byte(0)); // Reset other's flag
             }
             else
             {
@@ -120,29 +119,29 @@ namespace hedge
             // Short string optimization
             if(len <= MAX_INLINE_LENGTH) [[likely]]
             {
-                dst._storage.fixed.short_key_length = static_cast<uint8_t>(len);
+                dst._storage.fixed.short_key_length = static_cast<std::byte>(len);
                 std::memcpy(dst._storage.fixed.buf.data(), ptr, len);
                 return;
             }
 
             // Is long string
             key::_set_flag(dst, LONG_STRING_FLAG);
-            dst._storage.variable.buf = new uint8_t[len];
+            dst._storage.variable.buf = new std::byte[len];
             dst._storage.variable.long_key_length = len;
             std::memcpy(dst._storage.variable.buf, ptr, len);
         }
 
         struct long_key_t
         {
-            uint8_t* buf;
+            std::byte* buf;
             size_t long_key_length;
             // size_t capacity; // There is room for "capacity" field here and reusing the allocated memory over assignment of shorter (long) key
         };
 
         struct short_key_t
         {
-            std::array<uint8_t, MAX_INLINE_LENGTH> buf;
-            uint8_t short_key_length;
+            std::array<std::byte, MAX_INLINE_LENGTH> buf;
+            std::byte short_key_length;
         };
 
         union key_data
@@ -185,7 +184,7 @@ namespace hedge
             key::_init(*this, ptr, len);
         }
 
-        key(std::span<const uint8_t> span)
+        key(std::span<const std::byte> span)
         {
             key::_init(*this, span.data(), span.size());
         }
@@ -200,12 +199,12 @@ namespace hedge
             key k(0UL); // Private constructor that doesn't initialize storage, since we'll do it in-place in the factory method
             if(len <= MAX_INLINE_LENGTH) [[likely]]
             {
-                k._storage.fixed.short_key_length = static_cast<uint8_t>(len);
+                k._storage.fixed.short_key_length = static_cast<std::byte>(len);
             }
             else
             {
                 key::_set_flag(k, LONG_STRING_FLAG);
-                k._storage.variable.buf = new uint8_t[len];
+                k._storage.variable.buf = new std::byte[len];
                 k._storage.variable.long_key_length = len;
             }
             return k;
@@ -238,32 +237,32 @@ namespace hedge
             return {ptrs[idx], sizes[idx]};
         }
 
-        operator std::span<const uint8_t>() const
+        operator std::span<const std::byte>() const
         {
-            std::array<const uint8_t*, 2> ptrs{this->_storage.fixed.buf.data(), this->_storage.variable.buf};
+            std::array<const std::byte*, 2> ptrs{this->_storage.fixed.buf.data(), this->_storage.variable.buf};
             std::array<size_t, 2> sizes{static_cast<size_t>(key::_flag_byte(*this)), this->_storage.variable.long_key_length};
 
             const auto idx = static_cast<size_t>(key::_is_long_str(*this));
             return {ptrs[idx], sizes[idx]};
         }
 
-        operator std::span<uint8_t>()
+        operator std::span<std::byte>()
         {
-            std::array<uint8_t*, 2> ptrs{this->_storage.fixed.buf.data(), this->_storage.variable.buf};
+            std::array<std::byte*, 2> ptrs{this->_storage.fixed.buf.data(), this->_storage.variable.buf};
             std::array<size_t, 2> sizes{static_cast<size_t>(key::_flag_byte(*this)), this->_storage.variable.long_key_length};
 
             const auto idx = static_cast<size_t>(key::_is_long_str(*this));
             return {ptrs[idx], sizes[idx]};
         }
 
-        [[nodiscard]] std::span<const uint8_t> as_bytes() const
+        [[nodiscard]] std::span<const std::byte> as_bytes() const
         {
-            return static_cast<std::span<const uint8_t>>(*this);
+            return static_cast<std::span<const std::byte>>(*this);
         }
 
-        std::span<uint8_t> as_bytes()
+        std::span<std::byte> as_bytes()
         {
-            return static_cast<std::span<uint8_t>>(*this);
+            return static_cast<std::span<std::byte>>(*this);
         }
 
         auto operator<=>(const key& other) const
@@ -296,17 +295,17 @@ namespace hedge
             return static_cast<std::string_view>(*this) >= static_cast<std::string_view>(other);
         }
 
-        [[nodiscard]] uint8_t* data()
+        [[nodiscard]] std::byte* data()
         {
             // Branch-free
-            std::array<uint8_t*, 2> ptrs{this->_storage.fixed.buf.data(), this->_storage.variable.buf};
+            std::array<std::byte*, 2> ptrs{this->_storage.fixed.buf.data(), this->_storage.variable.buf};
             return ptrs[static_cast<size_t>(key::_is_long_str(*this))];
         }
 
-        [[nodiscard]] const uint8_t* data() const
+        [[nodiscard]] const std::byte* data() const
         {
             // Branch-free
-            std::array<const uint8_t*, 2> ptrs{this->_storage.fixed.buf.data(), this->_storage.variable.buf};
+            std::array<const std::byte*, 2> ptrs{this->_storage.fixed.buf.data(), this->_storage.variable.buf};
             return ptrs[static_cast<size_t>(key::_is_long_str(*this))];
         }
 
@@ -324,7 +323,7 @@ namespace hedge
         }
     };
 
-    inline std::string to_hex_string(std::span<const uint8_t> key)
+    inline std::string to_hex_string(std::span<const std::byte> key)
     {
         if(key.empty())
             return "";
@@ -352,25 +351,25 @@ namespace hedge
         return static_cast<uint8_t>(key_size - 1);
     }
 
-    inline size_t decode_key_size(uint8_t encoded_key_size)
+    inline size_t decode_key_size(std::byte encoded_key_size)
     {
         return static_cast<size_t>(encoded_key_size) + 1;
     }
 
     template <typename T>
-        requires std::is_same_v<std::remove_cv_t<T>, std::span<const uint8_t>> ||
+        requires std::is_same_v<std::remove_cv_t<T>, std::span<const std::byte>> ||
                  std::is_same_v<std::remove_cv_t<T>, key<>>
-    inline void write_key_unsafe(uint8_t* dst, const T& k)
+    inline void write_key_unsafe(std::byte* dst, const T& k)
     {
-        dst[0] = encode_key_size(k.size());
-        std::ranges::copy(std::span<const uint8_t>(k.data(), k.size()), dst + 1);
+        dst[0] = static_cast<std::byte>(encode_key_size(k.size()));
+        std::ranges::copy(std::span<const std::byte>(k.data(), k.size()), dst + 1);
     }
 
-    inline key<> read_key_unsafe(const uint8_t* src)
+    inline key<> read_key_unsafe(const std::byte* src)
     {
         const size_t key_length = decode_key_size(src[0]);
         auto k = key<>::make_with_length(key_length);
-        std::ranges::copy(std::span<const uint8_t>(src + 1, key_length), k.data());
+        std::ranges::copy(std::span<const std::byte>(src + 1, key_length), k.data());
         return k;
     }
 

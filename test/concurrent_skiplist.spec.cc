@@ -157,7 +157,7 @@ namespace
     // Helper to create deterministic keys
     hedge::key_t make_key(uint64_t i)
     {
-        std::array<uint8_t, 16> bytes = {0};
+        std::array<std::byte, 16> bytes = {0};
         for(int j = 0; j < 8; ++j)
         {
             bytes[15 - j] = (i >> (j * 8)) & 0xFF;
@@ -174,9 +174,9 @@ namespace
 TEST(ConcurrentSkipListTest, Initialization)
 {
     single_buffer_arena_allocator arena(1024 * 1024); // 1MB
-    StdArenaAllocator<uint8_t> alloc(arena);
+    StdArenaAllocator<std::byte> alloc(arena);
 
-    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<uint8_t>>;
+    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<std::byte>>;
     auto sl = SkipList::createInstance(12, alloc);
 
     EXPECT_TRUE(sl->empty());
@@ -186,8 +186,8 @@ TEST(ConcurrentSkipListTest, Initialization)
 TEST(ConcurrentSkipListTest, InsertOrdered)
 {
     single_buffer_arena_allocator arena(1024 * 1024);
-    StdArenaAllocator<uint8_t> alloc(arena);
-    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<uint8_t>>;
+    StdArenaAllocator<std::byte> alloc(arena);
+    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<std::byte>>;
     auto sl = SkipList::createInstance(12, alloc);
     auto accessor = SkipList::Accessor(sl);
 
@@ -208,8 +208,8 @@ TEST(ConcurrentSkipListTest, InsertOrdered)
 TEST(ConcurrentSkipListTest, LargeInsertRandom)
 {
     single_buffer_arena_allocator arena(32 * 1024 * 1024); // 32MB should be enough for 10k nodes
-    StdArenaAllocator<uint8_t> alloc(arena);
-    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<uint8_t>>;
+    StdArenaAllocator<std::byte> alloc(arena);
+    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<std::byte>>;
     auto sl = SkipList::createInstance(24, alloc);
     auto accessor = SkipList::Accessor(sl);
 
@@ -236,8 +236,8 @@ TEST(ConcurrentSkipListTest, LargeInsertRandom)
 TEST(ConcurrentSkipListTest, IntegrityCheck)
 {
     single_buffer_arena_allocator arena(16 * 1024 * 1024);
-    StdArenaAllocator<uint8_t> alloc(arena);
-    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<uint8_t>>;
+    StdArenaAllocator<std::byte> alloc(arena);
+    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<std::byte>>;
     auto sl = SkipList::createInstance(24, alloc);
     auto accessor = SkipList::Accessor(sl);
 
@@ -263,8 +263,8 @@ TEST(ConcurrentSkipListTest, BenchmarkInsert200K)
 {
     // 200K nodes.
     single_buffer_arena_allocator arena(256 * 1024 * 1024);
-    StdArenaAllocator<uint8_t> alloc(arena);
-    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<uint8_t>>;
+    StdArenaAllocator<std::byte> alloc(arena);
+    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<std::byte>>;
     auto sl = SkipList::createInstance(24, alloc);
     auto accessor = SkipList::Accessor(sl);
 
@@ -292,8 +292,8 @@ TEST(ConcurrentSkipListTest, BenchmarkInsert200K)
 TEST(ConcurrentSkipListTest, ConcurrentInsertCorrectness)
 {
     single_buffer_arena_allocator arena(256 * 1024 * 1024);
-    StdArenaAllocator<uint8_t> alloc(arena);
-    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<uint8_t>>;
+    StdArenaAllocator<std::byte> alloc(arena);
+    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<std::byte>>;
     auto sl = SkipList::createInstance(24, alloc);
 
     const int N = 100000;
@@ -347,8 +347,8 @@ TEST(ConcurrentSkipListTest, ConcurrentInsertCorrectness)
 TEST(ConcurrentSkipListTest, Find)
 {
     single_buffer_arena_allocator arena(1024 * 1024);
-    StdArenaAllocator<uint8_t> alloc(arena);
-    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<uint8_t>>;
+    StdArenaAllocator<std::byte> alloc(arena);
+    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<std::byte>>;
     auto sl = SkipList::createInstance(12, alloc);
     auto accessor = SkipList::Accessor(sl);
 
@@ -375,8 +375,8 @@ TEST(ConcurrentSkipListTest, Find)
 TEST(ConcurrentSkipListTest, IteratorTraversal)
 {
     single_buffer_arena_allocator arena(1024 * 1024);
-    StdArenaAllocator<uint8_t> alloc(arena);
-    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<uint8_t>>;
+    StdArenaAllocator<std::byte> alloc(arena);
+    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<std::byte>>;
     auto sl = SkipList::createInstance(12, alloc);
     auto accessor = SkipList::Accessor(sl);
 
@@ -407,8 +407,8 @@ TEST(ConcurrentSkipListTest, IteratorTraversal)
 TEST(ConcurrentSkipListTest, EmptyIterator)
 {
     single_buffer_arena_allocator arena(1024);
-    StdArenaAllocator<uint8_t> alloc(arena);
-    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<uint8_t>>;
+    StdArenaAllocator<std::byte> alloc(arena);
+    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<std::byte>>;
     auto sl = SkipList::createInstance(12, alloc);
     auto accessor = SkipList::Accessor(sl);
 
@@ -422,8 +422,8 @@ TEST(ConcurrentSkipListTest, EmptyIterator)
 TEST(ConcurrentSkipListTest, ConcurrentReadWrite)
 {
     single_buffer_arena_allocator arena(64 * 1024 * 1024);
-    StdArenaAllocator<uint8_t> alloc(arena);
-    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<uint8_t>>;
+    StdArenaAllocator<std::byte> alloc(arena);
+    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<std::byte>>;
     auto sl = SkipList::createInstance(24, alloc);
 
     const int N = 40000;
@@ -490,8 +490,8 @@ TEST(ConcurrentSkipListTest, ConcurrentReadWrite)
 TEST(ConcurrentSkipListTest, ConcurrentConsistencyAndVisibility)
 {
     single_buffer_arena_allocator arena(128 * 1024 * 1024);
-    StdArenaAllocator<uint8_t> alloc(arena);
-    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<uint8_t>>;
+    StdArenaAllocator<std::byte> alloc(arena);
+    using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<std::byte>>;
     auto sl = SkipList::createInstance(24, alloc);
 
     const size_t NUM_WRITERS = 4;
@@ -625,8 +625,8 @@ namespace
     void run_benchmark(size_t total_items, int num_threads)
     {
         single_buffer_arena_allocator arena(static_cast<size_t>(total_items) * 128); // Estimate size
-        StdArenaAllocator<uint8_t> alloc(arena);
-        using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<uint8_t>>;
+        StdArenaAllocator<std::byte> alloc(arena);
+        using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<std::byte>>;
         auto sl = SkipList::createInstance(24, alloc);
 
         std::vector<hedge::key_t> keys;
@@ -682,8 +682,8 @@ namespace
     void run_read_benchmark(size_t tree_size, size_t total_lookups, int num_threads)
     {
         single_buffer_arena_allocator arena(static_cast<size_t>(tree_size) * 128);
-        StdArenaAllocator<uint8_t> alloc(arena);
-        using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<uint8_t>>;
+        StdArenaAllocator<std::byte> alloc(arena);
+        using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<std::byte>>;
         auto sl = SkipList::createInstance(24, alloc);
 
         {
@@ -748,8 +748,8 @@ namespace
     void run_rw_sync_benchmark(size_t total_items, int num_threads)
     {
         single_buffer_arena_allocator arena(static_cast<size_t>(total_items) * 128);
-        StdArenaAllocator<uint8_t> alloc(arena);
-        using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<uint8_t>>;
+        StdArenaAllocator<std::byte> alloc(arena);
+        using SkipList = folly::ConcurrentSkipList<NodeData, NodeDataCompare, StdArenaAllocator<std::byte>>;
         auto sl = SkipList::createInstance(24, alloc);
 
         std::vector<hedge::key_t> keys;

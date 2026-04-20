@@ -8,7 +8,7 @@
 #include <span>
 #include <vector>
 
-#include "async/io_executor.h"
+#include "io/io_executor.h"
 #include "async/wait_group.h"
 #include "db/block.h"
 #include "db/merge/sst_stream.h"
@@ -91,23 +91,23 @@ TEST_P(RollingBufferTest, WriteAndReadBack)
         ASSERT_TRUE(out.is_open());
 
         constexpr size_t BUFFER_SIZE = PAGE_SIZE_IN_BYTES * 4;
-        std::vector<uint8_t> buffer(BUFFER_SIZE);
+        std::vector<std::byte> buffer(BUFFER_SIZE);
 
         block_buffer_writer writer(buffer.data(), buffer.data() + buffer.size());
 
         for(const auto& [key_str, val] : data)
         {
-            std::span<const uint8_t> key_span(reinterpret_cast<const uint8_t*>(key_str.data()), key_str.size());
-            std::span<const uint8_t> val_span(reinterpret_cast<const uint8_t*>(&val), sizeof(val));
+            std::span<const std::byte> key_span(reinterpret_cast<const std::byte*>(key_str.data()), key_str.size());
+            std::span<const std::byte> val_span(reinterpret_cast<const std::byte*>(&val), sizeof(val));
 
-            auto push_status = writer.push(key_span, val_span, [](std::span<const uint8_t>) {});
+            auto push_status = writer.push(key_span, val_span, [](std::span<const std::byte>) {});
 
             if(!push_status && push_status.error().code() == errc::BUFFER_FULL)
             {
                 out.write(reinterpret_cast<char*>(buffer.data()), writer.bytes_written());
                 writer.reset();
 
-                push_status = writer.push(key_span, val_span, [](std::span<const uint8_t>) {});
+                push_status = writer.push(key_span, val_span, [](std::span<const std::byte>) {});
                 ASSERT_TRUE(push_status) << "Failed to push even after reset";
             }
             else
@@ -184,10 +184,10 @@ TEST_P(RollingBufferTest, WriteAndReadBack)
                 }
 
                 const auto& [exp_key_str, exp_val] = data[idx];
-                std::span<const uint8_t> exp_key_span(reinterpret_cast<const uint8_t*>(exp_key_str.data()), exp_key_str.size());
-                std::span<const uint8_t> exp_val_span(reinterpret_cast<const uint8_t*>(&exp_val), sizeof(exp_val));
+                std::span<const std::byte> exp_key_span(reinterpret_cast<const std::byte*>(exp_key_str.data()), exp_key_str.size());
+                std::span<const std::byte> exp_val_span(reinterpret_cast<const std::byte*>(&exp_val), sizeof(exp_val));
 
-                auto spans_equal = [](std::span<const uint8_t> a, std::span<const uint8_t> b)
+                auto spans_equal = [](std::span<const std::byte> a, std::span<const std::byte> b)
                 {
                     return a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size()) == 0;
                 };

@@ -18,11 +18,11 @@ namespace hedge::db
 
     class sst_stream
     {
-        std::deque<page_aligned_buffer<uint8_t>> _buffers;
+        std::deque<page_aligned_buffer<std::byte>> _buffers;
         [[maybe_unused]] size_t _read_ahead_size;
         file_reader _reader;
 
-        std::deque<page_aligned_buffer<uint8_t>>::iterator _cur_buffer{};
+        std::deque<page_aligned_buffer<std::byte>>::iterator _cur_buffer{};
 
         // Reader
         block_buffer_reader _block_reader = block_buffer_reader{true};
@@ -41,7 +41,7 @@ namespace hedge::db
             return static_cast<const db::sst&>(this->_reader.file());
         }
 
-        [[nodiscard]] hedge::status _push(page_aligned_buffer<uint8_t>&& buffer)
+        [[nodiscard]] hedge::status _push(page_aligned_buffer<std::byte>&& buffer)
         {
             this->_buffers.emplace_back(std::move(buffer));
 
@@ -54,7 +54,7 @@ namespace hedge::db
             return hedge::ok();
         }
 
-        [[nodiscard]] hedge::status _start_consuming_buffer(const std::deque<page_aligned_buffer<uint8_t>>::iterator& buffer_it)
+        [[nodiscard]] hedge::status _start_consuming_buffer(const std::deque<page_aligned_buffer<std::byte>>::iterator& buffer_it)
         {
             return this->_block_reader.reset(buffer_it->begin(),
                                              buffer_it->end());

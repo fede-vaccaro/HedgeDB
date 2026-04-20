@@ -54,17 +54,17 @@ namespace hedge::db
     {
         key_t _key;
         uint64_t seq = 0;
-        std::span<const uint8_t> _value;
+        std::span<const std::byte> _value;
 
         memtable_entry() = default;
-        memtable_entry(key_t k, uint64_t s, std::span<const uint8_t> v) : _key(std::move(k)), seq(s), _value(v) {}
+        memtable_entry(key_t k, uint64_t s, std::span<const std::byte> v) : _key(std::move(k)), seq(s), _value(v) {}
 
-        [[nodiscard]] std::span<const uint8_t> key() const
+        [[nodiscard]] std::span<const std::byte> key() const
         {
             return this->_key;
         }
 
-        [[nodiscard]] std::span<const uint8_t> value() const
+        [[nodiscard]] std::span<const std::byte> value() const
         {
             return this->_value;
         }
@@ -81,6 +81,6 @@ namespace hedge::db
         }
     };
 
-    using skiplist_t = third_party::folly::ConcurrentSkipList<memtable_entry, memtable_cmp, std::allocator<uint8_t>>;
+    using skiplist_t = third_party::folly::ConcurrentSkipList<memtable_entry, memtable_cmp, std::allocator<std::byte>>;
 
 } // namespace hedge::db

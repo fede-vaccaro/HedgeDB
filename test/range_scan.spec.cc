@@ -23,10 +23,10 @@
 
 std::string to_hex_string(const hedge::key_t& key)
 {
-    auto key_span = static_cast<std::span<const uint8_t>>(key);
+    auto key_span = static_cast<std::span<const std::byte>>(key);
     std::stringstream ss;
     ss << std::hex << std::setfill('0');
-    for(uint8_t c : key_span)
+    for(std::byte c : key_span)
     {
         ss << std::setw(2) << static_cast<int>(c);
     }
@@ -41,26 +41,26 @@ struct scan_test_helpers
     hedge::key_t generate_key(size_t length)
     {
         auto k = hedge::key_t::make_with_length(length);
-        auto span = static_cast<std::span<uint8_t>>(k);
+        auto span = static_cast<std::span<std::byte>>(k);
         for(size_t i = 0; i < length; ++i)
             span[i] = dist(generator);
         return k;
     }
 
-    static void generate_inline_value(std::span<uint8_t> buffer, size_t seed)
+    static void generate_inline_value(std::span<std::byte> buffer, size_t seed)
     {
         assert(buffer.size() == TEST_VALUE_SIZE);
         seed = seed * 31 + 17;
-        auto byte_seed = static_cast<uint8_t>(seed & 0xFF);
+        auto byte_seed = static_cast<std::byte>(seed & 0xFF);
         std::ranges::for_each(buffer,
-                              [&](uint8_t& byte)
+                              [&](std::byte& byte)
                               {
                                   byte = byte_seed;
                                   byte_seed = byte_seed * 31 + 17;
                               });
     }
 
-    static void generate_value_ptr(std::span<uint8_t> buffer, size_t seed)
+    static void generate_value_ptr(std::span<std::byte> buffer, size_t seed)
     {
         size_t fake_offset = (seed * 1234567) % (1ULL << 32);
         size_t fake_size = (seed % 1024) + 1;
@@ -76,12 +76,12 @@ struct scan_test_helpers
                 {
                     hedge::value_ptr_t groundtruth{};
                     generate_value_ptr(
-                        std::span<uint8_t>{reinterpret_cast<uint8_t*>(&groundtruth), sizeof(groundtruth)}, seed);
+                        std::span<std::byte>{reinterpret_cast<std::byte*>(&groundtruth), sizeof(groundtruth)}, seed);
                     return groundtruth == v;
                 },
-                [seed](const std::vector<uint8_t>& v) -> bool
+                [seed](const std::vector<std::byte>& v) -> bool
                 {
-                    std::vector<uint8_t> groundtruth(TEST_VALUE_SIZE);
+                    std::vector<std::byte> groundtruth(TEST_VALUE_SIZE);
                     generate_inline_value(groundtruth, seed);
                     return std::equal(groundtruth.begin(), groundtruth.end(), v.begin());
                 },
@@ -91,24 +91,24 @@ struct scan_test_helpers
             value);
     }
 
-    std::span<uint8_t> generate_value(hedge::single_buffer_arena_allocator& arena, size_t seed, hedge::value_type type)
+    std::span<std::byte> generate_value(hedge::single_buffer_arena_allocator& arena, size_t seed, hedge::value_type type)
     {
-        std::span<uint8_t> buffer;
+        std::span<std::byte> buffer;
         switch(type)
         {
             case hedge::value_type::VALUE_PTR:
                 buffer = arena.allocate(sizeof(hedge::value_ptr_t) + 1);
-                buffer[0] = static_cast<uint8_t>(hedge::value_type::VALUE_PTR);
+                buffer[0] = static_cast<std::byte>(hedge::value_type::VALUE_PTR);
                 generate_value_ptr(buffer.subspan(1), seed);
                 break;
             case hedge::value_type::IN_PLACE_VALUE:
                 buffer = arena.allocate(TEST_VALUE_SIZE + 1);
-                buffer[0] = static_cast<uint8_t>(hedge::value_type::IN_PLACE_VALUE);
+                buffer[0] = static_cast<std::byte>(hedge::value_type::IN_PLACE_VALUE);
                 generate_inline_value(buffer.subspan(1), seed);
                 break;
             case hedge::value_type::TOMBSTONE:
                 buffer = arena.allocate(1);
-                buffer[0] = static_cast<uint8_t>(hedge::value_type::TOMBSTONE);
+                buffer[0] = static_cast<std::byte>(hedge::value_type::TOMBSTONE);
                 break;
             default:
                 throw std::invalid_argument("Invalid value type");

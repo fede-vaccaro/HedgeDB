@@ -52,12 +52,12 @@ namespace hedge::db
             buffers_t buffer_vec;
             buffer_vec.reserve(num_bufs);
 
-            std::vector<uint8_t*> buffer_ptrs;
+            std::vector<std::byte*> buffer_ptrs;
             buffer_ptrs.reserve(num_bufs);
 
             for(size_t i = 0; i < num_bufs; ++i)
             {
-                auto* buf_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE_IN_BYTES, PAGE_SIZE_IN_BYTES));
+                auto* buf_ptr = static_cast<std::byte*>(aligned_alloc(PAGE_SIZE_IN_BYTES, PAGE_SIZE_IN_BYTES));
                 if(buf_ptr == nullptr)
                     throw std::runtime_error("Bould not allocate buffer");
 

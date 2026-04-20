@@ -36,12 +36,12 @@ namespace hedge::db
         return k;
     }
 
-    static std::vector<uint8_t> make_test_value(size_t i, size_t payload_size)
+    static std::vector<std::byte> make_test_value(size_t i, size_t payload_size)
     {
-        std::vector<uint8_t> v(payload_size);
+        std::vector<std::byte> v(payload_size);
         uint64_t h = xxh64::hash(reinterpret_cast<const char*>(&i), sizeof(i), SEED + 1);
         for(size_t j = 0; j < payload_size; ++j)
-            v[j] = static_cast<uint8_t>((h >> (j % 8 * 8)) ^ j);
+            v[j] = static_cast<std::byte>((h >> (j % 8 * 8)) ^ j);
         return v;
     }
 
@@ -169,13 +169,13 @@ namespace hedge::db
                 }
 
                 auto& val = maybe_value.value();
-                if(!std::holds_alternative<std::vector<uint8_t>>(val))
+                if(!std::holds_alternative<std::vector<std::byte>>(val))
                 {
                     ++mismatches;
                     continue;
                 }
 
-                auto& recovered = std::get<std::vector<uint8_t>>(val);
+                auto& recovered = std::get<std::vector<std::byte>>(val);
                 if(recovered != expected)
                     ++mismatches;
             }

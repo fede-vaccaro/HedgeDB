@@ -178,7 +178,7 @@ hedge::async::task<void> get_obj([[maybe_unused]] hedge::async::read_request r, 
             break;
     }
 
-    // [[maybe_unused]] auto data_ptr = static_cast<uint8_t*>(aligned_alloc(PAGE_SIZE, PAGE_SIZE));
+    // [[maybe_unused]] auto data_ptr = static_cast<std::byte*>(aligned_alloc(PAGE_SIZE, PAGE_SIZE));
     // r.data = data_ptr;
 
     // [[maybe_unused]] auto response_f = co_await executor.submit_request(r);
@@ -194,9 +194,9 @@ hedge::async::task<void> get_obj([[maybe_unused]] hedge::async::read_request r, 
     //     throw std::runtime_error("Data size mismatch");
     // }
 
-    // std::vector<uint8_t> data{};
-    // data.assign(static_cast<uint8_t*>(response.data.get()),
-    //             static_cast<uint8_t*>(response.data.get()) + response.bytes_read);
+    // std::vector<std::byte> data{};
+    // data.assign(static_cast<std::byte*>(response.data.get()),
+    //             static_cast<std::byte*>(response.data.get()) + response.bytes_read);
 
     // log("[get_obj] received data of size: ", data.size());
 

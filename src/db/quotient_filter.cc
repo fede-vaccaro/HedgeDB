@@ -1,4 +1,5 @@
 
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <error.hpp>
@@ -39,9 +40,9 @@ namespace hedge::db
         }
     }
 
-    hedge::expected<quotient_filter> quotient_filter::load(const uint8_t* header_data,
-                                                          const uint8_t* table_data,
-                                                          size_t table_size)
+    hedge::expected<quotient_filter> quotient_filter::load(const std::byte* header_data,
+                                                           const std::byte* table_data,
+                                                           size_t table_size)
     {
         third_party::quotient_filter raw_qf{};
         std::memcpy(&raw_qf, header_data, sizeof(raw_qf));
@@ -76,14 +77,14 @@ namespace hedge::db
         return qf;
     }
 
-    [[nodiscard]] std::span<const uint8_t> quotient_filter::data_as_byte_span() const
+    [[nodiscard]] std::span<const std::byte> quotient_filter::data_as_byte_span() const
     {
-        return {reinterpret_cast<const uint8_t*>(this->_qf_impl.qf_table), third_party::qf_allocated_size(&this->_qf_impl)};
+        return {reinterpret_cast<const std::byte*>(this->_qf_impl.qf_table), third_party::qf_allocated_size(&this->_qf_impl)};
     }
 
-    [[nodiscard]] std::span<const uint8_t> quotient_filter::header_as_byte_span() const
+    [[nodiscard]] std::span<const std::byte> quotient_filter::header_as_byte_span() const
     {
-        return {reinterpret_cast<const uint8_t*>(&this->_qf_impl), sizeof(this->_qf_impl)};
+        return {reinterpret_cast<const std::byte*>(&this->_qf_impl), sizeof(this->_qf_impl)};
     }
 
 } // namespace hedge::db

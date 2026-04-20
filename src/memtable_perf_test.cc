@@ -61,11 +61,11 @@ struct _NullStream
 
 static hedge::key_t make_key(uint64_t /**/)
 {
-    std::array<uint8_t, 24> bytes{};
+    std::array<std::byte, 24> bytes{};
     thread_local std::mt19937_64 rng{std::random_device{}()};
-    std::uniform_int_distribution<uint8_t> dist;
+    std::uniform_int_distribution<uint8_t> dist{0, 255};
     for(auto& byte : bytes)
-        byte = dist(rng);
+        byte = static_cast<std::byte>(dist(rng));
     return hedge::key_t(bytes);
 }
 
@@ -73,13 +73,13 @@ static hedge::key_t make_key(uint64_t /**/)
 // Coroutine task — one per thread
 // ---------------------------------------------------------------------------
 
-static const std::vector<uint8_t> DUMMY_VALUE = []()
+static const std::vector<std::byte> DUMMY_VALUE = []()
 {
-    std::vector<uint8_t> dummy(100);
+    std::vector<std::byte> dummy(100);
     thread_local std::mt19937_64 rng{std::random_device{}()};
-    std::uniform_int_distribution<uint8_t> dist;
+    std::uniform_int_distribution<uint8_t> dist{0, 255};
     for(auto& byte : dummy)
-        byte = dist(rng);
+        byte = static_cast<std::byte>(dist(rng));
     return dummy;
 }();
 
@@ -129,7 +129,8 @@ int main()
         /*indices_path=*/"/tmp/indices_test",
         &flush_epoch,
         flusher_pool,
-        /*push_new_indices=*/[](std::vector<hedge::db::sst> /**/) {},
+        /*push_new_indices=*/[](std::vector<hedge::db::sst> /**/) -> tmc::task<void>
+        { co_return; },
         /*trigger_compaction_callback=*/[] {},
         /*page_cache=*/nullptr);
 

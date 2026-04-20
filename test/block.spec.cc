@@ -20,7 +20,7 @@ namespace hedge::db
             return static_cast<size_t>(builder._head - builder._base);
         }
 
-        [[nodiscard]] uint32_t shared_prefix_length(std::span<const uint8_t> prev, std::span<const uint8_t> curr) const
+        [[nodiscard]] uint32_t shared_prefix_length(std::span<const std::byte> prev, std::span<const std::byte> curr) const
         {
             return block_encoder::_compute_shared_prefix_length(prev, curr);
         }
@@ -30,12 +30,12 @@ namespace hedge::db
     {
     };
 
-    std::span<const uint8_t> to_unsigned_span(std::string_view s)
+    std::span<const std::byte> to_unsigned_span(std::string_view s)
     {
-        return {reinterpret_cast<const uint8_t*>(s.data()), s.size()};
+        return {reinterpret_cast<const std::byte*>(s.data()), s.size()};
     }
 
-    bool span_cmpr(std::span<const uint8_t> a, std::string_view b)
+    bool span_cmpr(std::span<const std::byte> a, std::string_view b)
     {
         if(a.size() != b.size())
             return false;
@@ -57,7 +57,7 @@ namespace hedge::db
         return result;
     }
 
-    void check_restart_key(size_t& bytes_read, const std::vector<uint8_t>& buffer, const std::string& key, const std::string& value, std::string* out_key = nullptr)
+    void check_restart_key(size_t& bytes_read, const std::vector<std::byte>& buffer, const std::string& key, const std::string& value, std::string* out_key = nullptr)
     {
         // 1. Check key length
         ASSERT_EQ(buffer[bytes_read], key.size() - 1); // Encoded key size is actual size - 1
@@ -69,7 +69,7 @@ namespace hedge::db
         bytes_read += key.size();
 
         // 3. Check value length, decode varint
-        hedge::expected<std::pair<uint64_t, size_t>> decoded_value = try_decode_varint(std::span<const uint8_t>(buffer.data() + bytes_read, MAX_VARINT_LENGTH_32));
+        hedge::expected<std::pair<uint64_t, size_t>> decoded_value = try_decode_varint(std::span<const std::byte>(buffer.data() + bytes_read, MAX_VARINT_LENGTH_32));
         ASSERT_TRUE(decoded_value);
         ASSERT_EQ(decoded_value.value().first, value.size());
         bytes_read += decoded_value.value().second;
@@ -82,7 +82,7 @@ namespace hedge::db
             *out_key = std::move(key_from_buffer);
     }
 
-    void check_delta_key(size_t& bytes_read, size_t shared_prefix_length, const std::vector<uint8_t>& buffer, const std::string& key, const std::string& value, std::string* out_key = nullptr)
+    void check_delta_key(size_t& bytes_read, size_t shared_prefix_length, const std::vector<std::byte>& buffer, const std::string& key, const std::string& value, std::string* out_key = nullptr)
     {
         // 1. Check prefix length
         ASSERT_EQ(buffer[bytes_read], shared_prefix_length);
@@ -99,7 +99,7 @@ namespace hedge::db
         bytes_read += delta_key_length;
 
         // 4. Check value length, decode varint
-        hedge::expected<std::pair<uint64_t, size_t>> decoded_value = try_decode_varint(std::span<const uint8_t>(buffer.data() + bytes_read, MAX_VARINT_LENGTH_32));
+        hedge::expected<std::pair<uint64_t, size_t>> decoded_value = try_decode_varint(std::span<const std::byte>(buffer.data() + bytes_read, MAX_VARINT_LENGTH_32));
         ASSERT_TRUE(decoded_value);
         ASSERT_EQ(decoded_value.value().first, value.size());
         bytes_read += decoded_value.value().second;
@@ -114,7 +114,7 @@ namespace hedge::db
 
     TEST_F(BlockTestBasic, TestPushOne)
     {
-        std::vector<uint8_t> buffer(4096);
+        std::vector<std::byte> buffer(4096);
 
         block_config cfg{
             .block_size_in_bytes = 4096,
@@ -144,7 +144,7 @@ namespace hedge::db
 
     TEST_F(BlockTestBasic, TestPushTwo_DeltaKey)
     {
-        std::vector<uint8_t> buffer(4096);
+        std::vector<std::byte> buffer(4096);
 
         block_config cfg{
             .block_size_in_bytes = 4096,
@@ -195,7 +195,7 @@ namespace hedge::db
 
     TEST_F(BlockTestBasic, TestPushThree_TwoDeltaKey)
     {
-        std::vector<uint8_t> buffer(4096);
+        std::vector<std::byte> buffer(4096);
 
         block_config cfg{
             .block_size_in_bytes = 4096,
@@ -354,7 +354,7 @@ namespace hedge::db
         if(this->skip_invalid_range())
             GTEST_SKIP_("skipping due to invalid range");
 
-        std::vector<uint8_t> buffer(4096);
+        std::vector<std::byte> buffer(4096);
 
         auto cfg = block_config{
             .block_size_in_bytes = 4096,
@@ -429,7 +429,7 @@ namespace hedge::db
         for(auto i = 0UL; i < keys.size(); ++i)
         {
             auto found_value_span = reader.find(to_unsigned_span(keys[i]));
-            auto found_value = std::vector<uint8_t>{found_value_span.begin(), found_value_span.end()};
+            auto found_value = std::vector<std::byte>{found_value_span.begin(), found_value_span.end()};
 
             if(i < inserted_keys)
                 ASSERT_TRUE(span_cmpr(found_value, values[i])) << "Find value mismatch for key " << i << ": " << std::string(found_value.begin(), found_value.end()) << " vs " << values[i];
