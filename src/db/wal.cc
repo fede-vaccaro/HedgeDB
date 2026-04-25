@@ -5,6 +5,7 @@
 #include <cstring>
 #include <filesystem>
 #include <numeric>
+#include <ranges>
 #include <stdexcept>
 #include <unistd.h>
 #include <vector>
@@ -22,19 +23,12 @@ namespace
 {
     struct wal_entry
     {
-        size_t epoch;
         uint64_t seq_nr;
         hedge::key_t key;
         std::vector<std::byte> value;
     };
 
-    struct wal_file_info
-    {
-        std::filesystem::path path;
-        size_t epoch;
-    };
-
-    hedge::async::generator<hedge::expected<wal_entry>> read_wal_file_generator(std::filesystem::path path, size_t epoch)
+    hedge::async::generator<hedge::expected<wal_entry>> read_wal_file_generator(std::filesystem::path path)
     {
         auto maybe_file = hedge::fs::file::from_path(path, hedge::fs::file::open_mode::read_only, false);
         if(!maybe_file)
@@ -150,16 +144,15 @@ namespace
             }
 
             co_yield wal_entry{
-                .epoch = epoch,
                 .seq_nr = seq_nr,
                 .key = std::move(key),
                 .value = std::move(value)};
         }
     }
 
-    std::vector<wal_file_info> collect_wal_files(const std::filesystem::path& path)
+    std::vector<std::filesystem::path> collect_wal_files(const std::filesystem::path& path)
     {
-        std::vector<wal_file_info> files;
+        std::vector<std::filesystem::path> files;
         if(!std::filesystem::exists(path))
             return files;
 
@@ -168,34 +161,28 @@ namespace
             if(!entry.is_regular_file() || entry.file_size() == 0)
                 continue;
 
-            auto fname = entry.path().filename().string();
-            if(!fname.starts_with("wal."))
+            if(!entry.path().filename().string().starts_with(hedge::db::wal::WAL_FILE_PREFIX))
                 continue;
 
-            auto last_dot = fname.rfind('.');
-            if(last_dot == std::string::npos)
-                continue;
-
-            size_t epoch = std::stoull(fname.substr(last_dot + 1));
-            files.push_back({entry.path(), epoch});
+            files.push_back(entry.path());
         }
 
         return files;
     }
 
-    std::vector<wal_entry> read_all_entries(const std::vector<wal_file_info>& files, logger& log)
+    std::vector<wal_entry> read_all_entries(const std::vector<std::filesystem::path>& files, logger& log)
     {
         bool any_errors = false;
         std::vector<wal_entry> entries;
 
-        for(const auto& wf : files)
+        for(const auto& path : files)
         {
-            for(auto& entry : read_wal_file_generator(wf.path, wf.epoch))
+            for(auto& entry : read_wal_file_generator(path))
             {
                 if(!entry) [[unlikely]]
                 {
                     any_errors = true;
-                    log.log("Error reading WAL file ", wf.path, ": ", entry.error().to_string());
+                    log.log("Error reading WAL file ", path, ": ", entry.error().to_string());
                     continue;
                 }
                 entries.push_back(std::move(entry.value()));
@@ -205,14 +192,8 @@ namespace
         if(any_errors)
             throw std::runtime_error("Errors occurred while reading WAL files; see log for details");
 
-        std::ranges::sort(
-            entries,
-            [](const wal_entry& a, const wal_entry& b)
-            {
-                if(a.epoch != b.epoch)
-                    return a.epoch < b.epoch;
-                return a.seq_nr < b.seq_nr;
-            });
+        std::ranges::sort(entries, [](const wal_entry& a, const wal_entry& b)
+                          { return a.seq_nr < b.seq_nr; });
 
         return entries;
     }
@@ -222,17 +203,16 @@ namespace
 namespace hedge::db
 {
 
-    wal::wal(const config& cfg)
+    wal::wal(const config& cfg) : _file_size_hint(cfg.file_size_hint)
     {
         this->_files.reserve(cfg.n_threads);
-        for(size_t i = 0; i < cfg.n_threads; ++i)
+        for(const auto i : std::views::iota(size_t{0}, cfg.n_threads))
         {
-            const auto wal_path = std::format("wal.t{}.{}", i, cfg.epoch);
+            const auto wal_path = std::format("{}.{}.{}", wal::WAL_FILE_PREFIX, i, cfg.slot_idx);
             auto maybe_file = fs::file::from_path(
                 cfg.base_path / wal_path,
-                fs::file::open_mode::write_append_new,
-                false,
-                std::nullopt);
+                fs::file::open_mode::read_write_create_append,
+                false);
 
             if(!maybe_file.has_value())
                 throw std::runtime_error("could not open wal " + (cfg.base_path / wal_path).string() +
@@ -241,9 +221,6 @@ namespace hedge::db
             ::fallocate(maybe_file.value().fd(), FALLOC_FL_KEEP_SIZE, 0, static_cast<off_t>(cfg.file_size_hint));
             this->_files.emplace_back(std::move(maybe_file.value()));
         }
-
-        if(cfg.dir_fd)
-            ::fdatasync(*cfg.dir_fd);
     }
 
     hedge::status wal::_write_entry(int32_t fd, uint64_t seq_nr,
@@ -254,13 +231,15 @@ namespace hedge::db
 
         uint32_t checksum;
 
+        // clang-format off
         std::array<iovec, 6> entry{
-            iovec{.iov_base = &seq_nr, .iov_len = sizeof(uint64_t)},
-            iovec{.iov_base = &encoded_key_size, .iov_len = sizeof(uint8_t)},
-            iovec{.iov_base = const_cast<std::byte*>(key.data()), .iov_len = key.size()},
-            iovec{.iov_base = &value_size, .iov_len = sizeof(uint16_t)},
+            iovec{.iov_base = &seq_nr,                              .iov_len = sizeof(uint64_t)},
+            iovec{.iov_base = &encoded_key_size,                    .iov_len = sizeof(uint8_t)},
+            iovec{.iov_base = const_cast<std::byte*>(key.data()),   .iov_len = key.size()},
+            iovec{.iov_base = &value_size,                          .iov_len = sizeof(uint16_t)},
             iovec{.iov_base = const_cast<std::byte*>(value.data()), .iov_len = value.size()},
-            iovec{.iov_base = &checksum, .iov_len = sizeof(uint32_t)}};
+            iovec{.iov_base = &checksum,                            .iov_len = sizeof(uint32_t)}};
+        // clang-format on
 
         // Update hasher with all entry components except the checksum itself
         thread_local hedge::third_party::hasher64 hasher;
@@ -314,11 +293,13 @@ namespace hedge::db
         return hedge::ok();
     }
 
-    void wal::remove()
+    void wal::reset()
     {
-        for(const auto& f : _files)
-            std::filesystem::remove(f.path());
-        _files.clear();
+        for(const auto& f : this->_files)
+        {
+            [[maybe_unused]] int r = ::ftruncate(f.fd(), 0);
+            ::fallocate(f.fd(), FALLOC_FL_KEEP_SIZE, 0, static_cast<off_t>(this->_file_size_hint));
+        }
     }
 
 } // namespace hedge::db

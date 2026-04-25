@@ -81,7 +81,6 @@ namespace hedge::db
         cfg.use_wal = true;
 
         std::atomic_size_t flush_epoch{0};
-        size_t wal_epoch;
 
         // Phase 1: Create memtable, write keys, drop without flushing
         {
@@ -124,20 +123,17 @@ namespace hedge::db
             size_t wal_count = 0;
             for(const auto& entry : std::filesystem::directory_iterator(_indices_path))
             {
-                if(entry.path().filename().string().starts_with("wal."))
+                if(entry.path().filename().string().starts_with(hedge::db::wal::WAL_FILE_PREFIX))
                     ++wal_count;
             }
             ASSERT_GT(wal_count, 0) << "No WAL files found after writes";
             std::cout << "WAL files after write: " << wal_count << std::endl;
-
-            wal_epoch = mt.wal_epoch();
 
             // Drop memtable without flushing — simulates crash
         }
 
         // Phase 2: Create new memtable and replay WAL
         {
-            cfg.starting_wal_epoch = wal_epoch;
             memtable mt(
                 cfg,
                 4,
@@ -191,7 +187,7 @@ namespace hedge::db
             for(const auto& entry : std::filesystem::directory_iterator(_indices_path))
             {
                 auto fname = entry.path().filename().string();
-                if(fname.starts_with("wal.") && entry.file_size() > 0)
+                if(fname.starts_with(hedge::db::wal::WAL_FILE_PREFIX) && entry.file_size() > 0)
                     ++remaining_wals;
             }
             EXPECT_EQ(remaining_wals, 0) << "Old WAL files should be deleted after replay";
@@ -212,7 +208,6 @@ namespace hedge::db
         cfg.use_wal = true;
 
         std::atomic_size_t flush_epoch{0};
-        size_t wal_epoch;
 
         // Phase 1: write keys, capture seq_nr before "crash"
         uint64_t seq_nr_before_crash;
@@ -223,7 +218,8 @@ namespace hedge::db
                 _indices_path,
                 &flush_epoch,
                 executor,
-                [](std::vector<sst>) -> tmc::task<void> { co_return; },
+                [](std::vector<sst>) -> tmc::task<void>
+                { co_return; },
                 []() {},
                 nullptr);
 
@@ -249,19 +245,18 @@ namespace hedge::db
             tmc::post_waitable(*wal_replay_test::executor, make_put_task()).wait();
 
             seq_nr_before_crash = mt.acquire_snapshot().seq_nr;
-            wal_epoch = mt.wal_epoch();
         }
 
         // Phase 2: replay into a fresh memtable and verify seq_nr is restored
         {
-            cfg.starting_wal_epoch = wal_epoch;
             memtable mt(
                 cfg,
                 4,
                 _indices_path,
                 &flush_epoch,
                 executor,
-                [](std::vector<sst>) -> tmc::task<void> { co_return; },
+                [](std::vector<sst>) -> tmc::task<void>
+                { co_return; },
                 []() {},
                 nullptr);
 

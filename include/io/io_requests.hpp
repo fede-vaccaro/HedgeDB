@@ -18,6 +18,7 @@ namespace hedge::io
     hedge::io::aw_io ftruncate(int32_t fd, size_t length);
     hedge::io::aw_io unlink(std::string path, int32_t flags = 0);
     hedge::io::aw_io send_msg(int32_t target_ring_fd, uint64_t data, int32_t len);
+    hedge::io::aw_io timeout(__kernel_timespec ts, unsigned count = 0, unsigned flags = 0);
 
 #ifdef HEDGE_IO_IMPL
 #undef HEDGE_IO_IMPL
@@ -84,6 +85,11 @@ namespace hedge::io
     hedge::io::aw_io send_msg(int32_t target_ring_fd, uint64_t data, int32_t len)
     {
         return hedge::io::aw_io{std::make_unique<hedge::io::io_send_msg_request>(target_ring_fd, data, len)};
+    }
+
+    hedge::io::aw_io timeout(__kernel_timespec ts, unsigned count, unsigned flags)
+    {
+        return hedge::io::aw_io{std::make_unique<hedge::io::io_timeout_request>(ts, count, flags)};
     }
 
 #endif // HEDGE_IO_IMPL

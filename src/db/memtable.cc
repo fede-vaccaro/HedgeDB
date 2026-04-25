@@ -11,7 +11,6 @@
 #include <shared_mutex>
 #include <thread>
 
-#include "db/skiplist/concurrent_skip_list/micro_spin_lock.h"
 #include "error.hpp"
 #include "index_ops.h"
 #include "io/io_executor.h"
@@ -21,7 +20,6 @@
 #include "tmc/ex_cpu_st.hpp"
 #include "tmc/semaphore.hpp"
 #include "tmc/spawn.hpp"
-#include "tmc/sync.hpp"
 #include "types.h"
 #include "wal.h"
 
@@ -57,7 +55,7 @@ namespace hedge::db
                        std::atomic_size_t* flush_epoch_ptr,
                        std::shared_ptr<io::io_executor> flusher_executor,
                        std::function<tmc::task<void>(std::vector<sst>)> push_new_ssts_callback,
-                       std::function<void()> schedule_comapction_callback,
+                       std::function<void()> schedule_compaction_callback,
                        std::shared_ptr<db::sharded_page_cache> page_cache,
                        tmc::atomic_condvar<bool>* compaction_backpressure)
         : _cfg(cfg),
@@ -65,10 +63,9 @@ namespace hedge::db
           _indices_path(std::move(indices_path)),
           _flush_epoch(flush_epoch_ptr),
           _push_new_ssts_callback(std::move(push_new_ssts_callback)),
-          _schedule_compaction_callback(std::move(schedule_comapction_callback)),
+          _schedule_compaction_callback(std::move(schedule_compaction_callback)),
           _compaction_backpressure(compaction_backpressure),
           _cache(std::move(page_cache)),
-          _wal_epoch(cfg.starting_wal_epoch),
           _pending_flush_slots(cfg.max_pending_flushes),
           _flusher(std::make_unique<tmc::ex_cpu_st>()),
           _flush_executor(std::move(flusher_executor)),
@@ -81,10 +78,29 @@ namespace hedge::db
             int fd = ::open(this->_indices_path.c_str(), O_RDONLY | O_DIRECTORY);
             if(fd >= 0)
                 this->_wal_dir_fd = fd;
+            else
+                throw std::runtime_error("Failed to open WAL directory: " + std::string(std::strerror(errno)));
+
+            // Pre-allocate one WAL slot per simultaneously in-flight memtable:
+            //   1 active + 1 pipelined + max_pending_flushes pending
+            const size_t n_slots = cfg.max_pending_flushes + 2;
+            const size_t file_size_hint = cfg.memory_budget_cap / std::max(cfg.num_writer_threads, size_t{1});
+
+            this->_wal_pool = std::make_unique<wal_pool>();
+            for(const auto i : std::views::iota(size_t{0}, n_slots))
+            {
+                this->_wal_pool->slots.push_back(
+                    std::make_unique<wal>(wal::config{
+                        .base_path = this->_indices_path,
+                        .slot_idx = i,
+                        .n_threads = cfg.num_writer_threads,
+                        .file_size_hint = file_size_hint}));
+            }
+
+            ::fdatasync(*this->_wal_dir_fd);
         }
 
-        this->_table.ref()
-            .store(this->_make_memtable());
+        this->_table.ref().store(this->_make_memtable());
         this->_pipelined_table.ref().store(this->_make_memtable());
     }
 
@@ -99,16 +115,17 @@ namespace hedge::db
 
     std::shared_ptr<memtable::rw_sync_table_t> memtable::_make_memtable()
     {
+        std::unique_ptr<wal> wal_slot;
+        if(this->_wal_pool)
+            wal_slot = this->_wal_pool->pop();
+
         return std::make_shared<rw_sync_table_t>(
             this->_cfg.num_writer_threads,
             &this->_seq_nr,
-            this->_indices_path,
-            this->_wal_dir_fd,
-            this->_cfg.use_wal,
-            this->_wal_epoch.fetch_add(1, std::memory_order::relaxed),
             this->_cfg.memory_budget_cap,
             this->_cfg.num_writer_threads,
-            this->_cfg.memory_budget_cap);
+            this->_cfg.memory_budget_cap,
+            std::move(wal_slot));
     }
 
     tmc::task<hedge::status> memtable::put_async(const key_t& key, std::span<const std::byte> value, hedge::value_type value_type)
@@ -131,7 +148,7 @@ namespace hedge::db
                 auto t = this->_table.ref().load(std::memory_order::relaxed);
                 if(t == local_memtable_ref) // Backpressure if the table is not ready
                 {
-                    constexpr size_t ATTEMPTS_BEFORE_BACKPRESSURE = 8;
+                    constexpr size_t ATTEMPTS_BEFORE_BACKPRESSURE = 4;
 
                     if(insert_attempts++ < ATTEMPTS_BEFORE_BACKPRESSURE)
                     {
@@ -140,6 +157,7 @@ namespace hedge::db
                     }
 
                     HALT_COUNTER.fetch_add(1, std::memory_order::relaxed);
+
                     co_await this->_table.await(local_memtable_ref);
 
                     local_memtable_ref = this->_table.ref().load(std::memory_order::relaxed);
@@ -151,6 +169,18 @@ namespace hedge::db
                 insert_attempts = 0;
                 continue;
             }
+
+            // constexpr int32_t sleep_time_ns = 1000;   // 1 us
+            // constexpr int32_t max_yield_count = 1000; // 1 ms
+            // int32_t yield_count = 0;
+            // while(this->_pending_flush_slots.count() <= (this->_cfg.max_pending_flushes * 3) / 4 &&
+            //       yield_count < max_yield_count &&
+            //       this->_compaction_backpressure != nullptr && this->_compaction_backpressure->ref().load(std::memory_order_relaxed))
+            // {
+            //     ::third_party::folly::detail::asm_volatile_pause();
+            //     co_await tmc::yield();
+            //     yield_count++;
+            // }
 
             auto* value_ptr = memtable->value_arenas[THIS_THREAD_IDX % this->_cfg.num_writer_threads]->allocate_many(value.size() + 1, VALUE_DATA_ALIGNMENT);
             bool ok = value_ptr != nullptr; // nullptr means out of memory budget
@@ -257,27 +287,74 @@ namespace hedge::db
 
             expected_table->freeze_writes();
 
-            // Acquire a flush slot (blocks if there are max_pending_flushes in flight flushes)
-            co_await this->_pending_flush_slots;
+            // Timing harness for writer-blocking sections (for profiling purposes)
+            struct flush_latencies
+            {
+                std::chrono::microseconds acquire_flush_slot{};
+                std::chrono::microseconds wait_pipelined{};
+                std::chrono::microseconds lock_for_swap{};
+                std::chrono::microseconds total_blocking{};
+            } latencies;
 
+            auto t0 = std::chrono::high_resolution_clock::now();
+            auto t1 = t0;
+
+            // Section 1: Acquire flush slot (backpressure from max_pending_flushes)
+            t0 = std::chrono::high_resolution_clock::now();
+            co_await this->_pending_flush_slots;
+            t1 = std::chrono::high_resolution_clock::now();
+            latencies.acquire_flush_slot = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+
+            // Section 2: Wait for pipelined table to be ready
+            t0 = std::chrono::high_resolution_clock::now();
+            co_await this->_pipelined_table.await(nullptr);
+            t1 = std::chrono::high_resolution_clock::now();
+            latencies.wait_pipelined = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+
+            // Section 3: Lock for table swap
+            t0 = std::chrono::high_resolution_clock::now();
             {
                 std::unique_lock lk(this->_pending_flushes_mutex);
                 rw_sync_table_ptr_t next_in_pipeline = this->_pipelined_table.ref().exchange(nullptr);
                 memtable_to_flush = this->_table.ref().exchange(next_in_pipeline, std::memory_order::relaxed);
                 this->_pending_flushes.insert({curr_flush_epoch, memtable_to_flush});
             }
+            t1 = std::chrono::high_resolution_clock::now();
+            latencies.lock_for_swap = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+
+            // Calculate total blocking time
+            latencies.total_blocking = latencies.acquire_flush_slot + latencies.wait_pipelined + latencies.lock_for_swap;
+
+            // Log if total > 100ms or any section > 50ms
+            constexpr auto TOTAL_THRESHOLD = std::chrono::microseconds(10000);  // 10ms
+            constexpr auto SECTION_THRESHOLD = std::chrono::microseconds(5000); // 5ms
+
+            if(latencies.total_blocking > TOTAL_THRESHOLD ||
+               latencies.acquire_flush_slot > SECTION_THRESHOLD ||
+               latencies.wait_pipelined > SECTION_THRESHOLD ||
+               latencies.lock_for_swap > SECTION_THRESHOLD)
+            {
+                this->_logger.log("Flush #", curr_flush_epoch, " BLOCKING: total=", latencies.total_blocking.count(), "us | ",
+                                  "slot=", latencies.acquire_flush_slot.count(), "us | ",
+                                  "pipelined=", latencies.wait_pipelined.count(), "us | ",
+                                  "lock=", latencies.lock_for_swap.count(), "us");
+            }
 
             this->_table.notify_all();
-
-            // Publish new memtable to readers
             this->_table_switch_epoch.fetch_add(1, std::memory_order::release);
-            this->_pipelined_table.ref().store(this->_make_memtable(), std::memory_order_relaxed);
+
+            tmc::spawn([](memtable* self) -> tmc::task<void>
+                       {
+                           self->_pipelined_table.ref().store(self->_make_memtable(), std::memory_order::relaxed);
+                           self->_pipelined_table.notify_one();
+                           co_return; }(this))
+                .run_on(*this->_flusher)
+                .detach();
+
             auto next_can_write = std::make_shared<tmc::semaphore>(0);
             auto can_write = std::exchange(this->_can_write, next_can_write);
 
-            // Launch flush job on the flusher executor
             tmc::spawn(this->_flush_inner(curr_flush_epoch, memtable_to_flush, can_write, next_can_write))
-                // .with_priority(0)
                 .run_on(*this->_flush_executor)
                 .detach();
 
@@ -353,9 +430,12 @@ namespace hedge::db
         // Release the flush slot (when there is no pressure from compaction)
         this->_pending_flush_slots.release();
 
-        // Flush done: remove old WALs
-        if(auto& w = memtable_to_flush->ptr()->_wal; w.has_value())
-            w->remove();
+        // Flush done: reset WAL files and return the slot to the pool
+        if(auto& w = memtable_to_flush->ptr()->_wal; w)
+        {
+            w->reset();
+            this->_wal_pool->push(std::move(w));
+        }
 
         // Schedule compaction
         // NB behind the callback, the `sst_manager` might decided to not doing anything,

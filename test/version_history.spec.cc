@@ -75,7 +75,7 @@ namespace hedge::db
             cfg.compaction_read_ahead_size_bytes = 1 * MiB;
             cfg.num_partition_exponent = num_partition_exponent;
             cfg.bucket_ratio = 1.50;
-            cfg.use_odirect_for_indices = true;
+            cfg.use_odirect_for_ssts = true;
             cfg.index_page_clock_cache_size_bytes = 0;
             cfg.index_point_cache_size_bytes = 0;
             cfg.compaction_io_workers = 2;

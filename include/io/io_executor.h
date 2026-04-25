@@ -3,6 +3,7 @@
 #include "io_ctx.h"
 #include "tmc/detail/concepts_awaitable.hpp"
 #include "tmc/ex_cpu.hpp"
+#include "tmc/topology.hpp"
 #include "tmc/work_item.hpp"
 
 namespace hedge::io
@@ -19,10 +20,10 @@ namespace hedge::io
         std::string name_prefix;
 
     public:
-        explicit io_executor(uint32_t n_threads, uint32_t queue_depth, std::optional<std::string> name = std::nullopt);
+        explicit io_executor(uint32_t n_threads, uint32_t queue_depth, std::optional<std::string> name = std::nullopt, tmc::topology::cpu_kind::value pin_to = tmc::topology::cpu_kind::ALL);
 
         io_executor() = default;
-        io_executor& init(uint32_t n_threads, uint32_t queue_depth, std::optional<std::string> name = std::nullopt);
+        io_executor& init(uint32_t n_threads, uint32_t queue_depth, std::optional<std::string> name = std::nullopt, tmc::topology::cpu_kind::value pin_to = tmc::topology::cpu_kind::ALL);
 
         [[nodiscard]] uint32_t num_threads() const
         {
@@ -40,6 +41,8 @@ namespace hedge::io
         {
             return this->_ex;
         }
+
+        void shutdown();
 
         ~io_executor();
     };

@@ -47,6 +47,7 @@ namespace hedge::fs
             read_write = O_RDWR,
             read_write_new = O_RDWR | O_CREAT | O_TRUNC,
             read_write_append = O_RDWR | O_APPEND,
+            read_write_create_append = O_RDWR | O_CREAT | O_APPEND,
         };
 
     private:
@@ -146,8 +147,8 @@ namespace hedge::fs
                         break;
                     }
                     case open_mode::write_append_new:
-                        break;
                     case open_mode::read_write_append:
+                    case open_mode::read_write_create_append:
                         break;
                 };
             }
@@ -218,6 +219,7 @@ namespace hedge::fs
                     }
                     case open_mode::write_append_new:
                     case open_mode::read_write_append:
+                    case open_mode::read_write_create_append:
                         break;
                 };
             }

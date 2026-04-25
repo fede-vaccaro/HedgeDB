@@ -36,8 +36,8 @@ namespace hedge::db
             size_t max_merge_width{16};
             double bucket_ratio{1.5};
             size_t compaction_read_ahead_size_bytes{2 * MiB};
-            bool use_odirect_for_indices{true};
-            std::filesystem::path indices_path;
+            bool use_odirect_for_ssts{true};
+            std::filesystem::path partitions_path;
         };
 
         sst_manager() = default;
@@ -136,6 +136,8 @@ namespace hedge::db
 
         std::mutex _pending_compactions_mutex;
         int64_t _pending_compacting_sst_for_backpressure_count{0};
+        
+        std::mutex _total_pending_compactions_mutex;
         int64_t _total_pending_compacting_sst_count{0};
         std::condition_variable _pending_compactions_cv;
 

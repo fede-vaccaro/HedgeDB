@@ -1,7 +1,6 @@
 #pragma once
 
 #include <chrono>
-#include <cstdint>
 #include <filesystem>
 #include <memory>
 
@@ -34,7 +33,7 @@ namespace hedge::db
         /// Memory budget in bytes for the memtable before a flush is triggered.
         size_t memtable_budget_bytes = 64 * MiB;
         /// Exponent determining the number of partitions (2^num_partition_exponent). Affects index file organization.
-        size_t num_partition_exponent = 10;
+        size_t num_partition_exponent = 4;
         /// Ratio (rhs_size / lhs_size) threshold triggering compaction during a two-way merge. rhs is the smaller index.
         /// If the smaller index is less than this fraction of the larger one, the merge occurs.
         /// Higher bucket_ratio means less frequent compactions (lower write amplification) but higher read amplification (more data read during compaction).
@@ -47,8 +46,10 @@ namespace hedge::db
         bool auto_compaction = true;
         /// Maximum number of concurrent compaction tasks allowed. Will block execution of insertions if exceeded.
         size_t max_pending_compactions = 16;
-        /// If true, use O_DIRECT flag for sorted_index file I/O to bypass
-        bool use_odirect_for_indices = true;
+        /// If true, use O_DIRECT flag for sst files I/O to bypass page cache. It's used in read, compaction and flush paths.
+        bool use_odirect_for_ssts = true;
+        /// If ture, use O_DIRECT flag for WAL files I/O to bypass page cache. TODO: implement
+        bool use_odirect_for_wal = true; // NOT implemented
         /// Use 0 no cache is desired; the cache size in bytes otherwise
         size_t index_page_clock_cache_size_bytes = 3UL * GiB;
         /// Experimental; it's like a giant memtable; do not use
@@ -78,9 +79,8 @@ namespace hedge::db
     class database : public std::enable_shared_from_this<database>
     {
         // --- Immutable State (after initialization) ---
-        std::filesystem::path _base_path;    ///< Root directory for the database.
-        std::filesystem::path _indices_path; ///< Subdirectory storing sorted_index files.
-        std::filesystem::path _values_path;  ///< Subdirectory storing value_table files.
+        std::filesystem::path _base_path;       ///< Root directory for the database.
+        std::filesystem::path _partitions_path; ///< Subdirectory storing partitions and sst files.
 
         // --- Configuration ---
         db_config _config; ///< Database configuration settings.

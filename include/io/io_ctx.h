@@ -115,7 +115,7 @@ namespace hedge::io
                 auto req = this->_in_flight.extract(request_id);
                 auto continuation = req.mapped().resume(cqe->res);
 
-                tmc::post(tmc::current_executor(), std::move(continuation)); // NOLINT
+                tmc::post(tmc::current_executor(), std::move(continuation), 0, tmc::current_thread_index()); // NOLINT
 
                 cqe_count++;
             }

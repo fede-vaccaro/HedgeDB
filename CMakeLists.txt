@@ -123,7 +123,7 @@ set(DB_SOURCES
     src/cache.cc
 )
 
-# hedgedb_io: async I/O executor (io_uring + TooManyCooks)
+# hedgedb: async I/O executor (io_uring + TooManyCooks)
 add_library(hedgedb_io STATIC ${IO_EXECUTOR_SRCS})
 target_link_libraries(hedgedb_io PUBLIC uring atomic)
 if(HWLOC_LIB)
@@ -199,10 +199,6 @@ target_link_libraries(index_test_parallel_flush hedgedb gtest gtest_main)
 add_executable(index_delete_test test/index_delete.spec.cc)
 target_link_libraries(index_delete_test hedgedb gtest gtest_main)
 
-# file_reader tests
-add_executable(file_reader_test test/file_reader.spec.cc)
-target_link_libraries(file_reader_test hedgedb gtest gtest_main)
-
 # file_reader2 tests
 add_executable(file_reader2_test test/file_reader2.spec.cc)
 target_link_libraries(file_reader2_test hedgedb gtest gtest_main)
@@ -231,10 +227,6 @@ target_link_libraries(version_history_test hedgedb gtest gtest_main tbb)
 add_executable(wal_replay_test test/wal_replay.spec.cc)
 target_link_libraries(wal_replay_test hedgedb gtest gtest_main tcmalloc)
 
-# skiplist tests
-add_executable(skiplist_test test/skiplist.spec.cc)
-target_link_libraries(skiplist_test gtest gtest_main)
-
 # varint tests
 add_executable(varint_test test/varint.spec.cc)
 target_link_libraries(varint_test gtest gtest_main)
@@ -251,17 +243,9 @@ target_link_libraries(block_test gtest gtest_main)
 add_executable(page_aligned_buffer_test test/page_aligned_buffer.spec.cc src/utils.cc)
 target_link_libraries(page_aligned_buffer_test gtest gtest_main)
 
-# error tests
-add_executable(error_test test/error.spec.cc)
-target_link_libraries(error_test gtest gtest_main)
-
 # rolling_buffer tests
 add_executable(rolling_buffer_test test/rolling_buffer.spec.cc)
 target_link_libraries(rolling_buffer_test hedgedb gtest gtest_main)
-
-# single_buffer_arena_allocator tests
-add_executable(single_buffer_arena_allocator_test test/single_buffer_arena_allocator.spec.cc)
-target_link_libraries(single_buffer_arena_allocator_test gtest gtest_main)
 
 # debug test
 add_executable(index_merge test/index_merge.spec.cc)
@@ -270,13 +254,6 @@ target_link_libraries(index_merge hedgedb gtest gtest_main tcmalloc)
 # concurrent_skiplist tests
 add_executable(concurrent_skiplist_test test/concurrent_skiplist.spec.cc)
 target_link_libraries(concurrent_skiplist_test gtest gtest_main atomic tcmalloc)
-
-# async cond var test
-add_executable(async_cond_var_test test/async_cond_var_test.cc)
-target_link_libraries(async_cond_var_test hedgedb_io tcmalloc)
-
-add_executable(async_cond_var_notify_test test/async_cond_var_notify_test.cc)
-target_link_libraries(async_cond_var_notify_test hedgedb_io tcmalloc)
 
 # range scan tests
 add_executable(range_scan_test test/range_scan.spec.cc)

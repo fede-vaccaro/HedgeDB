@@ -211,4 +211,19 @@ namespace hedge::io
         }
     };
 
-} // namespace hedge::async
+    struct io_timeout_request final : io_request
+    {
+        __kernel_timespec ts;
+        unsigned count;
+        unsigned flags;
+
+        io_timeout_request(__kernel_timespec ts, unsigned count, unsigned flags)
+            : ts(ts), count(count), flags(flags) {}
+
+        void prepare_sqe(io_uring_sqe* sqe) override
+        {
+            io_uring_prep_timeout(sqe, &ts, count, flags);
+        }
+    };
+
+} // namespace hedge::io

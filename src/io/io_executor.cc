@@ -2,15 +2,16 @@
 
 #include "io/io_executor.h"
 #include "tmc/ex_cpu.hpp"
+#include "tmc/topology.hpp"
 
 namespace hedge::io
 {
-    io_executor::io_executor(uint32_t n_threads, uint32_t queue_depth, std::optional<std::string> name)
+    io_executor::io_executor(uint32_t n_threads, uint32_t queue_depth, std::optional<std::string> name, tmc::topology::cpu_kind::value pin_to)
     {
-        this->init(n_threads, queue_depth, std::move(name));
+        this->init(n_threads, queue_depth, std::move(name), pin_to);
     }
 
-    io_executor& io_executor::init(uint32_t n_threads, uint32_t queue_depth, std::optional<std::string> name)
+    io_executor& io_executor::init(uint32_t n_threads, uint32_t queue_depth, std::optional<std::string> name, tmc::topology::cpu_kind::value pin_to)
     {
         bool expected = false;
         if(!this->_initialized.compare_exchange_strong(expected, true))
@@ -21,6 +22,9 @@ namespace hedge::io
         this->name_prefix = std::move(name).value_or("");
 
         this->_ctxs.resize(n_threads);
+
+        tmc::topology::topology_filter filter{};
+        filter.set_cpu_kinds(pin_to);
 
         this->_ex.set_thread_count(this->num_threads())
             .set_thread_init_hook(
@@ -45,15 +49,23 @@ namespace hedge::io
                     return this->_ctxs[tid]->submit_and_wait();
                 })
             .set_spins(32)
+            .add_partition(filter)
             .init();
 
         return *this;
     }
 
-    io_executor::~io_executor()
+    void io_executor::shutdown()
     {
         this->_ex.teardown();
         this->_ctxs.clear();
+        this->_initialized.store(false);
+    }
+
+    io_executor::~io_executor()
+    {
+        if(this->_initialized.load())
+            this->shutdown();
     }
 
     void set_thread_affinity(std::pair<int32_t, int32_t> cpu_range)

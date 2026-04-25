@@ -28,25 +28,27 @@ namespace hedge::db
 
     void database::_init_memtable(database& db, const db_config& config)
     {
-        auto flush_executor =
-            config.flush_io_workers > 0 ? std::make_shared<io::io_executor>(config.flush_io_workers, 32, "flusher") : io::static_pool::instance();
+        // auto flush_executor =
+        // config.flush_io_workers > 0 ? std::make_shared<io::io_executor>(config.flush_io_workers, 32, "flusher", tmc::topology::cpu_kind::EFFICIENCY1) : io::static_pool::instance();
+
+        auto flush_executor = db._bg_pool;
 
         db._memtable.emplace(
             memtable_config{
                 .max_inserts_cap = config.memtable_budget_bytes,
                 .memory_budget_cap = config.memtable_budget_bytes,
                 .auto_compaction = config.auto_compaction,
-                .use_odirect = config.use_odirect_for_indices,
+                .use_odirect = config.use_odirect_for_ssts,
                 .num_writer_threads = io::static_pool::instance()->num_threads(),
                 .use_wal = !config.disable_wal,
                 .max_pending_flushes = config.max_pending_flushes,
             },
             config.num_partition_exponent,
-            db._indices_path,
+            db._partitions_path,
             &db._sst_manager->flush_iteration(),
             flush_executor,
-            [&sst_mgr = *db._sst_manager](std::vector<sst> indices) -> tmc::task<void>
-            { return sst_mgr.push_new_ssts_to_l0(std::move(indices)); },
+            [&sst_mgr = *db._sst_manager](std::vector<sst> sst_batch) -> tmc::task<void>
+            { return sst_mgr.push_new_ssts_to_l0(std::move(sst_batch)); },
             [&sst_mgr = *db._sst_manager]()
             { sst_mgr.schedule_compaction(false); },
             db._page_cache,
@@ -58,10 +60,9 @@ namespace hedge::db
         auto db = std::shared_ptr<database>(new database());
 
         db->_base_path = base_path;
-        db->_indices_path = base_path / "indices";
-        db->_values_path = base_path / "values";
+        db->_partitions_path = base_path / "partitions";
         db->_config = config;
-        db->_bg_pool = config.compaction_io_workers > 0 ? std::make_shared<io::io_executor>(config.compaction_io_workers, 32, "bg") : io::static_pool::instance();
+        db->_bg_pool = config.compaction_io_workers > 0 ? std::make_shared<io::io_executor>(config.compaction_io_workers, 32, "bg", tmc::topology::cpu_kind::EFFICIENCY1) : io::static_pool::instance();
 
         if(auto status = _validate_config(config); !status)
             return status.error();
@@ -71,8 +72,7 @@ namespace hedge::db
 
         // Create necessary directories
         std::filesystem::create_directories(db->_base_path);
-        std::filesystem::create_directories(db->_indices_path);
-        std::filesystem::create_directories(db->_values_path);
+        std::filesystem::create_directories(db->_partitions_path);
         fs::fsync_dir(db->_base_path.parent_path());
         fs::fsync_dir(db->_base_path);
 
@@ -89,8 +89,8 @@ namespace hedge::db
                 .max_merge_width = config.max_merge_width,
                 .bucket_ratio = config.bucket_ratio,
                 .compaction_read_ahead_size_bytes = config.compaction_read_ahead_size_bytes,
-                .use_odirect_for_indices = config.use_odirect_for_indices,
-                .indices_path = db->_indices_path,
+                .use_odirect_for_ssts = config.use_odirect_for_ssts,
+                .partitions_path = db->_partitions_path,
             },
             // io::static_pool::instance(),
             db->_bg_pool,
@@ -108,8 +108,7 @@ namespace hedge::db
         auto db = std::shared_ptr<database>(new database());
 
         db->_base_path = base_path;
-        db->_indices_path = base_path / "indices";
-        db->_values_path = base_path / "values";
+        db->_partitions_path = base_path / "partitions";
         db->_config = config;
         db->_bg_pool = std::make_shared<io::io_executor>(config.compaction_io_workers, 32, "bg");
 
@@ -123,7 +122,7 @@ namespace hedge::db
         if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1)
             db->_page_cache = std::make_shared<sharded_page_cache>(config.index_page_clock_cache_size_bytes, io::static_pool::instance()->num_threads() * 4);
 
-        // Load sst_manager from indices directory
+        // Load sst_manager from "partitions" directory
         auto maybe_sst_mgr = sst_manager::load(
             sst_manager::config{
                 .num_partition_exponent = config.num_partition_exponent,
@@ -132,8 +131,8 @@ namespace hedge::db
                 .max_merge_width = config.max_merge_width,
                 .bucket_ratio = config.bucket_ratio,
                 .compaction_read_ahead_size_bytes = config.compaction_read_ahead_size_bytes,
-                .use_odirect_for_indices = config.use_odirect_for_indices,
-                .indices_path = db->_indices_path,
+                .use_odirect_for_ssts = config.use_odirect_for_ssts,
+                .partitions_path = db->_partitions_path,
             },
             // io::static_pool::instance(),
             db->_bg_pool,
@@ -176,7 +175,7 @@ namespace hedge::db
         if(value_opt.has_value())
             co_return std::move(value_opt.value());
 
-        // Step 2: If not found in memtable, search sorted indices via sst_manager.
+        // Step 2: If not found in memtable, search ssts via sst_manager.
         size_t matching_partition_id = this->_find_matching_partition_for_key(key);
         co_return co_await this->_sst_manager->lookup_async(key, matching_partition_id);
     }

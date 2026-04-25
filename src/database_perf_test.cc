@@ -137,7 +137,7 @@ int main(int argc, char* argv[])
     config.memtable_budget_bytes = MEMTABLE_CAPACITY_BYTES;
     config.num_partition_exponent = 4;
     config.bucket_ratio = 1.50;
-    config.use_odirect_for_indices = true;
+    config.use_odirect_for_ssts = true;
     config.index_page_clock_cache_size_bytes = 0;
     config.index_point_cache_size_bytes = 0;
     config.compaction_io_workers = 6;

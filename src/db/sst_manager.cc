@@ -198,9 +198,9 @@ namespace hedge::db
         auto merge_config = hedge::db::index_ops::merge_config{
             .read_ahead_size = this->_cfg.compaction_read_ahead_size_bytes,
             .new_index_id = this->_flush_iteration.fetch_add(1, std::memory_order::relaxed),
-            .base_path = this->_cfg.indices_path,
+            .base_path = this->_cfg.partitions_path,
             .discard_deleted_keys = discard_deleted_keys,
-            .create_new_with_odirect = this->_cfg.use_odirect_for_indices,
+            .create_new_with_odirect = this->_cfg.use_odirect_for_ssts,
             .populate_cache_with_output = false,
         };
 
@@ -276,7 +276,12 @@ namespace hedge::db
             this->_logger.log("Self-completing compaction failed: ", merge_result.error().to_string());
         }
 
-        this->_update_pending_compactions_counter(-static_cast<int32_t>(inputs.size())); // This might release backpressure
+        if(level == 0)
+            this->_update_pending_compactions_counter(-static_cast<int32_t>(inputs.size())); // This might release backpressure
+
+        std::lock_guard total_lk(this->_total_pending_compactions_mutex);
+        this->_total_pending_compacting_sst_count -= static_cast<int64_t>(inputs.size());
+        this->_pending_compactions_cv.notify_all();
     }
 
     // Serialization format for partition state
@@ -319,7 +324,7 @@ namespace hedge::db
             if(state.state_file.fd() == -1)
             {
                 auto [dir_prefix, file_prefix] = format_prefix(partition_id);
-                auto dir_path = this->_cfg.indices_path / dir_prefix;
+                auto dir_path = this->_cfg.partitions_path / dir_prefix;
                 auto state_path = dir_path / sst_manager::MANIFEST_FILENAME;
 
                 if(!state.dir_fd)
@@ -471,7 +476,7 @@ namespace hedge::db
         // resume and push count back above threshold, causing rapid stop-start thrashing.
 
         std::lock_guard lk(this->_pending_compactions_mutex);
-        constexpr int64_t BACKPRESSURE_THRESHOLD = 20;
+        constexpr int64_t BACKPRESSURE_THRESHOLD = 40;
 
         {
             const auto threshold = BACKPRESSURE_THRESHOLD * (1 << this->_cfg.num_partition_exponent);
@@ -491,11 +496,6 @@ namespace hedge::db
                 this->_compaction_backpressure.notify_all();
             }
         }
-
-        // Update global count
-        this->_total_pending_compacting_sst_count += count;
-        assert(this->_total_pending_compacting_sst_count >= 0);
-        this->_pending_compactions_cv.notify_all();
     }
 
     void sst_manager::launch_compaction_tasks(
@@ -536,7 +536,13 @@ namespace hedge::db
                 {
                     size_t bucket_input_count = bucket_it->second.size();
 
-                    this->_update_pending_compactions_counter(static_cast<int32_t>(bucket_input_count));
+                    if(level == 0)
+                        this->_update_pending_compactions_counter(static_cast<int32_t>(bucket_input_count));
+
+                    {
+                        std::lock_guard total_lk(this->_total_pending_compactions_mutex);
+                        this->_total_pending_compacting_sst_count += static_cast<int64_t>(bucket_input_count);
+                    }
 
                     const auto max_num_levels = this->_cfg.max_num_levels;
                     auto test_can_discard_keys = [&]() -> bool
@@ -662,7 +668,7 @@ namespace hedge::db
         tmc::post_waitable(*this->_compaction_pool, make_wait_job(this)).wait();
 
         // Wait for all in-flight self-completing tasks on executor pool
-        std::unique_lock lk(this->_pending_compactions_mutex);
+        std::unique_lock lk(this->_total_pending_compactions_mutex);
         this->_pending_compactions_cv.wait(lk, [this]()
                                            { return this->_total_pending_compacting_sst_count == 0; });
     }

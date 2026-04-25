@@ -45,7 +45,6 @@ namespace hedge::db
         bool use_wal = true;
         /* bool use_fsync = false; // NOT IMPLEMENTED */
         bool fdatasync_flushed_sst = true;
-        size_t starting_wal_epoch = 0;
         size_t max_pending_flushes = 4;
     };
 
@@ -89,31 +88,46 @@ namespace hedge::db
     {
         alignas(64) std::atomic_size_t bytes_written{0};
         std::vector<std::unique_ptr<hedge::db::arena_allocator<std::byte>>> value_arenas; // One-per-thread, the values get stored here
-        std::optional<wal> _wal;
+        std::unique_ptr<wal> _wal;
 
         memtable_inner(std::atomic_uint64_t* seq_nr,
-                       const std::filesystem::path& base_path,
-                       std::optional<int> wal_dir_fd,
-                       bool use_wal,
-                       size_t flush_iteration,
                        size_t memtable_memory_budget,
                        size_t n_threads,
-                       size_t value_memory_budget)
+                       size_t value_memory_budget,
+                       std::unique_ptr<wal> wal_slot = nullptr)
             : skiplist_wrapper(seq_nr, memtable_memory_budget)
+            , _wal(std::move(wal_slot))
         {
             value_arenas.reserve(n_threads);
             for(auto i = 0UL; i < n_threads; ++i)
                 value_arenas.emplace_back(std::make_unique<hedge::db::arena_allocator<std::byte>>(value_memory_budget));
+        }
+    };
 
-            if(use_wal)
+    // Pool of reusable WAL slot objects. Slots are created once at startup, reset after each flush,
+    // and checked back in rather than deleted. Sized to cover all simultaneously in-flight memtables.
+    struct wal_pool
+    {
+        std::deque<std::unique_ptr<wal>> slots;
+        std::mutex mtx;
+        std::condition_variable cv;
+
+        std::unique_ptr<wal> pop()
+        {
+            std::unique_lock lk(mtx);
+            cv.wait(lk, [this] { return !slots.empty(); });
+            auto slot = std::move(slots.front());
+            slots.pop_front();
+            return slot;
+        }
+
+        void push(std::unique_ptr<wal> w)
+        {
             {
-                this->_wal.emplace(wal::config{
-                    .base_path = base_path,
-                    .dir_fd = wal_dir_fd,
-                    .epoch = flush_iteration,
-                    .n_threads = n_threads,
-                    .file_size_hint = value_memory_budget / n_threads});
+                std::lock_guard lk(mtx);
+                slots.push_back(std::move(w));
             }
+            cv.notify_one();
         }
     };
 
@@ -149,8 +163,11 @@ namespace hedge::db
         // Page cache
         std::shared_ptr<db::sharded_page_cache> _cache{};
 
-        // File descriptor to the WAL files directory, needed for fsyncing when WALs are created or removed
+        // File descriptor to the WAL files directory, needed for fsyncing when pool is created
         std::optional<int> _wal_dir_fd{};
+
+        // Pool of reusable WAL slots; null when use_wal is false
+        std::unique_ptr<wal_pool> _wal_pool;
 
         // Global sequence number shared across all memtable instances
         alignas(64) std::atomic_uint64_t _seq_nr{0};
@@ -159,7 +176,6 @@ namespace hedge::db
         alignas(64) tmc::atomic_condvar<rw_sync_table_ptr_t> _table{nullptr};
         alignas(64) tmc::atomic_condvar<rw_sync_table_ptr_t> _pipelined_table{nullptr}; // For double buffering
         alignas(64) std::atomic_bool _flush_mutex;                                      // One thread at a time takes the responsability of flushing when
-        alignas(64) std::atomic_size_t _wal_epoch;
 
         // Pending flushes
         alignas(64) std::atomic_size_t _table_switch_epoch;
@@ -211,11 +227,6 @@ namespace hedge::db
         snapshot acquire_snapshot();
 
         hedge::status replay_wal();
-
-        [[nodiscard]] size_t wal_epoch() const
-        {
-            return this->_wal_epoch.load(std::memory_order::relaxed);
-        }
 
     private:
         static constexpr size_t VALUE_DATA_ALIGNMENT = 16; // Deprecated, might use actual alignment (8 bytes)

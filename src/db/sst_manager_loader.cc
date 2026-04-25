@@ -134,7 +134,7 @@ namespace hedge::db
         {
             auto& state = *state_ptr;
             auto [dir_prefix, file_prefix] = format_prefix(partition_id);
-            auto dir_path = cfg.indices_path / dir_prefix;
+            auto dir_path = cfg.partitions_path / dir_prefix;
 
             if(!std::filesystem::exists(dir_path))
                 return hedge::error(std::format("Missing directory for partition: {}", dir_path.string()));
@@ -148,7 +148,7 @@ namespace hedge::db
 
             if(n > 0)
             {
-                auto maybe_levels = _parse_manifest_and_load_ssts(buf, dir_path, cfg.max_num_levels, cfg.use_odirect_for_indices);
+                auto maybe_levels = _parse_manifest_and_load_ssts(buf, dir_path, cfg.max_num_levels, cfg.use_odirect_for_ssts);
                 if(maybe_levels)
                 {
                     state.levels = std::move(maybe_levels.value());
@@ -181,7 +181,7 @@ namespace hedge::db
     {
         auto mgr = std::make_unique<sst_manager>(cfg, std::move(compaction_pool), std::move(page_cache));
 
-        if(!std::filesystem::exists(cfg.indices_path))
+        if(!std::filesystem::exists(cfg.partitions_path))
             return mgr;
 
         size_t max_flush_iteration = 0;
