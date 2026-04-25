@@ -17,9 +17,11 @@
 #include "key.h"
 #include "memtable.h"
 #include "tmc/atomic_condvar.hpp"
+#include "tmc/channel.hpp"
 #include "tmc/ex_cpu_st.hpp"
 #include "tmc/semaphore.hpp"
 #include "tmc/spawn.hpp"
+#include "tmc/sync.hpp"
 #include "types.h"
 #include "wal.h"
 
@@ -66,6 +68,7 @@ namespace hedge::db
           _schedule_compaction_callback(std::move(schedule_compaction_callback)),
           _compaction_backpressure(compaction_backpressure),
           _cache(std::move(page_cache)),
+          _wal_ch(tmc::make_channel<std::unique_ptr<wal>>()),
           _pending_flush_slots(cfg.max_pending_flushes),
           _flusher(std::make_unique<tmc::ex_cpu_st>()),
           _flush_executor(std::move(flusher_executor)),
@@ -86,22 +89,28 @@ namespace hedge::db
             const size_t n_slots = cfg.max_pending_flushes + 2;
             const size_t file_size_hint = cfg.memory_budget_cap / std::max(cfg.num_writer_threads, size_t{1});
 
-            this->_wal_pool = std::make_unique<wal_pool>();
             for(const auto i : std::views::iota(size_t{0}, n_slots))
             {
-                this->_wal_pool->slots.push_back(
-                    std::make_unique<wal>(wal::config{
-                        .base_path = this->_indices_path,
-                        .slot_idx = i,
-                        .n_threads = cfg.num_writer_threads,
-                        .file_size_hint = file_size_hint}));
+                auto reusable_wal = std::make_unique<wal>(wal::config{
+                    .base_path = this->_indices_path,
+                    .slot_idx = i,
+                    .n_threads = cfg.num_writer_threads,
+                    .file_size_hint = file_size_hint});
+
+                this->_wal_ch.post(std::move(reusable_wal));
             }
 
             ::fdatasync(*this->_wal_dir_fd);
         }
 
-        this->_table.ref().store(this->_make_memtable());
-        this->_pipelined_table.ref().store(this->_make_memtable());
+        tmc::post_waitable(
+            *this->_flush_executor,
+            [](memtable* self) -> tmc::task<void>
+            {
+                self->_table.ref().store(co_await self->_make_memtable());
+                self->_pipelined_table.ref().store(co_await self->_make_memtable());
+            }(this))
+            .wait();
     }
 
     memtable::~memtable()
@@ -113,13 +122,16 @@ namespace hedge::db
             ::close(*this->_wal_dir_fd);
     }
 
-    std::shared_ptr<memtable::rw_sync_table_t> memtable::_make_memtable()
+    tmc::task<std::shared_ptr<memtable::rw_sync_table_t>> memtable::_make_memtable()
     {
         std::unique_ptr<wal> wal_slot;
-        if(this->_wal_pool)
-            wal_slot = this->_wal_pool->pop();
+        if(this->_cfg.use_wal)
+        {
+            wal_slot = (co_await this->_wal_ch.pull()).value_or(nullptr);
+            assert(wal_slot != nullptr);
+        }
 
-        return std::make_shared<rw_sync_table_t>(
+        co_return std::make_shared<rw_sync_table_t>(
             this->_cfg.num_writer_threads,
             &this->_seq_nr,
             this->_cfg.memory_budget_cap,
@@ -345,7 +357,7 @@ namespace hedge::db
 
             tmc::spawn([](memtable* self) -> tmc::task<void>
                        {
-                           self->_pipelined_table.ref().store(self->_make_memtable(), std::memory_order::relaxed);
+                           self->_pipelined_table.ref().store(co_await self->_make_memtable(), std::memory_order::relaxed);
                            self->_pipelined_table.notify_one();
                            co_return; }(this))
                 .run_on(*this->_flusher)
@@ -434,7 +446,8 @@ namespace hedge::db
         if(auto& w = memtable_to_flush->ptr()->_wal; w)
         {
             w->reset();
-            this->_wal_pool->push(std::move(w));
+            [[maybe_unused]] bool ok = co_await this->_wal_ch.push(std::move(w));
+            assert(ok);
         }
 
         // Schedule compaction
@@ -442,11 +455,6 @@ namespace hedge::db
         // if a compaction is not necessary
         if(this->_cfg.auto_compaction)
             this->_schedule_compaction_callback();
-
-        // Not sure if necessary here
-        // if(this->_cfg.use_wal)
-        // [[maybe_unused]]
-        // int32_t dir_res = co_await io::fdatasync(*this->_wal_dir_fd);
 
         auto t1 = std::chrono::high_resolution_clock::now();
         [[maybe_unused]] auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);

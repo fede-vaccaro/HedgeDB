@@ -21,7 +21,7 @@
 #include "skiplist.h"
 #include "sst.h"
 #include "tmc/atomic_condvar.hpp"
-#include "tmc/ex_braid.hpp"
+#include "tmc/channel.hpp"
 #include "tmc/ex_cpu_st.hpp"
 #include "tmc/semaphore.hpp"
 #include "tmc/task.hpp"
@@ -95,39 +95,11 @@ namespace hedge::db
                        size_t n_threads,
                        size_t value_memory_budget,
                        std::unique_ptr<wal> wal_slot = nullptr)
-            : skiplist_wrapper(seq_nr, memtable_memory_budget)
-            , _wal(std::move(wal_slot))
+            : skiplist_wrapper(seq_nr, memtable_memory_budget), _wal(std::move(wal_slot))
         {
             value_arenas.reserve(n_threads);
             for(auto i = 0UL; i < n_threads; ++i)
                 value_arenas.emplace_back(std::make_unique<hedge::db::arena_allocator<std::byte>>(value_memory_budget));
-        }
-    };
-
-    // Pool of reusable WAL slot objects. Slots are created once at startup, reset after each flush,
-    // and checked back in rather than deleted. Sized to cover all simultaneously in-flight memtables.
-    struct wal_pool
-    {
-        std::deque<std::unique_ptr<wal>> slots;
-        std::mutex mtx;
-        std::condition_variable cv;
-
-        std::unique_ptr<wal> pop()
-        {
-            std::unique_lock lk(mtx);
-            cv.wait(lk, [this] { return !slots.empty(); });
-            auto slot = std::move(slots.front());
-            slots.pop_front();
-            return slot;
-        }
-
-        void push(std::unique_ptr<wal> w)
-        {
-            {
-                std::lock_guard lk(mtx);
-                slots.push_back(std::move(w));
-            }
-            cv.notify_one();
         }
     };
 
@@ -166,8 +138,8 @@ namespace hedge::db
         // File descriptor to the WAL files directory, needed for fsyncing when pool is created
         std::optional<int> _wal_dir_fd{};
 
-        // Pool of reusable WAL slots; null when use_wal is false
-        std::unique_ptr<wal_pool> _wal_pool;
+        // Pool of reusable WAL slots
+        tmc::chan_tok<std::unique_ptr<wal>> _wal_ch;
 
         // Global sequence number shared across all memtable instances
         alignas(64) std::atomic_uint64_t _seq_nr{0};
@@ -231,7 +203,7 @@ namespace hedge::db
     private:
         static constexpr size_t VALUE_DATA_ALIGNMENT = 16; // Deprecated, might use actual alignment (8 bytes)
 
-        [[nodiscard]] std::shared_ptr<rw_sync_table_t> _make_memtable();
+        [[nodiscard]] tmc::task<std::shared_ptr<rw_sync_table_t>> _make_memtable();
         tmc::task<bool> _flush(rw_sync_table_ptr_t expected_table);
         tmc::task<void> _flush_inner(size_t curr_flush_epoch,
                                      rw_sync_table_ptr_t memtable_to_flush,

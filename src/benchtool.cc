@@ -11,7 +11,6 @@
 #include <future>
 #include <iomanip>
 #include <iostream>
-#include <mutex>
 #include <random>
 #include <string>
 #include <string_view>
@@ -200,7 +199,7 @@ namespace hedge::db
         cfg.memtable_budget_bytes = 32 * MiB;
         cfg.num_partition_exponent = 4;
         cfg.bucket_ratio = 1.50;
-        cfg.use_odirect_for_indices = true;
+        cfg.use_odirect_for_ssts = true;
         cfg.index_page_clock_cache_size_bytes = 0;
         cfg.index_point_cache_size_bytes = 0;
         cfg.compaction_io_workers = 8;
@@ -384,7 +383,8 @@ namespace hedge::db
         std::atomic_size_t loads{0};
         std::atomic_size_t read_errors{0};
         std::atomic_size_t next_load_idx{n};
-        std::unique_ptr<latency_histogram> read_hist, write_hist;
+        std::unique_ptr<latency_histogram> read_hist;
+        std::unique_ptr<latency_histogram> write_hist;
         if(measure_latency)
         {
             read_hist = std::make_unique<latency_histogram>();
@@ -522,11 +522,12 @@ namespace hedge::db
             const char* label;
             size_t min_entries;
             size_t max_entries;
+            size_t op_dividend; // number of ops to divide n by to determine number of scans for this tier
         };
         static constexpr std::array tiers = {
-            scan_tier{.label = "small  (1 - 100)", .min_entries = 1, .max_entries = 100},
-            scan_tier{.label = "medium (512 - 1024)", .min_entries = 512, .max_entries = 1024},
-            scan_tier{.label = "large  (114688 - 131072)", .min_entries = 114688, .max_entries = 131072},
+            scan_tier{.label = "small  (1 - 100)", .min_entries = 1, .max_entries = 100, .op_dividend = 10},
+            scan_tier{.label = "medium (512 - 1024)", .min_entries = 512, .max_entries = 1024, .op_dividend = 100},
+            scan_tier{.label = "large  (114688 - 131072)", .min_entries = 114688, .max_entries = 131072, .op_dividend = 1000},
         };
 
         std::vector<uint64_t> seeds(NUM_WORKERS);
@@ -540,13 +541,15 @@ namespace hedge::db
 
         for(const auto& tier : tiers)
         {
+            size_t n_ops = n / tier.op_dividend;
+
             std::atomic_size_t scan_count{0};
             std::unique_ptr<latency_histogram> hist;
             if(measure_latency)
                 hist = std::make_unique<latency_histogram>();
             latency_histogram* hist_ptr = hist.get();
 
-            auto worker = [](size_t tid, size_t n, uint64_t seed,
+            auto worker = [](size_t tid, size_t n_ops, uint64_t seed,
                              const std::shared_ptr<database>& db, scan_tier tier,
                              std::atomic_size_t& scan_count, bool measure_latency, latency_histogram* hist) -> tmc::task<void>
             {
@@ -593,10 +596,10 @@ namespace hedge::db
                 auto sem = tmc::semaphore(io::static_pool::instance()->queue_depth());
                 uint64_t rng = seed;
 
-                for(size_t op = tid; op < n; op += NUM_WORKERS)
+                for(size_t op = tid; op < n_ops; op += NUM_WORKERS)
                 {
                     co_await sem;
-                    size_t lower = xorshift64(rng) % n;
+                    size_t lower = xorshift64(rng) % n_ops;
                     size_t entries = tier.min_entries + (xorshift64(rng) % (tier.max_entries - tier.min_entries + 1));
                     fg.fork(do_scan(db, lower, entries, scan_count, sem, measure_latency, hist));
                 }
@@ -610,14 +613,14 @@ namespace hedge::db
             std::vector<tmc::task<void>> tasks;
             tasks.reserve(NUM_WORKERS);
             for(size_t tid = 0; tid < NUM_WORKERS; ++tid)
-                tasks.push_back(worker(tid, n, seeds[tid], db, tier, scan_count, measure_latency, hist_ptr));
+                tasks.push_back(worker(tid, n_ops, seeds[tid], db, tier, scan_count, measure_latency, hist_ptr));
             run_workers(std::move(tasks));
 
             auto elapsed_s = std::chrono::duration<double>(clk::now() - t0).count();
             size_t completed = scan_count.load();
             size_t avg_entries = (tier.min_entries + tier.max_entries) / 2;
 
-            std::cout << "\n--- " << tier.label << " (" << n << " scans) ---\n"
+            std::cout << "\n--- " << tier.label << " (" << n_ops << " scans) ---\n"
                       << "Duration:   " << elapsed_s * 1000.0 << " ms\n"
                       << "Scans/s:    " << static_cast<uint64_t>(completed / elapsed_s) << "\n"
                       << "Keys/s:     " << static_cast<uint64_t>(completed * avg_entries / elapsed_s) << "\n";
@@ -675,5 +678,8 @@ int main(int argc, char* argv[])
 
     std::cout << "\n=== DONE ===\n";
     db->print_tree_structure();
+
+    io::static_pool::instance()->shutdown();
+
     return 0;
 }
