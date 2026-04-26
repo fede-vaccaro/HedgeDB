@@ -52,9 +52,7 @@ namespace hedge::db
 
             // Build rolling buffers for each matching SST
             if(!matching_ssts.empty())
-                read_ahead_size = std::max(read_ahead_size / matching_ssts.size(), static_cast<size_t>(PAGE_SIZE_IN_BYTES));
-
-            read_ahead_size = hedge::ceil_page_align(read_ahead_size);
+                read_ahead_size = hedge::ceil_page_align(read_ahead_size);
         }
 
         // Prepare rolling_buffers (readers)
@@ -134,14 +132,17 @@ namespace hedge::db
                 auto s = co_await rbuf->refresh();
                 if(!s)
                     co_return s;
+                if(rbuf->is_eof())
+                    continue;
             }
 
             scan_source_t src = rbuf;
             auto maybe_entry = source_pop_entry(src);
             if(!maybe_entry)
                 co_return maybe_entry.error();
-            auto& entry = maybe_entry.value();
-            this->_heap.push_back({std::move(entry), src, entry.epoch});
+
+            this->_slots.push_back({std::move(maybe_entry.value()), src});
+            this->_heap.push_back({&this->_slots.back()});
             std::ranges::push_heap(this->_heap, scan_iterator::_heap_cmp());
         }
 
@@ -154,9 +155,9 @@ namespace hedge::db
             auto maybe_entry = source_pop_entry(src);
             if(!maybe_entry)
                 co_return maybe_entry.error();
-            auto& entry = maybe_entry.value();
-            auto ep = entry.epoch;
-            this->_heap.push_back({std::move(entry), src, ep});
+
+            this->_slots.push_back({std::move(maybe_entry.value()), src});
+            this->_heap.push_back({&this->_slots.back()});
             std::ranges::push_heap(this->_heap, scan_iterator::_heap_cmp());
         }
 
@@ -190,30 +191,30 @@ namespace hedge::db
                 co_return hedge::error("eof", errc::END_OF_SCAN);
 
             std::ranges::pop_heap(this->_heap, scan_iterator::_heap_cmp());
-            auto [keyvalue, source, epoch] = std::move(this->_heap.back());
+            auto* slot = this->_heap.back().slot;
             this->_heap.pop_back();
 
-            this->_dedup.push(std::move(keyvalue));
+            this->_dedup.push(std::move(slot->entry));
 
-            // Refill heap from the source
-            if(!source_is_eof(source)) [[likely]]
+            // Refill heap from the slot's source
+            if(!source_is_eof(slot->source)) [[likely]]
             {
-                if(source_buffer_empty(source)) [[unlikely]]
+                if(source_buffer_empty(slot->source)) [[unlikely]]
                 {
-                    auto* rbuf = std::get<sst_stream*>(source);
+                    auto* rbuf = std::get<sst_stream*>(slot->source);
                     auto s = co_await rbuf->refresh();
                     if(!s)
                         co_return hedge::error("Failed to refresh scan buffer: " + s.error().to_string());
                 }
 
-                if(!source_is_eof(source) && !source_buffer_empty(source))
+                if(!source_is_eof(slot->source) && !source_buffer_empty(slot->source))
                 {
-                    auto maybe_new_entry = source_pop_entry(source);
+                    auto maybe_new_entry = source_pop_entry(slot->source);
                     if(!maybe_new_entry) [[unlikely]]
                         co_return maybe_new_entry.error();
-                    auto& new_entry = maybe_new_entry.value();
-                    auto ep = new_entry.epoch;
-                    this->_heap.push_back({std::move(new_entry), source, ep});
+
+                    slot->entry = std::move(maybe_new_entry.value());
+                    this->_heap.push_back({slot});
                     std::ranges::push_heap(this->_heap, scan_iterator::_heap_cmp());
                 }
             }

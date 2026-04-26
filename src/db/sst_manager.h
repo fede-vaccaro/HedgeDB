@@ -37,6 +37,7 @@ namespace hedge::db
             double bucket_ratio{1.5};
             size_t compaction_read_ahead_size_bytes{2 * MiB};
             bool use_odirect_for_ssts{true};
+            size_t ssts_in_l0_block_write_threshold{40};
             std::filesystem::path partitions_path;
         };
 

@@ -25,6 +25,7 @@ namespace hedge::io
 
         tmc::topology::topology_filter filter{};
         filter.set_cpu_kinds(pin_to);
+        filter.core_indexes();
 
         this->_ex.set_thread_count(this->num_threads())
             .set_thread_init_hook(

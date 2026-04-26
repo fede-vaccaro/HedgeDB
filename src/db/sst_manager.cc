@@ -476,10 +476,9 @@ namespace hedge::db
         // resume and push count back above threshold, causing rapid stop-start thrashing.
 
         std::lock_guard lk(this->_pending_compactions_mutex);
-        constexpr int64_t BACKPRESSURE_THRESHOLD = 40;
 
         {
-            const auto threshold = BACKPRESSURE_THRESHOLD * (1 << this->_cfg.num_partition_exponent);
+            const auto threshold = static_cast<int64_t>(this->_cfg.ssts_in_l0_block_write_threshold) * (1 << this->_cfg.num_partition_exponent);
 
             this->_pending_compacting_sst_for_backpressure_count += count;
             assert(this->_pending_compacting_sst_for_backpressure_count >= 0);

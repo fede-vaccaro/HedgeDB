@@ -67,6 +67,10 @@ namespace hedge::db
 
         size_t max_merge_width = 16;
 
+        /// Per-partition L0 SST count threshold above which writes are blocked via backpressure.
+        /// The effective threshold is multiplied by the total number of partitions.
+        size_t ssts_in_l0_block_write_threshold = 40;
+
         bool disable_wal = false;
     };
 

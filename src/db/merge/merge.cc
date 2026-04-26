@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <deque>
+
 #include <error.hpp>
 
 #include "db/block.h"
@@ -206,15 +208,26 @@ namespace hedge::db
 
         [[maybe_unused]] size_t iteration_count{0};
 
-        using heap_item_t = std::pair<merge_entry_t, sst_stream*>; // Index entry + source buffer pointer
+        struct slot_t
+        {
+            merge_entry_t entry{};
+            sst_stream* source{nullptr};
+        };
+
+        struct heap_item_t
+        {
+            slot_t* slot;
+        };
+
+        std::deque<slot_t> slots; // pointer-stable backing store for heap_item_t::slot
 
         auto heap_item_t_comparator = [](const heap_item_t& lhs, const heap_item_t& rhs)
         {
             // Cpp heap is a max-heap by default, we need a min-heap
-            auto cmp = lhs.first.key <=> rhs.first.key;
+            auto cmp = lhs.slot->entry.key <=> rhs.slot->entry.key;
             if(cmp != 0)
-                return cmp > 0;                       // min-heap by key
-            return lhs.first.epoch < rhs.first.epoch; // higher epoch pops first (newer wins)
+                return cmp > 0;                                   // min-heap by key
+            return lhs.slot->entry.epoch < rhs.slot->entry.epoch; // higher epoch pops first (newer wins)
         };
 
         std::vector<heap_item_t> key_heap;
@@ -242,7 +255,8 @@ namespace hedge::db
                 if(!ok) [[unlikely]]
                     co_return ok.error();
 
-                key_heap.emplace_back(std::move(new_keypair), rbuf);
+                slots.push_back({std::move(new_keypair), rbuf});
+                key_heap.push_back({&slots.back()});
                 std::ranges::push_heap(key_heap, heap_item_t_comparator);
             }
         }
@@ -260,38 +274,36 @@ namespace hedge::db
             // prof::counter_guard counter_guard{prof::get<"inner_merge_loop">()};
 
             std::ranges::pop_heap(key_heap, heap_item_t_comparator);
-            auto [keyvalue, rbuf] = std::move(key_heap.back());
+            auto* slot = key_heap.back().slot;
             key_heap.pop_back();
-            // auto it = std::ranges::min_element(key_heap, heap_item_t_comparator);
-            // auto [keyvalue, rbuf] = std::move(*it);
-            // key_heap.erase(it);
 
-            dedup.push(std::move(keyvalue));
+            dedup.push(std::move(slot->entry));
 
-            if(!rbuf->is_eof()) [[likely]]
+            if(!slot->source->is_eof()) [[likely]]
             {
-                if(rbuf->buffer_empty()) [[unlikely]]
+                if(slot->source->buffer_empty()) [[unlikely]]
                 {
                     auto status = co_await refresh_buffers();
                     if(!status)
                         co_return hedge::error("Failed to refresh views: " + status.error().to_string());
                 }
 
-                auto maybe_value = value_from_span(rbuf->front().value());
+                auto maybe_value = value_from_span(slot->source->front().value());
                 if(!maybe_value.has_value())
                     co_return hedge::error("Failed to parse value from index entry during heap initialization: " + maybe_value.error().to_string());
 
                 merge_entry_t new_keypair{
-                    .key = rbuf->front().key(),
-                    .value = rbuf->front().value(),
-                    .epoch = rbuf->index().epoch(),
+                    .key = slot->source->front().key(),
+                    .value = slot->source->front().value(),
+                    .epoch = slot->source->index().epoch(),
                 };
 
-                auto ok = rbuf->pop_front();
+                auto ok = slot->source->pop_front();
                 if(!ok) [[unlikely]]
                     co_return ok.error();
 
-                key_heap.emplace_back(std::move(new_keypair), rbuf);
+                slot->entry = std::move(new_keypair);
+                key_heap.push_back({slot});
                 std::ranges::push_heap(key_heap, heap_item_t_comparator);
             }
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <memory>
 #include <optional>
 #include <variant>
@@ -53,11 +54,15 @@ namespace hedge::db
     {
         using sst_ptr_t = std::shared_ptr<sst>;
 
+        struct slot_t
+        {
+            merge_entry_t entry{};
+            scan_source_t source;
+        };
+
         struct heap_item_t
         {
-            merge_entry_t entry;
-            scan_source_t source;
-            size_t epoch;
+            slot_t* slot;
         };
 
         memtable::snapshot _memtable_snapshot;
@@ -69,6 +74,7 @@ namespace hedge::db
         std::optional<key_t> _upper;
 
         deduplicator _dedup;
+        std::deque<slot_t> _slots;
         std::vector<heap_item_t> _heap;
 
         bool _initialized{false};
@@ -78,10 +84,10 @@ namespace hedge::db
         {
             return [](const heap_item_t& lhs, const heap_item_t& rhs)
             {
-                auto cmp = lhs.entry.key <=> rhs.entry.key;
+                auto cmp = lhs.slot->entry.key <=> rhs.slot->entry.key;
                 if(cmp != 0)
-                    return cmp > 0;           // min-heap by key
-                return lhs.epoch < rhs.epoch; // higher epoch pops first (newer wins)
+                    return cmp > 0;                                   // min-heap by key
+                return lhs.slot->entry.epoch < rhs.slot->entry.epoch; // higher epoch pops first (newer wins)
             };
         }
 
@@ -111,7 +117,7 @@ namespace hedge::db
             const partition_t* partition,
             std::optional<key_t> lower,
             std::optional<key_t> upper,
-            size_t read_ahead_size = 32 * 1024);
+            size_t read_ahead_size = 4 * KiB);
     };
 
 } // namespace hedge::db
