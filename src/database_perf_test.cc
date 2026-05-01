@@ -140,7 +140,7 @@ int main(int argc, char* argv[])
     config.use_odirect_for_ssts = true;
     config.index_page_clock_cache_size_bytes = 0;
     config.index_point_cache_size_bytes = 0;
-    config.compaction_io_workers = 6;
+    config.background_workers = 6;
     config.flush_io_workers = 6;
     config.max_pending_flushes = 8;
     config.min_merge_width = 4;

@@ -1,10 +1,11 @@
-#include <filesystem>
-#include <future>
-#include <iostream>
+#include "utils.h"
 #include "db/database.h"
 #include "io/static_pool.h"
 #include "tmc/sync.hpp"
-#include "utils.h"
+#include <filesystem>
+#include <future>
+#include <iostream>
+#include <optional>
 
 namespace hedge::db
 {
@@ -19,8 +20,7 @@ namespace hedge::db
         cfg.use_odirect_for_ssts = true;
         cfg.index_page_clock_cache_size_bytes = 0;
         cfg.index_point_cache_size_bytes = 0;
-        cfg.compaction_io_workers = 0;
-        cfg.flush_io_workers = 8;
+        cfg.background_workers = 0; // auto-detect
         cfg.max_pending_flushes = 8;
         cfg.min_merge_width = 8;
         cfg.max_merge_width = 32;
@@ -31,9 +31,9 @@ namespace hedge::db
     expected<std::shared_ptr<database>> open_db(const bench_config& cfg)
     {
         db_config db_cfg = make_db_config();
-        if (cfg.mode == "load")
+        if(cfg.mode == "load")
         {
-            if (std::filesystem::exists(cfg.db_path))
+            if(std::filesystem::exists(cfg.db_path))
                 std::filesystem::remove_all(cfg.db_path);
             return database::make_new(cfg.db_path, db_cfg);
         }
@@ -44,9 +44,9 @@ namespace hedge::db
     {
         std::vector<std::future<void>> futures;
         futures.reserve(tasks.size());
-        for (size_t tid = 0; tid < tasks.size(); ++tid)
+        for(size_t tid = 0; tid < tasks.size(); ++tid)
             futures.push_back(tmc::post_waitable(*io::static_pool::instance(), std::move(tasks[tid]), 0, tid));
-        for (std::future<void>& f : futures)
+        for(std::future<void>& f : futures)
             f.get();
     }
 

@@ -66,7 +66,7 @@ endif()
 find_library(HWLOC_LIB hwloc)
 if(HWLOC_LIB)
     message(STATUS "hwloc found")
-    add_compile_definitions(-DTMC_USE_HWLOC)
+    add_compile_definitions(TMC_USE_HWLOC)
 else()
     message(STATUS "hwloc not found — TMC_USE_HWLOC disabled")
 endif()
@@ -104,7 +104,7 @@ set(DB_SOURCES
     src/db/index_ops.cc
     src/db/qf.cc
     src/db/quotient_filter.cc
-    src/db/scan_iterator.cc
+    src/db/range_iterator.cc
     src/db/merge/merge.cc
     src/db/index_ops.h
     src/db/memtable.h
@@ -135,6 +135,16 @@ add_library(hedgedb STATIC ${DB_SOURCES})
 target_link_libraries(hedgedb PUBLIC hedgedb_io xxhash)
 
 
+if(USE_TCMALLOC)
+    set(MALLOC "tcmalloc")
+    message(STATUS "Using tcmalloc")
+elseif(USE_JEMALLOC)
+    set(MALLOC "jemalloc")
+    message(STATUS "Using jemalloc")
+else()
+    message(STATUS "No custom allocator found")
+endif()
+
 # executor_read_test - temporarily disabled (io_executor.h renamed to .deprecated)
 # add_executable(executor_read_test src/executor_read_test.cc)
 # target_link_libraries(executor_read_test hedgedb_io tcmalloc)
@@ -146,7 +156,7 @@ target_link_libraries(hedgedb PUBLIC hedgedb_io xxhash)
 
 # memtable_perf_test — benchmarks executor + memtable::put() (adds rw_sync + value arenas)
 add_executable(memtable_perf_test src/memtable_perf_test.cc)
-target_link_libraries(memtable_perf_test hedgedb tcmalloc)
+target_link_libraries(memtable_perf_test hedgedb)
 
 # memtable_perf_test_threads — same benchmark but using N plain std::threads instead of executors
 # Temporarily disabled due to pre-existing API changes (flush_io_workers removed, put_sync→put_async)
@@ -155,27 +165,32 @@ target_link_libraries(memtable_perf_test hedgedb tcmalloc)
 
 # database_perf_test — full database write+read benchmark (no gtest)
 add_executable(database_perf_test src/database_perf_test.cc)
-target_link_libraries(database_perf_test hedgedb tcmalloc)
+target_link_libraries(database_perf_test hedgedb ${MALLOC})
 
 # database_perf_test_threads — same benchmark but using N plain std::threads + sync_submit instead of executor task loop
 # Temporarily disabled due to pre-existing API changes (wait_group.h missing)
 # add_executable(database_perf_test_threads src/database_perf_test_threads.cc)
-# target_link_libraries(database_perf_test_threads hedgedb tcmalloc)
+# target_link_libraries(database_perf_test_threads hedgedb ${MALLOC})
 
 # database_perf_test_mixed — 50/50 mixed read+write benchmark
 # Temporarily disabled due to pre-existing API changes
 # add_executable(database_perf_test_mixed src/database_perf_test_mixed.cc)
-# target_link_libraries(database_perf_test_mixed hedgedb tcmalloc)
+# target_link_libraries(database_perf_test_mixed hedgedb ${MALLOC})
 
 # database_perf_test_mixed_batch — 50/50 mixed read+write benchmark
 # Temporarily disabled due to pre-existing API changes
 # add_executable(database_perf_test_mixed_batch src/database_perf_test_mixed_batch.cc)
-# target_link_libraries(database_perf_test_mixed_batch hedgedb tcmalloc)
+# target_link_libraries(database_perf_test_mixed_batch hedgedb ${MALLOC})
 
 # benchtool — unified benchmark CLI (write / read / rw / range modes)
-add_executable(benchtool src/benchtool.cc)
-target_link_libraries(benchtool hedgedb tcmalloc)
-
+add_executable(benchtool
+    src/benchtool/main.cc
+    src/benchtool/utils.cc
+    src/benchtool/load.cc
+    src/benchtool/read.cc
+    src/benchtool/rw.cc
+    src/benchtool/range.cc)
+target_link_libraries(benchtool hedgedb ${MALLOC})
 
 # executor tests
 # executor_test - temporarily disabled due to pre-existing API changes (missing io request types)

@@ -8,6 +8,22 @@
 
 namespace hedge::io
 {
+
+    enum class executor_type : uint8_t
+    {
+        FOREGROUND,
+        BACKGROUND,
+        GENERAL_PURPOSE
+    };
+
+    struct executor_config
+    {
+        std::string name;
+        size_t queue_depth{8};
+        executor_type type{executor_type::GENERAL_PURPOSE};
+        std::optional<size_t> n_threads{std::nullopt}; // auto-detect by default (hwloc needed)
+        bool auto_detect{true};
+    };
     class io_executor
     {
         friend struct tmc::detail::executor_traits<io_executor>;
@@ -20,10 +36,10 @@ namespace hedge::io
         std::string name_prefix;
 
     public:
-        explicit io_executor(uint32_t n_threads, uint32_t queue_depth, std::optional<std::string> name = std::nullopt, tmc::topology::cpu_kind::value pin_to = tmc::topology::cpu_kind::ALL);
+        explicit io_executor(const executor_config& cfg);
 
         io_executor() = default;
-        io_executor& init(uint32_t n_threads, uint32_t queue_depth, std::optional<std::string> name = std::nullopt, tmc::topology::cpu_kind::value pin_to = tmc::topology::cpu_kind::ALL);
+        io_executor& init(const executor_config& cfg);
 
         [[nodiscard]] uint32_t num_threads() const
         {
@@ -47,12 +63,12 @@ namespace hedge::io
         ~io_executor();
     };
 
-    void set_thread_affinity(std::pair<int32_t, int32_t> cpu_range);
+    // void set_thread_affinity(std::pair<int32_t, int32_t> cpu_range);
 
-    inline void set_thread_affinity(int32_t tid)
-    {
-        set_thread_affinity({tid, tid});
-    }
+    // inline void set_thread_affinity(int32_t tid)
+    // {
+    // set_thread_affinity({tid, tid});
+    // }
 
 } // namespace hedge::io
 

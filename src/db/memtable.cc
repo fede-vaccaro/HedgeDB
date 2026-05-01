@@ -341,16 +341,16 @@ namespace hedge::db
             constexpr auto TOTAL_THRESHOLD = std::chrono::microseconds(10000);  // 10ms
             constexpr auto SECTION_THRESHOLD = std::chrono::microseconds(5000); // 5ms
 
-            if(latencies.total_blocking > TOTAL_THRESHOLD ||
-               latencies.acquire_flush_slot > SECTION_THRESHOLD ||
-               latencies.wait_pipelined > SECTION_THRESHOLD ||
-               latencies.lock_for_swap > SECTION_THRESHOLD)
-            {
-                this->_logger.log("Flush #", curr_flush_epoch, " BLOCKING: total=", latencies.total_blocking.count(), "us | ",
-                                  "slot=", latencies.acquire_flush_slot.count(), "us | ",
-                                  "pipelined=", latencies.wait_pipelined.count(), "us | ",
-                                  "lock=", latencies.lock_for_swap.count(), "us");
-            }
+            // if(latencies.total_blocking > TOTAL_THRESHOLD ||
+            //    latencies.acquire_flush_slot > SECTION_THRESHOLD ||
+            //    latencies.wait_pipelined > SECTION_THRESHOLD ||
+            //    latencies.lock_for_swap > SECTION_THRESHOLD)
+            // {
+            //     this->_logger.log("Flush #", curr_flush_epoch, " BLOCKING: total=", latencies.total_blocking.count(), "us | ",
+            //                       "slot=", latencies.acquire_flush_slot.count(), "us | ",
+            //                       "pipelined=", latencies.wait_pipelined.count(), "us | ",
+            //                       "lock=", latencies.lock_for_swap.count(), "us");
+            // }
 
             this->_table.notify_all();
             this->_table_switch_epoch.fetch_add(1, std::memory_order::release);
@@ -462,7 +462,7 @@ namespace hedge::db
         co_return;
     }
 
-    hedge::status memtable::replay_wal()
+    hedge::status memtable::replay_wal(uint64_t skip_up_to_seq_nr)
     {
         auto table_ptr = this->_table.ref().load(std::memory_order::relaxed);
         auto* mt = table_ptr->ptr();
@@ -474,6 +474,9 @@ namespace hedge::db
             this->_indices_path,
             [&](const key_t& key, std::span<const std::byte> value, uint64_t seq_nr) -> bool
             {
+                if(seq_nr <= skip_up_to_seq_nr)
+                    return true; // already persisted in an SST
+
                 auto* ptr = mt->value_arenas[0]->allocate_many(value.size(), VALUE_DATA_ALIGNMENT);
                 if(ptr == nullptr)
                     throw std::runtime_error("WAL replay: arena exhausted after " +

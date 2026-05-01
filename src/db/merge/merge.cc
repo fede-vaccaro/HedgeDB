@@ -60,6 +60,9 @@ namespace hedge::db
         fb.epoch = (*argmax_it)->epoch();
         fb.upper_bound = indices[0]->_footer.upper_bound;
         fb.index_offset = 0;
+        fb.max_seq_nr = std::accumulate(
+            indices.begin(), indices.end(), uint64_t{0},
+            [](uint64_t acc, const sst* s) { return std::max(acc, s->max_seq_nr()); });
 
         // Extrapolate new index path
         auto [dir, file_name] = format_prefix(indices[0]->upper_bound());

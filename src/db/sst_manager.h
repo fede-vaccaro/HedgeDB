@@ -15,10 +15,11 @@
 
 #include "cache.h"
 #include "io/io_executor.h"
-#include "scan_iterator.h"
+#include "range_iterator.h"
 #include "sst.h"
 #include "tmc/atomic_condvar.hpp"
-#include "tmc/ex_braid.hpp"
+#include "tmc/channel.hpp"
+// #include "tmc/ex_braid.hpp"
 #include "tmc/semaphore.hpp"
 #include "types.h"
 
@@ -42,6 +43,7 @@ namespace hedge::db
         };
 
         sst_manager() = default;
+        ~sst_manager();
 
         explicit sst_manager(const config& cfg,
                              std::shared_ptr<io::io_executor> compaction_pool,
@@ -62,15 +64,20 @@ namespace hedge::db
         [[nodiscard]] hedge::expected<partition_t> acquire_partition_snapshot(size_t partition_id) const;
 
         // Range scan: returns an iterator over deduplicated entries within [lower, upper]
-        [[nodiscard]] hedge::expected<scan_iterator> range_iterator(std::optional<key_t> lower, std::optional<key_t> upper, size_t matching_partition_id, size_t read_ahead_size = 256 * 1024) const;
+        [[nodiscard]] hedge::expected<range_iterator> make_range_iterator(std::optional<key_t> lower, std::optional<key_t> upper, size_t matching_partition_id, size_t read_ahead_size = 256 * 1024) const;
 
         // Compaction control
+        void launch_compaction_worker();
         void schedule_compaction(bool compact_all);
         void wait_for_compactions_to_finish();
 
         // Observability
         [[nodiscard]] double read_amplification_factor();
         void print_tree_structure() const;
+
+        // Returns the highest max_seq_nr across all SSTs at all levels and partitions.
+        // Returns 0 if no SSTs are loaded (first boot or empty DB).
+        [[nodiscard]] uint64_t max_seq_nr() const;
 
         // Backpressure flag (read by memtable/database)
         auto& compaction_backpressure() { return this->_compaction_backpressure; }
@@ -128,7 +135,7 @@ namespace hedge::db
         sorted_indices_map_t _sorted_indices;
 
         std::shared_ptr<io::io_executor> _compaction_pool;
-        std::optional<tmc::ex_braid> _compaction_braid; // Serialized executor, just for scheduling compactions
+        // std::unique_ptr<tmc::ex_braid> _compaction_braid; // Serialized executor, just for scheduling compactions
 
         size_t _compactor_executor_id{0};
         std::atomic_size_t _compaction_jobs_in_flight{0};
@@ -172,6 +179,8 @@ namespace hedge::db
         using compaction_buckets_per_partition_t = std::vector<std::pair<uint16_t, compaction_buckets_t>>; // partition_id -> buckets (per level)
 
         // Compaction related methods
+        tmc::chan_tok<bool> _compaction_scheduler_signal_chan = tmc::make_channel<bool>();
+
         void _update_pending_compactions_counter(int32_t count);
 
         tmc::task<void> _make_compaction_task(

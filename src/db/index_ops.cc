@@ -191,6 +191,7 @@ namespace hedge::db
     {
         size_t bytes_written;
         size_t indexed_kv;
+        uint64_t max_seq_nr;
     };
 
     tmc::task<expected<_write_index_infos>> _write_index(
@@ -218,12 +219,14 @@ namespace hedge::db
 
         // Iterate through entries and write them using the merge_write_buffer, which handles buffering and block encoding.
         std::optional<key_t> prev_key;
+        uint64_t max_seq_nr = 0;
         for(auto it = skiplist_begin; it != skiplist_end; ++it)
         {
             if(prev_key && it->_key == *prev_key)
                 continue; // older MVCC version, skip
 
             prev_key = it->_key;
+            max_seq_nr = std::max(max_seq_nr, it->seq);
 
             if(qf.has_value()) [[likely]]
                 qf->insert(xxh64::hash((const char*)it->_key.data(), it->_key.size(), sst::QF_SEED));
@@ -253,7 +256,7 @@ namespace hedge::db
                 co_return flush_result.error();
         }
 
-        co_return _write_index_infos{.bytes_written = bytes_written, .indexed_kv = write_buffer.indexed_kv()};
+        co_return _write_index_infos{.bytes_written = bytes_written, .indexed_kv = write_buffer.indexed_kv(), .max_seq_nr = max_seq_nr};
     }
 
     static tmc::task<hedge::expected<sst>> _export_as_sst_async(
@@ -294,7 +297,7 @@ namespace hedge::db
         auto maybe_index_infos = co_await _write_index(fd, file_id, skiplist_begin, skiplist_end, qf, meta_index, encoded_meta_index);
         if(!maybe_index_infos)
             co_return maybe_index_infos.error();
-        auto [bytes_written, indexed_kv] = maybe_index_infos.value();
+        auto [bytes_written, indexed_kv, max_seq_nr] = maybe_index_infos.value();
 
         // Write meta-index
         size_t encoded_meta_write_size_bytes = hedge::ceil_page_align(encoded_meta_index.size());
@@ -324,6 +327,7 @@ namespace hedge::db
         fbuilder.meta_index_offset = meta_index_offset;
         fbuilder.meta_index_entries = meta_index.size();
         fbuilder.epoch = epoch;
+        fbuilder.max_seq_nr = max_seq_nr;
         fbuilder.footer_offset = bytes_written;
 
         auto maybe_footer = fbuilder.build();

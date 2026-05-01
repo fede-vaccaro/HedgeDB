@@ -12,8 +12,8 @@
 #include <gtest/gtest.h>
 
 #include "db/index_ops.h"
-#include "db/memtable.h" // For memtable_impl3_t
-#include "db/scan_iterator.h"
+#include "db/memtable.h"
+#include "db/range_iterator.h"
 #include "db/sst.h"
 #include "io/io_executor.h"
 #include "single_buffer_arena_allocator.h"
@@ -43,7 +43,7 @@ struct scan_test_helpers
         auto k = hedge::key_t::make_with_length(length);
         auto span = static_cast<std::span<std::byte>>(k);
         for(size_t i = 0; i < length; ++i)
-            span[i] = dist(generator);
+            span[i] = static_cast<std::byte>(dist(generator));
         return k;
     }
 
@@ -56,7 +56,7 @@ struct scan_test_helpers
                               [&](std::byte& byte)
                               {
                                   byte = byte_seed;
-                                  byte_seed = byte_seed * 31 + 17;
+                                  byte_seed = static_cast<std::byte>((std::to_integer<uint8_t>(byte_seed) * 31 + 17) & 0xFF);
                               });
     }
 
@@ -289,7 +289,7 @@ TEST_P(range_scan_test, test_flush_and_range_scan_all_16b_keys)
             [](const hedge::db::partition_t& partition, uint16_t prefix, groundtruth_t& keys_gt, auto* test_fixture) -> tmc::task<hedge::expected<test_result_t>>
             {
                 auto t0 = std::chrono::high_resolution_clock::now();
-                auto maybe_it = hedge::db::scan_iterator::from_partition(
+                auto maybe_it = hedge::db::range_iterator::make_new(
                     nullptr,
                     &partition,
                     std::nullopt,
@@ -381,8 +381,7 @@ struct memtable_merged_scan_test : public ::testing::TestWithParam<std::tuple<si
 
     [[nodiscard]] hedge::db::memtable::rw_sync_table_ptr_t make_table(size_t budget = 16 * 1024 * 1024) const
     {
-        return std::make_shared<hedge::db::memtable::rw_sync_table_t>(
-            1, this->_base_path, false, 0, budget, 1, budget);
+        return std::make_shared<hedge::db::memtable::rw_sync_table_t>(1, &_seq_nr, budget, 1, budget);
     }
 
     [[nodiscard]] hedge::expected<std::vector<hedge::db::sst>> do_flush(hedge::db::skiplist_wrapper& mem, size_t flush_iter) const
@@ -405,11 +404,11 @@ struct memtable_merged_scan_test : public ::testing::TestWithParam<std::tuple<si
             .get();
     }
 
-    hedge::db::scan_iterator build_iterator(
+    hedge::db::range_iterator build_iterator(
         const hedge::db::partition_t& partition,
-        hedge::db::memtable::snapshot snapshot)
+        hedge::db::memtable::snapshot snapshot,
+        size_t read_ahead_size = hedge::PAGE_SIZE_IN_BYTES * 4)
     {
-        constexpr size_t read_ahead_size = hedge::PAGE_SIZE_IN_BYTES * 4;
 
         std::vector<hedge::db::sst_ptr_t> sst_ptrs;
         std::vector<hedge::db::page_range> ranges;
@@ -440,7 +439,7 @@ struct memtable_merged_scan_test : public ::testing::TestWithParam<std::tuple<si
                                 read_ahead_size);
         }
 
-        return hedge::db::scan_iterator{
+        return hedge::db::range_iterator{
             std::move(snapshot),
             std::move(sst_ptrs),
             std::move(rbufs),
@@ -455,7 +454,7 @@ struct memtable_merged_scan_test : public ::testing::TestWithParam<std::tuple<si
         int64_t duration_us{0};
     };
 
-    [[nodiscard]] scan_result_t run_scan(hedge::db::scan_iterator it) const
+    [[nodiscard]] scan_result_t run_scan(hedge::db::range_iterator it) const
     {
         return tmc::post_waitable(
                    *this->_executor,
@@ -488,6 +487,7 @@ struct memtable_merged_scan_test : public ::testing::TestWithParam<std::tuple<si
     std::string _base_path = "/tmp/hh/test_memtable_merged_p";
     std::unique_ptr<hedge::io::io_executor> _executor{};
     hedge::single_buffer_arena_allocator _arena{64 * 1024 * 1024};
+    mutable std::atomic_uint64_t _seq_nr{0};
 };
 
 // Verify that a memtable-only scan (no SSTs) returns all keys sorted.

@@ -1,11 +1,12 @@
 #pragma once
+#include "types.h"
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <random>
 #include <xxh64.hpp>
+
 #include "common.h"
-#include "types.h"
 
 namespace hedge::db
 {
@@ -27,12 +28,12 @@ namespace hedge::db
     inline values_t pregenerate_values(size_t vsize)
     {
         values_t values(NVALUES);
-        for (size_t slot = 0; slot < NVALUES; ++slot)
+        for(size_t slot = 0; slot < NVALUES; ++slot)
         {
             values[slot].resize(vsize);
             std::mt19937 gen(static_cast<uint32_t>(slot));
             std::uniform_int_distribution<uint8_t> dist(0, 255);
-            for (auto& b : values[slot])
+            for(auto& b : values[slot])
                 b = static_cast<std::byte>(dist(gen));
         }
         return values;

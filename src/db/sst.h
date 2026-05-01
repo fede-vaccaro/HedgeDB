@@ -30,13 +30,14 @@ namespace hedge::db
         uint8_t version{CURRENT_FOOTER_VERSION}; ///< File format version number.
         uint64_t upper_bound{};                  ///< The upper bound (inclusive) of the key partition this index belongs to. All keys in this file are <= this value.
         uint64_t indexed_keys{};                 ///< Total number of key-value pointer entries in the main index data section.
-        uint64_t meta_index_entries{};           ///< Total number of entries in the meta-index section.
+        uint64_t meta_index_entries{};           ///< Total number of entries in the second level index (meta-index) section.
         uint64_t index_offset{};                 ///< Byte offset from the beginning of the file where the main index data begins.
-        uint64_t meta_index_offset{};            ///< Byte offset from the beginning of the file where the meta-index data begins.
+        uint64_t meta_index_offset{};            ///< Byte offset from the beginning of the file where the second level index (meta-index) data begins.
         uint64_t qf_offset{};                    ///< Byte offset from the beginning of the file where the quotient filter data begins.
         uint64_t qf_size{};                      ///< Size in bytes of the quotient filter section (header + data).
         uint64_t footer_offset{};                ///< Byte offset from the beginning of the file where this footer structure begins.
         uint64_t epoch{};                        ///< Epoch timestamp indicating when the file was created.
+        uint64_t max_seq_nr{};                   ///< Maximum sequence number among all entries written to this file.
     };
 
     enum class compaction_progress_state : int8_t
@@ -75,7 +76,7 @@ namespace hedge::db
         // Allow index_ops to access private members for operations like merging/saving.
         friend struct index_ops;
 
-        page_aligned_buffer<key_t> _meta_index;                 ///< In-memory copy of the meta-index (always loaded on construction/load).
+        page_aligned_buffer<key_t> _meta_index;                 ///< In-memory copy of the second level index (always loaded on construction/load).
         std::optional<page_aligned_buffer<key_t>> _super_index; ///< The super index can be built to facilitate lookup over the meta index.
         std::optional<quotient_filter> _qf;                     ///< Optional quotient filter for fast negative lookups.
         sst_footer _footer;                                     ///< In-memory copy of the file's footer (always loaded on construction/load).
@@ -119,6 +120,8 @@ namespace hedge::db
         [[nodiscard]] size_t size() const { return this->_footer.indexed_keys; }
 
         [[nodiscard]] size_t epoch() const { return this->_footer.epoch; }
+
+        [[nodiscard]] uint64_t max_seq_nr() const { return this->_footer.max_seq_nr; }
 
         [[nodiscard]] const sst_footer& footer() const { return this->_footer; }
 

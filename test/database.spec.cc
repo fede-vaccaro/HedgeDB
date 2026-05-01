@@ -105,7 +105,7 @@ namespace hedge::db
             cfg.use_odirect_for_ssts = true;
             cfg.index_page_clock_cache_size_bytes = 0;
             cfg.index_point_cache_size_bytes = 0;
-            cfg.compaction_io_workers = 2;
+            cfg.background_workers = 2;
             cfg.flush_io_workers = 2;
             cfg.max_pending_flushes = 4;
             cfg.min_merge_width = 2;

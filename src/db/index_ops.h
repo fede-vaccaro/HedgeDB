@@ -31,6 +31,7 @@ namespace hedge::db
             std::optional<uint64_t> qf_size{};
             std::optional<uint64_t> footer_offset{};
             std::optional<uint64_t> epoch{};
+            std::optional<uint64_t> max_seq_nr{};
 
             hedge::expected<sst_footer> build()
             {
@@ -49,6 +50,8 @@ namespace hedge::db
                     return hedge::error("Footer footer_offset not set");
                 if(!this->epoch.has_value())
                     return hedge::error("Footer epoch not set");
+                if(!this->max_seq_nr.has_value())
+                    return hedge::error("Footer max_seq_nr not set");
 
                 return sst_footer{
                     .version = sst_footer::CURRENT_FOOTER_VERSION,
@@ -60,7 +63,8 @@ namespace hedge::db
                     .qf_offset = this->qf_offset.value_or(0),
                     .qf_size = this->qf_size.value_or(0),
                     .footer_offset = this->footer_offset.value(),
-                    .epoch = this->epoch.value()};
+                    .epoch = this->epoch.value(),
+                    .max_seq_nr = this->max_seq_nr.value()};
             }
         };
 

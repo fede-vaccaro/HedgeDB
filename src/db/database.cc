@@ -12,6 +12,7 @@
 #include "db/memtable.h"
 #include "io/io_executor.h"
 #include "io/static_pool.h"
+#include "size_literals.h"
 #include "sst.h"
 #include "types.h"
 #include "utils.h"
@@ -28,11 +29,6 @@ namespace hedge::db
 
     void database::_init_memtable(database& db, const db_config& config)
     {
-        // auto flush_executor =
-        // config.flush_io_workers > 0 ? std::make_shared<io::io_executor>(config.flush_io_workers, 32, "flusher", tmc::topology::cpu_kind::EFFICIENCY1) : io::static_pool::instance();
-
-        auto flush_executor = db._bg_pool;
-
         db._memtable.emplace(
             memtable_config{
                 .max_inserts_cap = config.memtable_budget_bytes,
@@ -46,7 +42,7 @@ namespace hedge::db
             config.num_partition_exponent,
             db._partitions_path,
             &db._sst_manager->flush_iteration(),
-            flush_executor,
+            db._bg_pool,
             [&sst_mgr = *db._sst_manager](std::vector<sst> sst_batch) -> tmc::task<void>
             { return sst_mgr.push_new_ssts_to_l0(std::move(sst_batch)); },
             [&sst_mgr = *db._sst_manager]()
@@ -62,7 +58,16 @@ namespace hedge::db
         db->_base_path = base_path;
         db->_partitions_path = base_path / "partitions";
         db->_config = config;
-        db->_bg_pool = config.compaction_io_workers > 0 ? std::make_shared<io::io_executor>(config.compaction_io_workers, 32, "bg", tmc::topology::cpu_kind::EFFICIENCY1) : io::static_pool::instance();
+        db->_bg_pool = config.background_workers.has_value()
+                           ? std::make_shared<io::io_executor>(
+                                 io::executor_config{
+                                     .name = "bg",
+                                     .queue_depth = 32,
+                                     .type = io::executor_type::BACKGROUND,
+                                     .n_threads = config.background_workers.value() == 0 ? std::nullopt : config.background_workers,
+                                     .auto_detect = true,
+                                 })
+                           : io::static_pool::instance();
 
         if(auto status = _validate_config(config); !status)
             return status.error();
@@ -101,6 +106,8 @@ namespace hedge::db
         // Setup memtable
         _init_memtable(*db, config);
 
+        db->_sst_manager->launch_compaction_worker();
+
         return db;
     }
 
@@ -111,7 +118,16 @@ namespace hedge::db
         db->_base_path = base_path;
         db->_partitions_path = base_path / "partitions";
         db->_config = config;
-        db->_bg_pool = std::make_shared<io::io_executor>(config.compaction_io_workers, 32, "bg");
+        db->_bg_pool = config.background_workers.has_value()
+                           ? std::make_shared<io::io_executor>(
+                                 io::executor_config{
+                                     .name = "bg",
+                                     .queue_depth = 32,
+                                     .type = io::executor_type::BACKGROUND,
+                                     .n_threads = config.background_workers.value() == 0 ? std::nullopt : config.background_workers,
+                                     .auto_detect = true,
+                                 })
+                           : io::static_pool::instance();
 
         if(auto status = _validate_config(config); !status)
             return status.error();
@@ -120,7 +136,7 @@ namespace hedge::db
             return hedge::error("Database path does not exist: " + db->_base_path.string());
 
         // Init page cache
-        if(config.index_page_clock_cache_size_bytes > 1024 * 1024 * 1)
+        if(config.index_page_clock_cache_size_bytes > 1 * GiB)
             db->_page_cache = std::make_shared<sharded_page_cache>(config.index_page_clock_cache_size_bytes, io::static_pool::instance()->num_threads() * 4);
 
         // Load sst_manager from "partitions" directory
@@ -149,13 +165,16 @@ namespace hedge::db
         // Init empty memtable (needed for the read path; starts with no entries)
         _init_memtable(*db, config);
 
-        // Replay WAL files from any prior crash
+        // Replay WAL files from any prior crash, skipping entries already persisted in SSTs
         if(!config.disable_wal)
         {
-            auto wal_status = db->_memtable->replay_wal();
+            const uint64_t flushed_threshold = db->_sst_manager->max_seq_nr();
+            auto wal_status = db->_memtable->replay_wal(flushed_threshold);
             if(!wal_status)
                 return hedge::error("WAL replay failed: " + wal_status.error().to_string());
         }
+
+        db->_sst_manager->launch_compaction_worker();
 
         return db;
     }
@@ -219,18 +238,21 @@ namespace hedge::db
         return matching_partition_id;
     }
 
-    hedge::expected<scan_iterator> database::scan(std::optional<key_t> lower, std::optional<key_t> upper)
+    hedge::expected<range_iterator> database::scan(std::optional<key_t> lower, std::optional<key_t> upper, size_t read_ahead_size)
     {
         const key_t& bound_key = lower ? *lower : *upper;
         size_t partition_id = this->_find_matching_partition_for_key(bound_key);
+
+        memtable::snapshot snap;
+        if(this->_memtable.has_value())
+            snap = this->_memtable->acquire_snapshot();
 
         auto maybe_partition = this->_sst_manager->acquire_partition_snapshot(partition_id);
         if(!maybe_partition)
             return hedge::error(maybe_partition.error());
 
-        auto partition = std::move(maybe_partition.value());
-        memtable* mem = this->_memtable.has_value() ? &*this->_memtable : nullptr;
-        return scan_iterator::from_partition(mem, &partition, std::move(lower), std::move(upper));
+        return range_iterator::make_new(
+            std::move(snap), &maybe_partition.value(), std::move(lower), std::move(upper), read_ahead_size);
     }
 
     tmc::task<hedge::status> database::remove_async(const key_t& key)

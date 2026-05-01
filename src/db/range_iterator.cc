@@ -3,7 +3,7 @@
 #include <limits>
 
 #include "db/memtable.h"
-#include "db/scan_iterator.h"
+#include "db/range_iterator.h"
 #include "error.hpp"
 #include "sst.h"
 #include "types.h"
@@ -11,19 +11,26 @@
 namespace hedge::db
 {
 
-    hedge::expected<scan_iterator> scan_iterator::from_partition(
+    hedge::expected<range_iterator> range_iterator::make_new(
         memtable* memtable,
         const partition_t* partition,
         std::optional<key_t> lower,
         std::optional<key_t> upper,
         size_t read_ahead_size)
     {
-
         memtable::snapshot snapshot;
-
         if(memtable != nullptr)
             snapshot = memtable->acquire_snapshot();
+        return make_new(std::move(snapshot), partition, std::move(lower), std::move(upper), read_ahead_size);
+    }
 
+    hedge::expected<range_iterator> range_iterator::make_new(
+        memtable::snapshot snapshot,
+        const partition_t* partition,
+        std::optional<key_t> lower,
+        std::optional<key_t> upper,
+        size_t read_ahead_size)
+    {
         std::vector<sst_ptr_t> matching_ssts;
         std::vector<page_range> ranges;
 
@@ -74,7 +81,7 @@ namespace hedge::db
                                 read_ahead_size);
         }
 
-        return scan_iterator{
+        return range_iterator{
             std::move(snapshot),
             std::move(matching_ssts),
             std::move(rbufs),
@@ -82,7 +89,7 @@ namespace hedge::db
             std::move(upper)};
     };
 
-    scan_iterator::scan_iterator(
+    range_iterator::range_iterator(
         memtable::snapshot snapshot,
         std::vector<sst_ptr_t> ssts,
         std::unique_ptr<sst_stream_set> rbufs,
@@ -105,7 +112,7 @@ namespace hedge::db
         this->_heap.reserve(this->_ssts.size() + this->_mem_cursors.size());
     }
 
-    tmc::task<hedge::status> scan_iterator::_refresh_buffers()
+    tmc::task<hedge::status> range_iterator::_refresh_buffers()
     {
         for(auto* it = this->_rbufs->begin(); it < this->_rbufs->end(); ++it)
         {
@@ -116,7 +123,7 @@ namespace hedge::db
         co_return hedge::ok();
     }
 
-    tmc::task<hedge::status> scan_iterator::_init()
+    tmc::task<hedge::status> range_iterator::_init()
     {
         auto status = co_await this->_refresh_buffers();
         if(!status)
@@ -143,7 +150,7 @@ namespace hedge::db
 
             this->_slots.push_back({std::move(maybe_entry.value()), src});
             this->_heap.push_back({&this->_slots.back()});
-            std::ranges::push_heap(this->_heap, scan_iterator::_heap_cmp());
+            std::ranges::push_heap(this->_heap, range_iterator::_heap_cmp());
         }
 
         for(auto& mc : this->_mem_cursors)
@@ -158,14 +165,14 @@ namespace hedge::db
 
             this->_slots.push_back({std::move(maybe_entry.value()), src});
             this->_heap.push_back({&this->_slots.back()});
-            std::ranges::push_heap(this->_heap, scan_iterator::_heap_cmp());
+            std::ranges::push_heap(this->_heap, range_iterator::_heap_cmp());
         }
 
         this->_initialized = true;
         co_return hedge::ok();
     }
 
-    expected<std::pair<key_t, value_t>> scan_iterator::_emit(merge_entry_t& item)
+    expected<std::pair<key_t, value_t>> range_iterator::_emit(merge_entry_t& item)
     {
         if(this->_lower && item.key < *this->_lower)
             return hedge::error("", errc::SKIP);
@@ -183,14 +190,14 @@ namespace hedge::db
         return std::pair{std::move(item.key), std::move(maybe_value.value())};
     };
 
-    tmc::task<hedge::expected<std::pair<key_t, value_t>>> scan_iterator::_next_inner()
+    tmc::task<hedge::expected<std::pair<key_t, value_t>>> range_iterator::_next_inner()
     {
         while(true)
         {
             if(this->_heap.empty())
                 co_return hedge::error("eof", errc::END_OF_SCAN);
 
-            std::ranges::pop_heap(this->_heap, scan_iterator::_heap_cmp());
+            std::ranges::pop_heap(this->_heap, range_iterator::_heap_cmp());
             auto* slot = this->_heap.back().slot;
             this->_heap.pop_back();
 
@@ -215,7 +222,7 @@ namespace hedge::db
 
                     slot->entry = std::move(maybe_new_entry.value());
                     this->_heap.push_back({slot});
-                    std::ranges::push_heap(this->_heap, scan_iterator::_heap_cmp());
+                    std::ranges::push_heap(this->_heap, range_iterator::_heap_cmp());
                 }
             }
 
@@ -238,7 +245,7 @@ namespace hedge::db
         }
     }
 
-    tmc::task<expected<std::pair<key_t, value_t>>> scan_iterator::next()
+    tmc::task<expected<std::pair<key_t, value_t>>> range_iterator::next()
     {
         if(!this->_initialized)
         {

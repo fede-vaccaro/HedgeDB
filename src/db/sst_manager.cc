@@ -11,7 +11,8 @@
 
 #include <error.hpp>
 
-#include "db/scan_iterator.h"
+#include "db/range_iterator.h"
+#include "db/sst.h"
 #include "fs/fs.hpp"
 #include "index_ops.h"
 #include "io/io_executor.h"
@@ -54,6 +55,28 @@ namespace hedge::db
                 s = std::make_shared<tmc::semaphore>(1);
             _sorted_indices.emplace(partition_id, std::move(state));
         }
+    }
+
+    void sst_manager::launch_compaction_worker()
+    {
+        auto make_compaction_job = [](sst_manager* sst_manager) -> tmc::task<void>
+        {
+            while(true)
+            {
+                auto compact_all = co_await sst_manager->_compaction_scheduler_signal_chan.pull();
+
+                if(!compact_all)
+                    break;
+
+                auto maybe_stats = sst_manager->_schedule_compaction(compact_all.value());
+                if(!maybe_stats)
+                    sst_manager->_logger.log("Compaction job failed: ", maybe_stats.error().to_string());
+
+                sst_manager->_compaction_jobs_in_flight.fetch_sub(1, std::memory_order::relaxed);
+            }
+        };
+
+        tmc::post(*this->_compaction_pool, make_compaction_job(this));
     }
 
     tmc::task<void> sst_manager::push_new_ssts_to_l0(std::vector<sst> new_ssts)
@@ -177,14 +200,14 @@ namespace hedge::db
         co_return std::move(value_opt.value());
     }
 
-    hedge::expected<scan_iterator> sst_manager::range_iterator(std::optional<key_t> lower, std::optional<key_t> upper, size_t matching_partition_id, size_t read_ahead_size) const
+    hedge::expected<range_iterator> sst_manager::make_range_iterator(std::optional<key_t> lower, std::optional<key_t> upper, size_t matching_partition_id, size_t read_ahead_size) const
     {
         auto maybe_partition = this->acquire_partition_snapshot(matching_partition_id);
         if(!maybe_partition)
             return hedge::error(maybe_partition.error());
 
         auto partition = std::move(maybe_partition.value());
-        return scan_iterator::from_partition(nullptr, &partition, std::move(lower), std::move(upper), read_ahead_size);
+        return range_iterator::make_new(nullptr, &partition, std::move(lower), std::move(upper), read_ahead_size);
     }
 
     tmc::task<void> sst_manager::_make_compaction_task(
@@ -245,14 +268,13 @@ namespace hedge::db
             target_level.push_back(std::move(output_ptr));
             state.levels_seq_num.fetch_add(1, std::memory_order::release);
 
-            const bool needs_further_compaction = target_level.size() > input_min_merge_width;
+            // const bool needs_further_compaction = target_level.size() > input_min_merge_width;
             lk.unlock();
 
             // Give the permission to next in the compaction chain
             next_can_write->release();
 
-            if(needs_further_compaction)
-                this->schedule_compaction(false);
+            this->schedule_compaction(false);
 
             auto persist_status = co_await _persist_partition_state(partition_prefix);
             if(!persist_status)
@@ -629,28 +651,8 @@ namespace hedge::db
 
     void sst_manager::schedule_compaction(bool compact_all)
     {
-        constexpr size_t MAX_IN_FLIGHT_COMPACTION_TRIGGERS = 4;
-
-        if(!compact_all && this->_compaction_jobs_in_flight.load(std::memory_order::relaxed) >= MAX_IN_FLIGHT_COMPACTION_TRIGGERS)
-            return;
-
-        this->_compaction_jobs_in_flight.fetch_add(1, std::memory_order::relaxed);
-
-        auto make_compaction_job = [](sst_manager* sst_manager, bool compact_all) -> tmc::task<void>
-        {
-            if(!sst_manager->_compaction_braid.has_value())
-                sst_manager->_compaction_braid.emplace();
-
-            co_await tmc::resume_on(*sst_manager->_compaction_braid);
-
-            auto maybe_stats = sst_manager->_schedule_compaction(compact_all);
-            if(!maybe_stats)
-                sst_manager->_logger.log("Compaction job failed: ", maybe_stats.error().to_string());
-
-            sst_manager->_compaction_jobs_in_flight.fetch_sub(1, std::memory_order::relaxed);
-        };
-
-        tmc::post(*this->_compaction_pool, make_compaction_job(this, compact_all));
+        // Signal the compaction worker to start a new round of compaction
+        this->_compaction_scheduler_signal_chan.post(compact_all);
     }
 
     void sst_manager::wait_for_compactions_to_finish()
@@ -658,13 +660,14 @@ namespace hedge::db
 
         auto make_wait_job = [](sst_manager* sst_manager) -> tmc::task<void>
         {
-            if(!sst_manager->_compaction_braid.has_value())
-                sst_manager->_compaction_braid.emplace();
+            // if(!sst_manager->_compaction_braid)
+            //     sst_manager->_compaction_braid = std::make_unique<tmc::ex_braid>();
 
-            co_await tmc::resume_on(*sst_manager->_compaction_braid);
+            // co_await tmc::resume_on(*sst_manager->_compaction_braid);
+            co_await sst_manager->_compaction_scheduler_signal_chan.drain();
         };
 
-        tmc::post_waitable(*this->_compaction_pool, make_wait_job(this)).wait();
+        // tmc::post_waitable(*this->_compaction_pool, make_wait_job(this)).wait();
 
         // Wait for all in-flight self-completing tasks on executor pool
         std::unique_lock lk(this->_total_pending_compactions_mutex);
@@ -686,6 +689,21 @@ namespace hedge::db
             return 0.0;
 
         return total_read_amplification / this->_sorted_indices.size();
+    }
+
+    uint64_t sst_manager::max_seq_nr() const
+    {
+        uint64_t result = 0;
+        for(const auto& [_, state] : this->_sorted_indices)
+        {
+            std::shared_lock lock(state->mutex);
+            for(const auto& level : state->levels)
+            {
+                for(const auto& sst : level)
+                    result = std::max(result, sst->max_seq_nr());
+            }
+        }
+        return result;
     }
 
     void sst_manager::print_tree_structure() const
@@ -737,6 +755,11 @@ namespace hedge::db
                           << ", total: " << (total_size / 1024.0) << " KB\n";
             }
         }
+    }
+
+    sst_manager::~sst_manager()
+    {
+        // this->_compaction_braid.reset();
     }
 
 } // namespace hedge::db

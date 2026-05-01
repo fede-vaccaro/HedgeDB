@@ -39,7 +39,7 @@ namespace hedge::db
         /// Higher bucket_ratio means less frequent compactions (lower write amplification) but higher read amplification (more data read during compaction).
         double bucket_ratio = 1.5;
         /// Amount of data read ahead from each sorted_index file during compaction merges.
-        size_t compaction_read_ahead_size_bytes = 4 * MiB;
+        size_t compaction_read_ahead_size_bytes = 2 * MiB;
         /// Maximum time to wait for a compaction job (currently for sub-tasks within the job) before timing out.
         std::chrono::milliseconds compaction_timeout{120000};
         /// If true, compaction is automatically triggered when the memtable is flushed and merge conditions are met.
@@ -54,10 +54,8 @@ namespace hedge::db
         size_t index_page_clock_cache_size_bytes = 3UL * GiB;
         /// Experimental; it's like a giant memtable; do not use
         size_t index_point_cache_size_bytes = 0;
-        /// Number of background workers to be used for compaction
-        size_t compaction_io_workers = 4;
-        /// Number of io_uring executor threads for parallel memtable flush
-        size_t flush_io_workers = 4;
+        /// Number of background workers to be used for compaction. std::nullopt means "use static pool", 0 means "auto detect".
+        std::optional<size_t> background_workers = std::nullopt;
         /// Maximum number of concurrent memtable flushes allowed before backpressure
         size_t max_pending_flushes = 8;
 
@@ -147,7 +145,7 @@ namespace hedge::db
          * @brief Creates a scan iterator over [lower, upper) within a single partition.
          * The partition is determined from the lower bound key (or upper if lower is nullopt).
          */
-        [[nodiscard]] hedge::expected<scan_iterator> scan(std::optional<key_t> lower, std::optional<key_t> upper);
+        [[nodiscard]] hedge::expected<range_iterator> scan(std::optional<key_t> lower, std::optional<key_t> upper, size_t read_ahead_size = 64 * KiB);
 
         void trigger_compaction(bool compact_all);
 

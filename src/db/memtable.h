@@ -198,7 +198,7 @@ namespace hedge::db
         // MVCC snapshot for consistent range scans
         snapshot acquire_snapshot();
 
-        hedge::status replay_wal();
+        hedge::status replay_wal(uint64_t skip_up_to_seq_nr = 0);
 
     private:
         static constexpr size_t VALUE_DATA_ALIGNMENT = 16; // Deprecated, might use actual alignment (8 bytes)

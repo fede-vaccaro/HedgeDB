@@ -50,7 +50,7 @@ namespace hedge::db
             s);
     }
 
-    class scan_iterator
+    class range_iterator
     {
         using sst_ptr_t = std::shared_ptr<sst>;
 
@@ -97,23 +97,30 @@ namespace hedge::db
         tmc::task<hedge::expected<std::pair<key_t, value_t>>> _next_inner();
 
     public:
-        scan_iterator(
+        range_iterator(
             memtable::snapshot snapshot,
             std::vector<sst_ptr_t> ssts,
             std::unique_ptr<sst_stream_set> rbufs,
             std::optional<key_t> lower,
             std::optional<key_t> upper);
 
-        scan_iterator(scan_iterator&&) = default;
-        scan_iterator& operator=(scan_iterator&&) = default;
-        scan_iterator(const scan_iterator&) = delete;
-        scan_iterator& operator=(const scan_iterator&) = delete;
+        range_iterator(range_iterator&&) = default;
+        range_iterator& operator=(range_iterator&&) = default;
+        range_iterator(const range_iterator&) = delete;
+        range_iterator& operator=(const range_iterator&) = delete;
 
         /// Returns the next key-value pair in the range, or errc::END_OF_SCAN when exhausted.
         [[nodiscard]] tmc::task<expected<std::pair<key_t, value_t>>> next();
 
-        static hedge::expected<scan_iterator> from_partition(
+        static hedge::expected<range_iterator> make_new(
             memtable* memtable,
+            const partition_t* partition,
+            std::optional<key_t> lower,
+            std::optional<key_t> upper,
+            size_t read_ahead_size = 4 * KiB);
+
+        static hedge::expected<range_iterator> make_new(
+            memtable::snapshot snapshot,
             const partition_t* partition,
             std::optional<key_t> lower,
             std::optional<key_t> upper,

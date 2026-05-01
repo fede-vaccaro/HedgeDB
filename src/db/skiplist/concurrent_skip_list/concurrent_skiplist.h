@@ -15,7 +15,7 @@
  */
 
 // A concurrent skip list (CSL) implementation.
-// Ref: http://www.cs.tau.ac.il/~shanir/nir-pubs-web/Papers/OPODIS2006-BA.pdf
+// Ref: https://people.csail.mit.edu/shanir/publications/OPODIS2006-BA.pdf
 
 /*
 

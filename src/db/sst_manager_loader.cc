@@ -78,7 +78,7 @@ namespace hedge::db
         {
             auto partition_manifest_path = dir_path / sst_manager::MANIFEST_FILENAME;
             if(!std::filesystem::exists(partition_manifest_path))
-                return hedge::error(std::format("Manifest does not exist: {}", partition_manifest_path.string()));
+                return hedge::ok();
 
             auto maybe_file = fs::file::from_path(partition_manifest_path, fs::file::open_mode::read_write, false, PAGE_SIZE_IN_BYTES);
             if(maybe_file)
@@ -137,14 +137,14 @@ namespace hedge::db
             auto dir_path = cfg.partitions_path / dir_prefix;
 
             if(!std::filesystem::exists(dir_path))
-                return hedge::error(std::format("Missing directory for partition: {}", dir_path.string()));
+                return hedge::ok();
 
             auto ok = sst_manager_helpers::_load_partition_manifest(state, dir_path);
             if(!ok)
                 return hedge::error(std::format("Failed to load manifest for partition {}: {}", partition_id, ok.error().to_string()));
 
             std::string buf(PAGE_SIZE_IN_BYTES, '\0');
-            ssize_t n = ::pread(state.state_file.fd(), buf.data(), PAGE_SIZE_IN_BYTES, 0);
+            ssize_t n = state.state_file.fd() != -1 ? ::pread(state.state_file.fd(), buf.data(), PAGE_SIZE_IN_BYTES, 0) : 0;
 
             if(n > 0)
             {
