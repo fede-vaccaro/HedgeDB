@@ -9,7 +9,7 @@
 
 namespace hedge::db
 {
-    db_config make_db_config()
+    db_config make_db_config(size_t num_bg_threads)
     {
         db_config cfg;
         cfg.auto_compaction = true;
@@ -20,17 +20,18 @@ namespace hedge::db
         cfg.use_odirect_for_ssts = true;
         cfg.index_page_clock_cache_size_bytes = 0;
         cfg.index_point_cache_size_bytes = 0;
-        cfg.background_workers = 0; // auto-detect
+        cfg.background_workers = num_bg_threads;
         cfg.max_pending_flushes = 8;
         cfg.min_merge_width = 8;
         cfg.max_merge_width = 32;
+        cfg.ssts_in_l0_block_write_threshold = std::nullopt;
         cfg.disable_wal = false;
         return cfg;
     }
 
     expected<std::shared_ptr<database>> open_db(const bench_config& cfg)
     {
-        db_config db_cfg = make_db_config();
+        db_config db_cfg = make_db_config(cfg.num_bg_threads);
         if(cfg.mode == "load")
         {
             if(std::filesystem::exists(cfg.db_path))

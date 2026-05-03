@@ -67,7 +67,7 @@ namespace hedge::db
 
         /// Per-partition L0 SST count threshold above which writes are blocked via backpressure.
         /// The effective threshold is multiplied by the total number of partitions.
-        size_t ssts_in_l0_block_write_threshold = 40;
+        std::optional<size_t> ssts_in_l0_block_write_threshold = 40;
 
         bool disable_wal = false;
     };
@@ -145,7 +145,7 @@ namespace hedge::db
          * @brief Creates a scan iterator over [lower, upper) within a single partition.
          * The partition is determined from the lower bound key (or upper if lower is nullopt).
          */
-        [[nodiscard]] hedge::expected<range_iterator> scan(std::optional<key_t> lower, std::optional<key_t> upper, size_t read_ahead_size = 64 * KiB);
+        [[nodiscard]] hedge::expected<range_iterator> scan(std::optional<key_t> lower, std::optional<key_t> upper, size_t read_ahead_size = 16 * KiB);
 
         void trigger_compaction(bool compact_all);
 

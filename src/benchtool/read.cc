@@ -3,6 +3,7 @@
 #include <iostream>
 #include <memory>
 #include <vector>
+
 #include "db/database.h"
 #include "io/static_pool.h"
 #include "keygen.h"
@@ -14,15 +15,15 @@
 
 namespace hedge::db
 {
-    void run_read(const std::shared_ptr<database>& db, size_t n, size_t vsize, bool measure_latency)
+    void run_read(const std::shared_ptr<database>& db, size_t n, size_t vsize, size_t num_threads, bool measure_latency)
     {
         std::atomic_size_t errors{0};
         std::unique_ptr<latency_histogram> hist;
-        if (measure_latency)
+        if(measure_latency)
             hist = std::make_unique<latency_histogram>();
         latency_histogram* hist_ptr = hist.get();
 
-        auto worker = [](size_t tid, size_t n,
+        auto worker = [](size_t tid, size_t n, size_t num_threads,
                          const std::shared_ptr<database>& db, std::atomic_size_t& errors,
                          bool measure_latency, latency_histogram* hist) -> tmc::task<void>
         {
@@ -31,19 +32,19 @@ namespace hedge::db
                              bool measure_latency, latency_histogram* hist) -> tmc::task<void>
             {
                 using clk = std::chrono::high_resolution_clock;
-                if (measure_latency && hist)
+                if(measure_latency && hist)
                 {
                     auto start = clk::now();
                     auto result = co_await db->get_async(make_key(idx));
                     auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(clk::now() - start).count();
                     hist->record(static_cast<uint64_t>(elapsed));
-                    if (!result)
+                    if(!result)
                         errors.fetch_add(1, std::memory_order_relaxed);
                 }
                 else
                 {
                     auto result = co_await db->get_async(make_key(idx));
-                    if (!result)
+                    if(!result)
                         errors.fetch_add(1, std::memory_order_relaxed);
                 }
                 sem.release();
@@ -51,7 +52,7 @@ namespace hedge::db
 
             auto fg = tmc::fork_group();
             tmc::semaphore sem(io::static_pool::instance()->queue_depth());
-            for (size_t i = tid; i < n; i += NUM_WORKERS)
+            for(size_t i = tid; i < n; i += num_threads)
             {
                 co_await sem;
                 fg.fork(get_op(i, db, errors, sem, measure_latency, hist));
@@ -63,16 +64,15 @@ namespace hedge::db
         auto t0 = clk::now();
 
         std::vector<tmc::task<void>> tasks;
-        tasks.reserve(NUM_WORKERS);
-        for (size_t tid = 0; tid < NUM_WORKERS; ++tid)
-            tasks.push_back(worker(tid, n, db, errors, measure_latency, hist_ptr));
+        tasks.reserve(num_threads);
+        for(size_t tid = 0; tid < num_threads; ++tid)
+            tasks.push_back(worker(tid, n, num_threads, db, errors, measure_latency, hist_ptr));
         run_workers(std::move(tasks));
 
         print_throughput("read", n, std::chrono::duration<double>(clk::now() - t0).count(), vsize);
-        if (hist)
+        if(hist)
             hist->print_percentiles("read");
         std::cout << "Errors: " << errors.load() << "\n";
         prof::print_internal_perf_stats(true);
     }
-
 } // namespace hedge::db

@@ -16,3 +16,7 @@ include/outcome.hpp
 
 # experiments and bench directory, also random stuff
 experiments/**
+
+# ignore rocksdb test stuff
+rocksdb/rocksdb*
+rocksdb/*.zip

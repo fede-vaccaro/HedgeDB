@@ -203,7 +203,7 @@ namespace hedge::db
         page_aligned_buffer<key_t>& meta_index,
         page_aligned_buffer<std::byte>& encoded_meta_index)
     {
-        constexpr size_t WRITE_BUF_SIZE = 1 * MiB;
+        constexpr size_t WRITE_BUF_SIZE = 2 * MiB;
 
         // Write index entries using a merge_write_buffer to block encoding.
         merge_write_buffer write_buffer(WRITE_BUF_SIZE);

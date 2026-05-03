@@ -8,6 +8,10 @@
 #include "sst.h"
 #include "types.h"
 
+// This specific class has been for good part agentic-coded.
+// I find the code particularly confusing.
+// I will rewrite it it soon or later.
+
 namespace hedge::db
 {
 
@@ -57,9 +61,7 @@ namespace hedge::db
                 }
             }
 
-            // Build rolling buffers for each matching SST
-            if(!matching_ssts.empty())
-                read_ahead_size = hedge::ceil_page_align(read_ahead_size);
+            read_ahead_size = hedge::ceil_page_align(read_ahead_size);
         }
 
         // Prepare rolling_buffers (readers)

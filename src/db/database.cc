@@ -35,7 +35,7 @@ namespace hedge::db
                 .memory_budget_cap = config.memtable_budget_bytes,
                 .auto_compaction = config.auto_compaction,
                 .use_odirect = config.use_odirect_for_ssts,
-                .num_writer_threads = io::static_pool::instance()->num_threads(),
+                .num_writer_threads = std::thread::hardware_concurrency(),
                 .use_wal = !config.disable_wal,
                 .max_pending_flushes = config.max_pending_flushes,
             },
@@ -184,6 +184,7 @@ namespace hedge::db
         co_return co_await this->_memtable->put_async(key, value, hedge::value_type::IN_PLACE_VALUE);
     }
 
+
     tmc::task<expected<value_t>> database::_find_value(const key_t& key)
     {
         // prof::counter_guard guard(prof::get<"find_value_in_sst">());
@@ -211,14 +212,10 @@ namespace hedge::db
         auto value = std::move(maybe_value.value());
 
         if(std::holds_alternative<std::vector<std::byte>>(value))
-        {
             co_return std::move(std::get<std::vector<std::byte>>(value));
-        }
 
         if(std::holds_alternative<tombstone_t>(value))
-        {
-            co_return hedge::error("Key is deleted", errc::DELETED);
-        }
+            co_return hedge::error("deleted key", errc::DELETED);
 
         if(!std::holds_alternative<value_ptr_t>(value))
             co_return hedge::error("Invalid value type found for key");

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -23,6 +24,7 @@
 #include "tmc/latch.hpp"
 #include "tmc/semaphore.hpp"
 #include "tmc/sync.hpp"
+#include "types.h"
 #include "utils.h"
 #include "xxh64.hpp"
 
@@ -147,9 +149,9 @@ namespace hedge::db
         return state.levels;
     }
 
-    tmc::task<expected<value_t>> sst_manager::lookup_async(const key_t& key, size_t matching_partition_id)
+    tmc::task<expected<value_t>> sst_manager::lookup_async(const key_t& key, size_t partition_id)
     {
-        auto maybe_partition = this->acquire_partition_snapshot(matching_partition_id);
+        auto maybe_partition = this->acquire_partition_snapshot(partition_id);
         if(!maybe_partition)
             co_return hedge::error(maybe_partition.error());
 
@@ -192,8 +194,6 @@ namespace hedge::db
                 break;
         }
 
-        prof::get<"sst_visited_per_lookup">().add(ssts_visited);
-
         if(!value_opt.has_value())
             co_return hedge::error("Key not found", errc::KEY_NOT_FOUND);
 
@@ -215,7 +215,7 @@ namespace hedge::db
         std::shared_ptr<tmc::semaphore> next_can_write,
         size_t level,
         std::vector<sst_ptr_t> inputs,
-        size_t input_min_merge_width,
+        size_t /* input_min_merge_width */,
         bool discard_deleted_keys)
     {
         auto merge_config = hedge::db::index_ops::merge_config{
@@ -500,7 +500,13 @@ namespace hedge::db
         std::lock_guard lk(this->_pending_compactions_mutex);
 
         {
-            const auto threshold = static_cast<int64_t>(this->_cfg.ssts_in_l0_block_write_threshold) * (1 << this->_cfg.num_partition_exponent);
+            const auto threshold = [this] -> int64_t
+            {
+                if(!this->_cfg.ssts_in_l0_block_write_threshold.has_value())
+                    return std::numeric_limits<int64_t>::max();
+
+                return static_cast<int64_t>(*this->_cfg.ssts_in_l0_block_write_threshold) * (1 << this->_cfg.num_partition_exponent);
+            }();
 
             this->_pending_compacting_sst_for_backpressure_count += count;
             assert(this->_pending_compacting_sst_for_backpressure_count >= 0);
@@ -612,9 +618,7 @@ namespace hedge::db
                 {
                     tmc::post(*this->_compaction_pool,
                               //    tasks.begin(), tasks.end(),
-                              run_tasks_in_sequence(std::move(tasks)),
-                              0,
-                              this->_compactor_executor_id++ % this->_compaction_pool->num_threads());
+                              run_tasks_in_sequence(std::move(tasks)));
                 }
             }
         }
@@ -658,7 +662,7 @@ namespace hedge::db
     void sst_manager::wait_for_compactions_to_finish()
     {
 
-        auto make_wait_job = [](sst_manager* sst_manager) -> tmc::task<void>
+        [[maybe_unused]] auto make_wait_job = [](sst_manager* sst_manager) -> tmc::task<void>
         {
             // if(!sst_manager->_compaction_braid)
             //     sst_manager->_compaction_braid = std::make_unique<tmc::ex_braid>();

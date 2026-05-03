@@ -16,11 +16,13 @@ namespace hedge::db
     static void print_usage(const char* prog)
     {
         std::cerr << "Usage: " << prog << " [OPTIONS]\n"
-                  << "  -n, --num_ops <N>   number of operations  (default: 1000000)\n"
-                  << "  -v, --vsize <N>     value size in bytes   (default: 100)\n"
-                  << "  -m, --mode <mode>   load|read|rw|range   (default: load)\n"
-                  << "  -p, --path <path>   database path         (default: /tmp/bench_db)\n"
-                  << "  -l, --latency       enable latency measurement (default: disabled)\n";
+                  << "  -n, --num_ops <N>      number of operations       (default: 1000000)\n"
+                  << "  -v, --vsize <N>        value size in bytes        (default: 100)\n"
+                  << "  -m, --mode <mode>      load|read|rw|range         (default: load)\n"
+                  << "  -p, --path <path>      database path              (default: /tmp/bench_db)\n"
+                  << "  -l, --latency          enable latency measurement (default: disabled)\n"
+                  << "  -t, --threads <N>      foreground workers         (default: 12)\n"
+                  << "  -b, --bg-threads <N>   background workers, 0=auto (default: 0)\n";
     }
 
     static bench_config parse_args(int argc, char* argv[])
@@ -42,6 +44,10 @@ namespace hedge::db
                 cfg.db_path = next();
             else if(arg == "-l" || arg == "--latency")
                 cfg.measure_latency = true;
+            else if(arg == "-t" || arg == "--threads")
+                cfg.num_threads = std::strtoull(next(), nullptr, 10);
+            else if(arg == "-b" || arg == "--bg-threads")
+                cfg.num_bg_threads = std::strtoull(next(), nullptr, 10);
         }
         return cfg;
     }
@@ -61,12 +67,19 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    if(cfg.num_threads == 0)
+    {
+        std::cerr << "Error: --threads must be >= 1\n";
+        print_usage(argv[0]);
+        return 1;
+    }
+
     io::static_pool::instance()->init(
         io::executor_config{
             .name = "bench_pool",
             .queue_depth = 16,
             .type = io::executor_type::FOREGROUND,
-            .n_threads = NUM_WORKERS,
+            .n_threads = cfg.num_threads,
             .auto_detect = true,
         });
 
@@ -77,6 +90,8 @@ int main(int argc, char* argv[])
               << "  vsize=" << cfg.vsize
               << "  path=" << cfg.db_path
               << "  latency=" << (cfg.measure_latency ? "enabled" : "disabled")
+              << "  threads=" << cfg.num_threads
+              << "  bg_threads=" << cfg.num_bg_threads
               << "\n";
 
     expected<std::shared_ptr<database>> maybe_db = open_db(cfg);
@@ -89,16 +104,15 @@ int main(int argc, char* argv[])
     values_t values = pregenerate_values(cfg.vsize);
 
     if(cfg.mode == "load")
-        run_load(db, values, cfg.num_ops, cfg.vsize, cfg.measure_latency);
+        run_load(db, values, cfg.num_ops, cfg.vsize, cfg.num_threads, cfg.measure_latency);
     else if(cfg.mode == "read")
-        run_read(db, cfg.num_ops, cfg.vsize, cfg.measure_latency);
+        run_read(db, cfg.num_ops, cfg.vsize, cfg.num_threads, cfg.measure_latency);
     else if(cfg.mode == "rw")
-        run_rw(db, values, cfg.num_ops, cfg.vsize, cfg.measure_latency);
+        run_rw(db, values, cfg.num_ops, cfg.vsize, cfg.num_threads, cfg.measure_latency);
     else if(cfg.mode == "range")
-        run_range(db, cfg.num_ops, cfg.measure_latency);
+        run_range(db, cfg.num_ops, cfg.num_threads, cfg.measure_latency);
 
     std::cout << "\n=== DONE ===\n";
-    db->print_tree_structure();
 
     db->wait_for_compactions_to_finish();
     io::static_pool::instance()->shutdown();

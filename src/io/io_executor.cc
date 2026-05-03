@@ -165,10 +165,16 @@ namespace hedge::io
                 {
                     return this->_ctxs[tid]->submit_and_wait();
                 })
+            .set_work_stealing_strategy(tmc::work_stealing_strategy::HIERARCHY_MATRIX)
             .set_spins(32);
 
 #ifdef TMC_USE_HWLOC
-        this->_ex.add_partition(filter);
+        if(cfg.auto_detect)
+        {
+            this->_ex.add_partition(filter)
+                .set_thread_packing_strategy(tmc::topology::thread_packing_strategy::FAN)
+                .set_thread_pinning_level(tmc::topology::thread_pinning_level::CORE);
+        }
 #endif
 
         this->_ex.init();

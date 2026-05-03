@@ -14,14 +14,14 @@
 namespace hedge::db
 {
     void run_load(const std::shared_ptr<database>& db, const values_t& values,
-                  size_t n, size_t vsize, bool measure_latency)
+                  size_t n, size_t vsize, size_t num_threads, bool measure_latency)
     {
         std::unique_ptr<latency_histogram> hist;
         if (measure_latency)
             hist = std::make_unique<latency_histogram>();
         latency_histogram* hist_ptr = hist.get();
 
-        auto worker = [](size_t tid, size_t n,
+        auto worker = [](size_t tid, size_t n, size_t num_threads,
                          const std::shared_ptr<database>& db, const values_t& values,
                          bool measure_latency, latency_histogram* hist) -> tmc::task<void>
         {
@@ -50,7 +50,7 @@ namespace hedge::db
 
             auto fg = tmc::fork_group();
             tmc::semaphore sem(1);
-            for (size_t i = tid; i < n; i += NUM_WORKERS)
+            for (size_t i = tid; i < n; i += num_threads)
             {
                 co_await sem;
                 fg.fork(put_op(i, db, values, sem, measure_latency, hist));
@@ -62,9 +62,9 @@ namespace hedge::db
         auto t0 = clk::now();
 
         std::vector<tmc::task<void>> tasks;
-        tasks.reserve(NUM_WORKERS);
-        for (size_t tid = 0; tid < NUM_WORKERS; ++tid)
-            tasks.push_back(worker(tid, n, db, values, measure_latency, hist_ptr));
+        tasks.reserve(num_threads);
+        for (size_t tid = 0; tid < num_threads; ++tid)
+            tasks.push_back(worker(tid, n, num_threads, db, values, measure_latency, hist_ptr));
         run_workers(std::move(tasks));
 
         print_throughput("load", n, std::chrono::duration<double>(clk::now() - t0).count(), vsize);

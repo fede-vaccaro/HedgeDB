@@ -8,7 +8,7 @@ HedgeDB is a prototype of a larger-than-memory, persisted and embeddable key-val
 
 **Disclaimer**: as you might expect from a prototype it was not extensively tested, nor the code can be considered production ready.
 
-So far it is only Linux compatible as it heavily leverage [liburing](https://github.com/axboe/liburing), amongst other Linux syscalls; also having [tcmalloc](https://github.com/google/tcmalloc) installed heavily is recommended.
+So far it is only Linux compatible as it heavily leverage [liburing](https://github.com/axboe/liburing), amongst other Linux syscalls; also linking againts a concurrency-friendly memory allocator like [tcmalloc](https://github.com/google/tcmalloc) or [jemalloc](https://github.com/jemalloc/jemalloc) installed heavily is recommended.
 
 ## Features & design principles
 
@@ -23,14 +23,6 @@ task of flushing the new one gets deferred to the flusher thread-pool.
 
 - **Direct I/O with a managed index cache**: `O_DIRECT` is available for IO operations, bypassing the OS page cache entirely. This gives the database predictable and transparent memory usage and predictable latency, avoiding IO stalls from huge flushes.
 
-### Future features or improvements
-
-- [ ] Hyper-Clock Cache
-
-- [ ] Key-Value separation
-
-- [ ]
-
 ## Dependencies
 
 - Linux kernel `6.14.0-27-generic` or greater
@@ -39,7 +31,30 @@ task of flushing the new one gets deferred to the flusher thread-pool.
 
 - `liburing 2.14` (you can launch `install_liburing.sh`)
 
-- `tcmalloc 2.15-3-build1` (`sudo apt install libgoogle-perftools-dev`)
+_Optional but highly recommended_
+
+- `hwloc`
+- A concurrent-friendly memory allocator (like `jemalloc` or `tcmalloc`)
+
+## What's missing
+
+If it wasn't clear enough already, HedgeDB is a **prototype**, not a production database, and many important features aren't here yet. Here's what's missing:
+
+- **Full-fledged crash recovery**: WAL replay works, but edge cases (partial writes, corrupted files) aren't handled.
+- **Battle-testing & hardening**: never tested in the wild with real-world workloads or long execution periods. Some edge cases are not handled.
+- **Cross-platform support**: it's Linux-only (`io_uring` dependency).
+- **Block compression**: many workloads can get meaningful size reduction from lossless compression algorithms, leading to noticeably lower space and write amplification.
+- **Batched operations**: batched writes and reads to amortize overheads.
+- Many small improvements I did not have time to apply.
+- **Column family support**: no explicit column family support.
+- **Large values support**: if `key.size() + value.size()` exceeds the index block page size, compaction will break.
+
+**Possible future Features**:
+
+- **Hyper-Clock Cache**: an approximate LRU cache that trades "least-recently-referenced" counting precision for a simpler and faster algorithm.
+- **Key-value separation**: SSTs would store only keys and pointers, with values in separate append-only `.vlog` files, dramatically reducing value write amplification during compaction (also depends on the GC implementation).
+- Improved handling of non-uniform key distributions (or implementing trivial moves).
+- **Rate-limiting**: stall writes at a specific rate if the SSTs in L0 exceed a soft threshold; this smooths long-tail latencies.
 
 ## Benchmarks
 

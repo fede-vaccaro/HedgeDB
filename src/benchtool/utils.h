@@ -7,7 +7,7 @@
 
 namespace hedge::db
 {
-    db_config make_db_config();
+    db_config make_db_config(size_t num_bg_threads);
     expected<std::shared_ptr<database>> open_db(const bench_config& cfg);
     void run_workers(std::vector<tmc::task<void>> tasks);
     void print_throughput(const char* label, size_t ops, double elapsed_s, size_t vsize);

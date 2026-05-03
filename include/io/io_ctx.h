@@ -124,6 +124,11 @@ namespace hedge::io
             return cqe_count;
         }
 
+        [[nodiscard]] size_t in_flight_count() const
+        {
+            return this->_in_flight.size();
+        }
+
         size_t submit_and_wait()
         {
             auto cq_ready = static_cast<int32_t>(io_uring_cq_ready(&this->_uring));

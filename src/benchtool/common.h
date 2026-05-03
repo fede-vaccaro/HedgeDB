@@ -101,6 +101,8 @@ namespace hedge::db
         std::string mode = "undefined";
         std::filesystem::path db_path = "/tmp/bench_db";
         bool measure_latency = false;
+        size_t num_threads = NUM_WORKERS;
+        size_t num_bg_threads = 0;
     };
 
 } // namespace hedge::db

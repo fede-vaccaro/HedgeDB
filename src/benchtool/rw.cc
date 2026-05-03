@@ -16,7 +16,7 @@
 namespace hedge::db
 {
     void run_rw(const std::shared_ptr<database>& db, const values_t& values,
-                size_t n, size_t vsize, bool measure_latency)
+                size_t n, size_t vsize, size_t num_threads, bool measure_latency)
     {
         std::atomic_size_t reads{0};
         std::atomic_size_t loads{0};
@@ -32,14 +32,14 @@ namespace hedge::db
         latency_histogram* read_hist_ptr = read_hist.get();
         latency_histogram* write_hist_ptr = write_hist.get();
 
-        std::vector<uint64_t> seeds(NUM_WORKERS);
+        std::vector<uint64_t> seeds(num_threads);
         {
             std::random_device rd;
             for (uint64_t& s : seeds)
                 s = (static_cast<uint64_t>(rd()) << 32) | rd();
         }
 
-        auto worker = [](size_t tid, size_t n, uint64_t seed,
+        auto worker = [](size_t tid, size_t n, size_t num_threads, uint64_t seed,
                          const std::shared_ptr<database>& db, const values_t& values,
                          std::atomic_size_t& reads, std::atomic_size_t& loads,
                          std::atomic_size_t& read_errors, std::atomic_size_t& next_load_idx,
@@ -104,7 +104,7 @@ namespace hedge::db
             tmc::semaphore write_sem(1);
             uint64_t rng = seed;
 
-            for (size_t op = tid; op < n; op += NUM_WORKERS)
+            for (size_t op = tid; op < n; op += num_threads)
             {
                 uint64_t decision = xxh64::hash(reinterpret_cast<const char*>(&op), sizeof(op), OP_SEED);
                 bool is_read = (decision & 1) == 0;
@@ -128,9 +128,9 @@ namespace hedge::db
         auto t0 = clk::now();
 
         std::vector<tmc::task<void>> tasks;
-        tasks.reserve(NUM_WORKERS);
-        for (size_t tid = 0; tid < NUM_WORKERS; ++tid)
-            tasks.push_back(worker(tid, n, seeds[tid], db, values, reads, loads, read_errors, next_load_idx, measure_latency, read_hist_ptr, write_hist_ptr));
+        tasks.reserve(num_threads);
+        for (size_t tid = 0; tid < num_threads; ++tid)
+            tasks.push_back(worker(tid, n, num_threads, seeds[tid], db, values, reads, loads, read_errors, next_load_idx, measure_latency, read_hist_ptr, write_hist_ptr));
         run_workers(std::move(tasks));
 
         print_throughput("rw mixed", n, std::chrono::duration<double>(clk::now() - t0).count(), vsize);
