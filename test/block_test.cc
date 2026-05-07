@@ -40,7 +40,13 @@ namespace hedge::db
         if(a.size() != b.size())
             return false;
 
-        return std::equal(a.begin(), a.end(), b.begin());
+        return std::equal(a.begin(), a.end(), b.begin(),
+                          [](std::byte x, char y) { return x == static_cast<std::byte>(y); });
+    }
+
+    std::string span_to_string(std::span<const std::byte> s)
+    {
+        return std::string(reinterpret_cast<const char*>(s.data()), s.size());
     }
 
     std::string generate_rand_value(size_t size)
@@ -60,11 +66,11 @@ namespace hedge::db
     void check_restart_key(size_t& bytes_read, const std::vector<std::byte>& buffer, const std::string& key, const std::string& value, std::string* out_key = nullptr)
     {
         // 1. Check key length
-        ASSERT_EQ(buffer[bytes_read], key.size() - 1); // Encoded key size is actual size - 1
+        ASSERT_EQ(buffer[bytes_read], static_cast<std::byte>(key.size() - 1)); // Encoded key size is actual size - 1
         bytes_read += 1;
 
         // 2. Check key
-        std::string key_from_buffer(buffer.begin() + bytes_read, buffer.begin() + bytes_read + key.size());
+        std::string key_from_buffer(reinterpret_cast<const char*>(buffer.data() + bytes_read), key.size());
         ASSERT_EQ(key_from_buffer, key);
         bytes_read += key.size();
 
@@ -75,7 +81,7 @@ namespace hedge::db
         bytes_read += decoded_value.value().second;
 
         // 4. Check value
-        std::string value_from_buffer(buffer.begin() + bytes_read, buffer.begin() + bytes_read + key.size());
+        std::string value_from_buffer(reinterpret_cast<const char*>(buffer.data() + bytes_read), key.size());
         bytes_read += value.size();
 
         if(out_key != nullptr)
@@ -85,16 +91,16 @@ namespace hedge::db
     void check_delta_key(size_t& bytes_read, size_t shared_prefix_length, const std::vector<std::byte>& buffer, const std::string& key, const std::string& value, std::string* out_key = nullptr)
     {
         // 1. Check prefix length
-        ASSERT_EQ(buffer[bytes_read], shared_prefix_length);
+        ASSERT_EQ(buffer[bytes_read], static_cast<std::byte>(shared_prefix_length));
         bytes_read += 1;
 
         // 2. Check delta key length
         size_t delta_key_length = key.size() - shared_prefix_length;
-        ASSERT_EQ(buffer[bytes_read], delta_key_length); // Delta key length
+        ASSERT_EQ(buffer[bytes_read], static_cast<std::byte>(delta_key_length)); // Delta key length
         bytes_read += 1;
 
         // 3. Check key suffix (delta key)
-        std::string key_suffix_from_buffer(buffer.begin() + bytes_read, buffer.begin() + bytes_read + delta_key_length);
+        std::string key_suffix_from_buffer(reinterpret_cast<const char*>(buffer.data() + bytes_read), delta_key_length);
         ASSERT_EQ(key_suffix_from_buffer, key.substr(shared_prefix_length)); // Compare with suffix of key_1
         bytes_read += delta_key_length;
 
@@ -105,7 +111,7 @@ namespace hedge::db
         bytes_read += decoded_value.value().second;
 
         // 5. Check value
-        std::string value_from_buffer(buffer.begin() + bytes_read, buffer.begin() + bytes_read + value.size());
+        std::string value_from_buffer(reinterpret_cast<const char*>(buffer.data() + bytes_read), value.size());
         bytes_read += value.size();
 
         if(out_key != nullptr)
@@ -138,8 +144,8 @@ namespace hedge::db
         // Test iterator
         block_iterator it(buffer.data(), 0, builder.kv_count(), cfg.restart_group_size);
 
-        ASSERT_TRUE(span_cmpr(it.key(), key)) << "Key mismatch: " << std::string(it.key().begin(), it.key().end()) << " vs " << key;
-        ASSERT_TRUE(span_cmpr(it.value(), value)) << "Value mismatch: " << std::string(it.value().begin(), it.value().end()) << " vs " << value;
+        ASSERT_TRUE(span_cmpr(it.key(), key)) << "Key mismatch: " << span_to_string(it.key()) << " vs " << key;
+        ASSERT_TRUE(span_cmpr(it.value(), value)) << "Value mismatch: " << span_to_string(it.value()) << " vs " << value;
     }
 
     TEST_F(BlockTestBasic, TestPushTwo_DeltaKey)
@@ -182,13 +188,13 @@ namespace hedge::db
 
         block_iterator it = reader.begin();
 
-        ASSERT_TRUE(span_cmpr(it.key(), key_0)) << "Key 0 mismatch: " << std::string(it.key().begin(), it.key().end()) << " vs " << key_0;
-        ASSERT_TRUE(span_cmpr(it.value(), value_0)) << "Value 0 mismatch: " << std::string(it.value().begin(), it.value().end()) << " vs " << value_0;
+        ASSERT_TRUE(span_cmpr(it.key(), key_0)) << "Key 0 mismatch: " << span_to_string(it.key()) << " vs " << key_0;
+        ASSERT_TRUE(span_cmpr(it.value(), value_0)) << "Value 0 mismatch: " << span_to_string(it.value()) << " vs " << value_0;
 
         ++it;
 
-        ASSERT_TRUE(span_cmpr(it.key(), key_1)) << "Key 1 mismatch: " << std::string(it.key().begin(), it.key().end()) << " vs " << key_1;
-        ASSERT_TRUE(span_cmpr(it.value(), value_1)) << "Value 1 mismatch: " << std::string(it.value().begin(), it.value().end()) << " vs " << value_1;
+        ASSERT_TRUE(span_cmpr(it.key(), key_1)) << "Key 1 mismatch: " << span_to_string(it.key()) << " vs " << key_1;
+        ASSERT_TRUE(span_cmpr(it.value(), value_1)) << "Value 1 mismatch: " << span_to_string(it.value()) << " vs " << value_1;
 
         ASSERT_TRUE(++it == reader.end());
     }
@@ -239,18 +245,18 @@ namespace hedge::db
         block_iterator it = reader.begin();
 
         // Check key 0 and value 0
-        ASSERT_TRUE(span_cmpr(it.key(), key_0)) << "Key 0 mismatch: " << std::string(it.key().begin(), it.key().end()) << " vs " << key_0;
-        ASSERT_TRUE(span_cmpr(it.value(), value_0)) << "Value 0 mismatch: " << std::string(it.value().begin(), it.value().end()) << " vs " << value_0;
+        ASSERT_TRUE(span_cmpr(it.key(), key_0)) << "Key 0 mismatch: " << span_to_string(it.key()) << " vs " << key_0;
+        ASSERT_TRUE(span_cmpr(it.value(), value_0)) << "Value 0 mismatch: " << span_to_string(it.value()) << " vs " << value_0;
         ++it;
 
         // Check key 1 and value 1
-        ASSERT_TRUE(span_cmpr(it.key(), key_1)) << "Key 1 mismatch: " << std::string(it.key().begin(), it.key().end()) << " vs " << key_1;
-        ASSERT_TRUE(span_cmpr(it.value(), value_1)) << "Value 1 mismatch: " << std::string(it.value().begin(), it.value().end()) << " vs " << value_1;
+        ASSERT_TRUE(span_cmpr(it.key(), key_1)) << "Key 1 mismatch: " << span_to_string(it.key()) << " vs " << key_1;
+        ASSERT_TRUE(span_cmpr(it.value(), value_1)) << "Value 1 mismatch: " << span_to_string(it.value()) << " vs " << value_1;
         ++it;
 
         // Check key 2 and value 2
-        ASSERT_TRUE(span_cmpr(it.key(), key_2)) << "Key 2 mismatch: " << std::string(it.key().begin(), it.key().end()) << " vs " << key_2;
-        ASSERT_TRUE(span_cmpr(it.value(), value_2)) << "Value 2 mismatch: " << std::string(it.value().begin(), it.value().end()) << " vs " << value_2;
+        ASSERT_TRUE(span_cmpr(it.key(), key_2)) << "Key 2 mismatch: " << span_to_string(it.key()) << " vs " << key_2;
+        ASSERT_TRUE(span_cmpr(it.value(), value_2)) << "Value 2 mismatch: " << span_to_string(it.value()) << " vs " << value_2;
         ++it;
 
         ASSERT_TRUE(it == reader.end());
@@ -412,10 +418,10 @@ namespace hedge::db
         size_t idx = 0;
         for(auto it = reader.begin(); it != reader.end(); ++it)
         {
-            ASSERT_TRUE(span_cmpr(it.key(), keys[idx])) << "Key " << idx << " mismatch: " << std::string(it.key().begin(), it.key().end()) << " vs " << keys[idx];
-            ASSERT_TRUE(span_cmpr(it.value(), values[idx])) << "Value " << idx << " mismatch: " << std::string(it.value().begin(), it.value().end()) << " vs " << values[idx];
+            ASSERT_TRUE(span_cmpr(it.key(), keys[idx])) << "Key " << idx << " mismatch: " << span_to_string(it.key()) << " vs " << keys[idx];
+            ASSERT_TRUE(span_cmpr(it.value(), values[idx])) << "Value " << idx << " mismatch: " << span_to_string(it.value()) << " vs " << values[idx];
 
-            readback_keys[idx] = std::string(it.key().begin(), it.key().end());
+            readback_keys[idx] = span_to_string(it.key());
 
             ++idx;
         }
@@ -432,9 +438,9 @@ namespace hedge::db
             auto found_value = std::vector<std::byte>{found_value_span.begin(), found_value_span.end()};
 
             if(i < inserted_keys)
-                ASSERT_TRUE(span_cmpr(found_value, values[i])) << "Find value mismatch for key " << i << ": " << std::string(found_value.begin(), found_value.end()) << " vs " << values[i];
+                ASSERT_TRUE(span_cmpr(found_value, values[i])) << "Find value mismatch for key " << i << ": " << span_to_string(found_value) << " vs " << values[i];
             else
-                ASSERT_TRUE(found_value.empty()) << "Expected not to find key " << i << " but it was found with value: " << std::string(found_value.begin(), found_value.end());
+                ASSERT_TRUE(found_value.empty()) << "Expected not to find key " << i << " but it was found with value: " << span_to_string(found_value);
         }
     }
 

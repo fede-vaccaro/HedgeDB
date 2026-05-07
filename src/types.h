@@ -16,7 +16,7 @@ namespace hedge
     // Used in HedgeDB for representing keys
     using key_t = hedge::key<>;
 
-    constexpr size_t MAX_KEY_LEN = 256; // TODO: copied, refactor code
+    constexpr size_t MAX_KEY_LEN = 256;
     constexpr size_t MIN_KEY_LEN = 1;
 
     struct value_ptr_t

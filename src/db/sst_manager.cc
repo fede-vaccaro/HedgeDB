@@ -36,14 +36,6 @@ namespace hedge::db
                              std::shared_ptr<sharded_page_cache> page_cache)
         : _cfg(cfg), _compaction_pool(std::move(compaction_pool)), _page_cache(std::move(page_cache))
     {
-        // _compation_executor_pool.resize(cfg.compaction_io_workers);
-        // size_t idx = 0;
-        // for(auto& ex : _compation_executor_pool)
-        // {
-        // ex = async::executor_context::make_new(32);
-        // ex->set_thread_name("compact-wrk-" + std::to_string(idx++));
-        // }
-
         size_t num_partitions = 1UL << cfg.num_partition_exponent;
         size_t partition_size = (1 << 16) / num_partitions;
         for(size_t i = 0; i < num_partitions; ++i)
@@ -215,7 +207,6 @@ namespace hedge::db
         std::shared_ptr<tmc::semaphore> next_can_write,
         size_t level,
         std::vector<sst_ptr_t> inputs,
-        size_t /* input_min_merge_width */,
         bool discard_deleted_keys)
     {
         auto merge_config = hedge::db::index_ops::merge_config{
@@ -268,7 +259,6 @@ namespace hedge::db
             target_level.push_back(std::move(output_ptr));
             state.levels_seq_num.fetch_add(1, std::memory_order::release);
 
-            // const bool needs_further_compaction = target_level.size() > input_min_merge_width;
             lk.unlock();
 
             // Give the permission to next in the compaction chain
@@ -492,10 +482,6 @@ namespace hedge::db
     {
         // If count > 0 might start applying backpressure (when triggering a compaction)
         // If count < 0 might release backpressure (when a compaction finished)
-        //
-        // Uses hysteresis to avoid oscillation: apply at >threshold, release at <threshold/2.
-        // Without this, one compaction finishing would release pressure, writes would immediately
-        // resume and push count back above threshold, causing rapid stop-start thrashing.
 
         std::lock_guard lk(this->_pending_compactions_mutex);
 
@@ -537,8 +523,6 @@ namespace hedge::db
                 co_await std::move(t);
             co_return;
         };
-
-        // constexpr bool OPTIMIZE_FOR_SPACE_AMP = false; // TODO: similar to the Spooky strategy, the last level compactions might get executed sequentially for lower space amplification
 
         std::vector<tmc::task<void>> last_level_tasks;
 
@@ -607,7 +591,6 @@ namespace hedge::db
                         std::move(next_can_write),
                         level,
                         std::move(bucket_it->second),
-                        min_merge_width,
                         can_discard_keys);
 
                     // Queue the task
@@ -664,14 +647,8 @@ namespace hedge::db
 
         [[maybe_unused]] auto make_wait_job = [](sst_manager* sst_manager) -> tmc::task<void>
         {
-            // if(!sst_manager->_compaction_braid)
-            //     sst_manager->_compaction_braid = std::make_unique<tmc::ex_braid>();
-
-            // co_await tmc::resume_on(*sst_manager->_compaction_braid);
             co_await sst_manager->_compaction_scheduler_signal_chan.drain();
         };
-
-        // tmc::post_waitable(*this->_compaction_pool, make_wait_job(this)).wait();
 
         // Wait for all in-flight self-completing tasks on executor pool
         std::unique_lock lk(this->_total_pending_compactions_mutex);
@@ -760,10 +737,4 @@ namespace hedge::db
             }
         }
     }
-
-    sst_manager::~sst_manager()
-    {
-        // this->_compaction_braid.reset();
-    }
-
 } // namespace hedge::db

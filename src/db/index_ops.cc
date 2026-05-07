@@ -271,7 +271,6 @@ namespace hedge::db
         bool use_odirect,
         bool fdatasync_output)
     {
-        // Build QF (TODO: make optional)
         std::optional<quotient_filter> qf = create_qf_for_key_count(entry_count);
 
         sst_sizes sst_estimated_size = estimate_sst_size(entry_count, average_key_value_length, &qf.value()); // footer page

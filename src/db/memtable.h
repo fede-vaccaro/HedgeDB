@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <shared_mutex>
 #include <span>
 #include <utility>
 #include <vector>
@@ -37,11 +38,10 @@ namespace hedge::db
 {
     struct memtable_config
     {
-        size_t max_inserts_cap = 2'000'000;
-        size_t memory_budget_cap = 32 * 1024 * 1024;
+        size_t memory_budget_cap = 32 * MiB;
         bool auto_compaction = true;
         bool use_odirect = true;
-        size_t num_writer_threads = 256; // safe upper bound
+        size_t num_writer_threads = std::thread::hardware_concurrency();
         bool use_wal = true;
         /* bool use_fsync = false; // NOT IMPLEMENTED */
         bool fdatasync_flushed_sst = true;
@@ -84,18 +84,18 @@ namespace hedge::db
     };
 
     // Memtable object including WAL and per-thread value arenas
-    struct memtable_inner : skiplist_wrapper
+    struct write_buffer : skiplist_wrapper
     {
         alignas(64) std::atomic_size_t bytes_written{0};
         std::vector<std::unique_ptr<hedge::db::arena_allocator<std::byte>>> value_arenas; // One-per-thread, the values get stored here
         std::unique_ptr<wal> _wal;
 
-        memtable_inner(std::atomic_uint64_t* seq_nr,
-                       size_t memtable_memory_budget,
-                       size_t n_threads,
-                       size_t value_memory_budget,
-                       std::unique_ptr<wal> wal_slot = nullptr)
-            : skiplist_wrapper(seq_nr, memtable_memory_budget), _wal(std::move(wal_slot))
+        write_buffer(std::atomic_uint64_t* seq_nr,
+                     size_t skiplist_memory_budget, // Unused
+                     size_t n_threads,
+                     size_t value_memory_budget,
+                     std::unique_ptr<wal> wal_slot = nullptr)
+            : skiplist_wrapper(seq_nr, skiplist_memory_budget), _wal(std::move(wal_slot))
         {
             value_arenas.reserve(n_threads);
             for(auto i = 0UL; i < n_threads; ++i)
@@ -103,21 +103,18 @@ namespace hedge::db
         }
     };
 
-    // Memtable class represents the data ingress frontend for HedgeDB
-    // The name can be slightly misleading, but it is responsible for coordinating this section of the architecture
+    // Memtable class represents the data ingress frontend for HedgeDB.
+    //
+    // It is responsible for writing onto the in-memory write buffer and the WAL and for managing the buffer flushes and
+    // pushing newly generated SSTs to L0.
     // From the API perspective, it allows to write (::put_async), read (::get) and acquiring a snapshot of the memtable
-    // Internally, this class handles the memtable objects lifecycle, i.e. it schedule the flushes (transformation into sst),
-    // the push into the LSM tree's L0, signals to start a new compaction
     class memtable
     {
     public:
-        // async::rw_sync is a fast synchronization mechanism between concurrent writers and a single reader
-        // The single reader is the thread who triggers the `_flush`: it needs to be sure that past a specific barrier,
-        // no other threads will try writing on the memtable. Otherwise, it could cause data-loss because the flusher
-        // might be iterating (for instance) half-way the memtable, so the flush procedure could have no visibility
-        // over the new data
-        using rw_sync_table_t = async::rw_sync<memtable_inner>;
-        using rw_sync_table_ptr_t = std::shared_ptr<rw_sync_table_t>;
+        // async::rw_sync is a fast synchronization mechanism between concurrent writers and a single reader (the flusher)
+        // It prevents the reader (the flusher thread) starts from flushing the memtable if any writer did not finish writing.
+        using rw_sync_buffer_t = async::rw_sync<write_buffer>;
+        using rw_sync_buffer_ptr_t = std::shared_ptr<rw_sync_buffer_t>;
 
     private:
         memtable_config _cfg;
@@ -145,16 +142,16 @@ namespace hedge::db
         alignas(64) std::atomic_uint64_t _seq_nr{0};
 
         // Current memtable and pipelined
-        alignas(64) tmc::atomic_condvar<rw_sync_table_ptr_t> _table{nullptr};
-        alignas(64) tmc::atomic_condvar<rw_sync_table_ptr_t> _pipelined_table{nullptr}; // For double buffering
-        alignas(64) std::atomic_bool _flush_mutex;                                      // One thread at a time takes the responsability of flushing when
+        alignas(64) tmc::atomic_condvar<rw_sync_buffer_ptr_t> _table{nullptr};
+        alignas(64) tmc::atomic_condvar<rw_sync_buffer_ptr_t> _pipelined_table{nullptr}; // For double buffering
+        alignas(64) std::atomic_bool _flush_mutex;                                       // One thread at a time takes the responsability of flushing when
 
         // Pending flushes
         alignas(64) std::atomic_size_t _table_switch_epoch;
         alignas(64) mutable std::shared_mutex _pending_flushes_mutex;
         tmc::semaphore _pending_flush_slots;
         std::condition_variable_any _pending_flushes_cv_sync; // Only used when waiting for every flush to complete
-        std::map<size_t, rw_sync_table_ptr_t> _pending_flushes;
+        std::map<size_t, rw_sync_buffer_ptr_t> _pending_flushes;
 
         // Executors
         std::shared_ptr<tmc::semaphore> _can_write = std::make_shared<tmc::semaphore>(1);
@@ -191,8 +188,8 @@ namespace hedge::db
         struct snapshot
         {
             uint64_t seq_nr;
-            rw_sync_table_ptr_t curr;
-            std::map<size_t, rw_sync_table_ptr_t> pending_flushes;
+            rw_sync_buffer_ptr_t curr;
+            std::map<size_t, rw_sync_buffer_ptr_t> pending_flushes;
         };
 
         // MVCC snapshot for consistent range scans
@@ -203,10 +200,10 @@ namespace hedge::db
     private:
         static constexpr size_t VALUE_DATA_ALIGNMENT = 16; // Deprecated, might use actual alignment (8 bytes)
 
-        [[nodiscard]] tmc::task<std::shared_ptr<rw_sync_table_t>> _make_memtable();
-        tmc::task<bool> _flush(rw_sync_table_ptr_t expected_table);
+        [[nodiscard]] tmc::task<std::shared_ptr<rw_sync_buffer_t>> _make_memtable();
+        tmc::task<bool> _flush(rw_sync_buffer_ptr_t expected_table);
         tmc::task<void> _flush_inner(size_t curr_flush_epoch,
-                                     rw_sync_table_ptr_t memtable_to_flush,
+                                     rw_sync_buffer_ptr_t memtable_to_flush,
                                      std::shared_ptr<tmc::semaphore> can_write,
                                      std::shared_ptr<tmc::semaphore> next_can_write);
     };

@@ -61,14 +61,21 @@ namespace hedge::io
         void shutdown();
 
         ~io_executor();
+
+    private:
+#ifdef TMC_USE_HWLOC
+        [[nodiscard]] tmc::topology::topology_filter _hwloc_partition_filter_normal_cpu(const executor_config& cfg);
+        [[nodiscard]] tmc::topology::topology_filter _hwloc_partition_filter_hybrid_cpu(const executor_config& cfg);
+        [[nodiscard]] tmc::topology::topology_filter _hwloc_partition_filter(const executor_config& cfg);
+#endif
     };
 
-    // void set_thread_affinity(std::pair<int32_t, int32_t> cpu_range);
+    void set_thread_affinity(std::pair<int32_t, int32_t> cpu_range);
 
-    // inline void set_thread_affinity(int32_t tid)
-    // {
-    // set_thread_affinity({tid, tid});
-    // }
+    inline void set_thread_affinity(int32_t tid)
+    {
+        set_thread_affinity({tid, tid});
+    }
 
 } // namespace hedge::io
 

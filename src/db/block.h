@@ -366,7 +366,7 @@ namespace hedge::db
         bool operator==(block_buffer_end_sentinel /* sentinel */)
         {
             return this->_next == this->_end &&                   // If there is no block left to read
-                   this->_block_it == this->_block_decoder.end(); // And if we fully read the block we're -> end
+                   this->_block_it == this->_block_decoder.end(); // And if we fully read the block the pointer is at the end
         }
     };
 } // namespace hedge::db

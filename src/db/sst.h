@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -127,22 +128,24 @@ namespace hedge::db
 
         [[nodiscard]] std::optional<page_range> find_range(std::optional<key_t> lower, std::optional<key_t> upper) const;
 
-        void stats() const;
-
         [[nodiscard]] compaction_progress_state compaction_state() const
         {
-            return this->_compaction_state;
+            return std::atomic_ref<const compaction_progress_state>(this->_compaction_state).load(std::memory_order::relaxed);
         }
 
         [[nodiscard]] bool pickable_for_compaction() const
         {
-            auto state = this->_compaction_state;
+            auto state =
+                std::atomic_ref<const compaction_progress_state>(this->_compaction_state)
+                    .load(std::memory_order::relaxed);
             return state == compaction_progress_state::PICKABLE_FOR_COMPACTION;
         }
 
         void set_compaction_state(compaction_progress_state new_state)
         {
-            auto curr_state = this->_compaction_state;
+            auto curr_state =
+                std::atomic_ref<const compaction_progress_state>(this->_compaction_state)
+                    .load(std::memory_order::relaxed);
 
             if(curr_state == compaction_progress_state::COMPACTION_ERROR)
                 return;
@@ -166,7 +169,7 @@ namespace hedge::db
             if(!valid_transition(curr_state, new_state))
                 throw std::runtime_error("Invalid transition: " + to_string(curr_state) + " -> " + to_string(new_state));
 
-            this->_compaction_state = new_state;
+            std::atomic_ref<compaction_progress_state>(this->_compaction_state).store(new_state, std::memory_order::relaxed);
         }
 
     private:

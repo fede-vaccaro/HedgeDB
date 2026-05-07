@@ -54,7 +54,12 @@ namespace hedge::db
 
         static void SetUpTestSuite()
         {
-            executor = std::make_shared<hedge::io::io_executor>(N_THREADS, QUEUE_DEPTH);
+            executor = std::make_shared<hedge::io::io_executor>(
+                hedge::io::executor_config{
+                    .queue_depth = QUEUE_DEPTH,
+                    .n_threads = N_THREADS,
+                    .auto_detect = false,
+                });
         }
 
         void SetUp() override
@@ -73,7 +78,6 @@ namespace hedge::db
         constexpr size_t PAYLOAD_SIZE = 64;
 
         memtable_config cfg;
-        cfg.max_inserts_cap = 100'000'000;
         cfg.memory_budget_cap = 256 * 1024 * 1024;
         cfg.auto_compaction = false;
         cfg.use_odirect = false;
@@ -200,7 +204,6 @@ namespace hedge::db
         constexpr size_t PAYLOAD_SIZE = 32;
 
         memtable_config cfg;
-        cfg.max_inserts_cap = 100'000'000;
         cfg.memory_budget_cap = 256 * 1024 * 1024;
         cfg.auto_compaction = false;
         cfg.use_odirect = false;

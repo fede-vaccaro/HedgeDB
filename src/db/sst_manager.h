@@ -19,7 +19,6 @@
 #include "sst.h"
 #include "tmc/atomic_condvar.hpp"
 #include "tmc/channel.hpp"
-// #include "tmc/ex_braid.hpp"
 #include "tmc/semaphore.hpp"
 #include "types.h"
 
@@ -43,7 +42,6 @@ namespace hedge::db
         };
 
         sst_manager() = default;
-        ~sst_manager();
 
         explicit sst_manager(const config& cfg,
                              std::shared_ptr<io::io_executor> compaction_pool,
@@ -135,7 +133,6 @@ namespace hedge::db
         sorted_indices_map_t _sorted_indices;
 
         std::shared_ptr<io::io_executor> _compaction_pool;
-        // std::unique_ptr<tmc::ex_braid> _compaction_braid; // Serialized executor, just for scheduling compactions
 
         size_t _compactor_executor_id{0};
         std::atomic_size_t _compaction_jobs_in_flight{0};
@@ -144,7 +141,7 @@ namespace hedge::db
 
         std::mutex _pending_compactions_mutex;
         int64_t _pending_compacting_sst_for_backpressure_count{0};
-        
+
         std::mutex _total_pending_compactions_mutex;
         int64_t _total_pending_compacting_sst_count{0};
         std::condition_variable _pending_compactions_cv;
@@ -188,7 +185,6 @@ namespace hedge::db
             std::shared_ptr<tmc::semaphore> next_can_write,
             size_t level,
             std::vector<sst_ptr_t> inputs,
-            size_t merge_width,
             bool discard_deleted_keys);
 
         hedge::expected<compaction_stats> _schedule_compaction(bool compact_all);

@@ -122,7 +122,7 @@ namespace hedge::db
             ::close(*this->_wal_dir_fd);
     }
 
-    tmc::task<std::shared_ptr<memtable::rw_sync_table_t>> memtable::_make_memtable()
+    tmc::task<std::shared_ptr<memtable::rw_sync_buffer_t>> memtable::_make_memtable()
     {
         std::unique_ptr<wal> wal_slot;
         if(this->_cfg.use_wal)
@@ -131,7 +131,7 @@ namespace hedge::db
             assert(wal_slot != nullptr);
         }
 
-        co_return std::make_shared<rw_sync_table_t>(
+        co_return std::make_shared<rw_sync_buffer_t>(
             this->_cfg.num_writer_threads,
             &this->_seq_nr,
             this->_cfg.memory_budget_cap,
@@ -142,10 +142,10 @@ namespace hedge::db
 
     tmc::task<hedge::status> memtable::put_async(const key_t& key, std::span<const std::byte> value, hedge::value_type value_type)
     {
-        // Loading from an atomic shared every time is slow AF since it is (at the time being) implemented through a spinlock
+        // Loading from an atomic shared every time is slow since it is spinlock-base (not lock-free)
         // This is a thread-local cache
         // TODO: thread_local might get tricky with work stealing
-        thread_local std::shared_ptr<rw_sync_table_t> local_memtable_ref = this->_table.ref().load(std::memory_order::relaxed);
+        thread_local std::shared_ptr<rw_sync_buffer_t> local_memtable_ref = this->_table.ref().load(std::memory_order::relaxed);
 
         static std::atomic_size_t THREADS{0};
         thread_local std::atomic_size_t THIS_THREAD_IDX = THREADS.fetch_add(1, std::memory_order::relaxed);
@@ -181,18 +181,6 @@ namespace hedge::db
                 insert_attempts = 0;
                 continue;
             }
-
-            // constexpr int32_t sleep_time_ns = 1000;   // 1 us
-            // constexpr int32_t max_yield_count = 1000; // 1 ms
-            // int32_t yield_count = 0;
-            // while(this->_pending_flush_slots.count() <= (this->_cfg.max_pending_flushes * 3) / 4 &&
-            //       yield_count < max_yield_count &&
-            //       this->_compaction_backpressure != nullptr && this->_compaction_backpressure->ref().load(std::memory_order_relaxed))
-            // {
-            //     ::third_party::folly::detail::asm_volatile_pause();
-            //     co_await tmc::yield();
-            //     yield_count++;
-            // }
 
             auto* value_ptr = memtable->value_arenas[THIS_THREAD_IDX % this->_cfg.num_writer_threads]->allocate_many(value.size() + 1, VALUE_DATA_ALIGNMENT);
             bool ok = value_ptr != nullptr; // nullptr means out of memory budget
@@ -280,7 +268,7 @@ namespace hedge::db
         return promise.get_future();
     }
 
-    tmc::task<bool> memtable::_flush(rw_sync_table_ptr_t expected_table)
+    tmc::task<bool> memtable::_flush(rw_sync_buffer_ptr_t expected_table)
     {
         bool expected = false;
 
@@ -295,7 +283,7 @@ namespace hedge::db
             }
 
             size_t curr_flush_epoch = this->_flush_epoch->fetch_add(1, std::memory_order::relaxed);
-            rw_sync_table_ptr_t memtable_to_flush{};
+            rw_sync_buffer_ptr_t memtable_to_flush{};
 
             expected_table->freeze_writes();
 
@@ -327,7 +315,7 @@ namespace hedge::db
             t0 = std::chrono::high_resolution_clock::now();
             {
                 std::unique_lock lk(this->_pending_flushes_mutex);
-                rw_sync_table_ptr_t next_in_pipeline = this->_pipelined_table.ref().exchange(nullptr);
+                rw_sync_buffer_ptr_t next_in_pipeline = this->_pipelined_table.ref().exchange(nullptr);
                 memtable_to_flush = this->_table.ref().exchange(next_in_pipeline, std::memory_order::relaxed);
                 this->_pending_flushes.insert({curr_flush_epoch, memtable_to_flush});
             }
@@ -338,28 +326,30 @@ namespace hedge::db
             latencies.total_blocking = latencies.acquire_flush_slot + latencies.wait_pipelined + latencies.lock_for_swap;
 
             // Log if total > 100ms or any section > 50ms
+            constexpr bool ENABLE_FLUSH_LATENCY_LOGGING = false;
             constexpr auto TOTAL_THRESHOLD = std::chrono::microseconds(10000);  // 10ms
             constexpr auto SECTION_THRESHOLD = std::chrono::microseconds(5000); // 5ms
 
-            // if(latencies.total_blocking > TOTAL_THRESHOLD ||
-            //    latencies.acquire_flush_slot > SECTION_THRESHOLD ||
-            //    latencies.wait_pipelined > SECTION_THRESHOLD ||
-            //    latencies.lock_for_swap > SECTION_THRESHOLD)
-            // {
-            //     this->_logger.log("Flush #", curr_flush_epoch, " BLOCKING: total=", latencies.total_blocking.count(), "us | ",
-            //                       "slot=", latencies.acquire_flush_slot.count(), "us | ",
-            //                       "pipelined=", latencies.wait_pipelined.count(), "us | ",
-            //                       "lock=", latencies.lock_for_swap.count(), "us");
-            // }
+            if(ENABLE_FLUSH_LATENCY_LOGGING &&
+               (latencies.total_blocking > TOTAL_THRESHOLD ||
+                latencies.acquire_flush_slot > SECTION_THRESHOLD ||
+                latencies.wait_pipelined > SECTION_THRESHOLD ||
+                latencies.lock_for_swap > SECTION_THRESHOLD))
+            {
+                this->_logger.log("Flush #", curr_flush_epoch, " BLOCKING: total=", latencies.total_blocking.count(), "us | ",
+                                  "slot=", latencies.acquire_flush_slot.count(), "us | ",
+                                  "pipelined=", latencies.wait_pipelined.count(), "us | ",
+                                  "lock=", latencies.lock_for_swap.count(), "us");
+            }
 
             this->_table.notify_all();
             this->_table_switch_epoch.fetch_add(1, std::memory_order::release);
 
             tmc::spawn([](memtable* self) -> tmc::task<void>
                        {
-                           self->_pipelined_table.ref().store(co_await self->_make_memtable(), std::memory_order::relaxed);
-                           self->_pipelined_table.notify_one();
-                           co_return; }(this))
+                self->_pipelined_table.ref().store(co_await self->_make_memtable(), std::memory_order::relaxed);
+                self->_pipelined_table.notify_one();
+                co_return; }(this))
                 .run_on(*this->_flusher)
                 .detach();
 
@@ -380,7 +370,7 @@ namespace hedge::db
 
     tmc::task<void> memtable::_flush_inner(
         size_t curr_flush_epoch,
-        rw_sync_table_ptr_t memtable_to_flush,
+        rw_sync_buffer_ptr_t memtable_to_flush,
         std::shared_ptr<tmc::semaphore> can_write,
         std::shared_ptr<tmc::semaphore> next_can_write)
     {
@@ -435,7 +425,6 @@ namespace hedge::db
                               this->_compaction_backpressure->ref().load(std::memory_order::relaxed);
         if(under_pressure)
         {
-            // this->_logger.log("Flush completed for epoch ", curr_flush_epoch, " but compaction backpressure is active, waiting...");
             co_await this->_compaction_backpressure->await(true);
         }
 
@@ -451,7 +440,7 @@ namespace hedge::db
         }
 
         // Schedule compaction
-        // NB behind the callback, the `sst_manager` might decided to not doing anything,
+        // NB behind the callback, the `sst_manager` might decide to do nothing,
         // if a compaction is not necessary
         if(this->_cfg.auto_compaction)
             this->_schedule_compaction_callback();

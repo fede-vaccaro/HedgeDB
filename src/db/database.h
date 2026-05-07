@@ -24,8 +24,6 @@ namespace hedge::db
      */
     struct db_config
     {
-        // TODO: Add validation/sanitization for every config parameter during database creation/loading.
-
         /// Maximum allowed exponent for partitioning (2^16 = 65536 partitions max).
         static constexpr size_t MAX_PARTITION_EXPONENT = 16;
         /// Minimum number of keys required in the memtable before a flush is allowed.
@@ -47,15 +45,15 @@ namespace hedge::db
         /// Maximum number of concurrent compaction tasks allowed. Will block execution of insertions if exceeded.
         size_t max_pending_compactions = 16;
         /// If true, use O_DIRECT flag for sst files I/O to bypass page cache. It's used in read, compaction and flush paths.
-        bool use_odirect_for_ssts = true;
-        /// If ture, use O_DIRECT flag for WAL files I/O to bypass page cache. TODO: implement
+        bool use_direct_io = true;
+        /// If true, use O_DIRECT flag for WAL files I/O to bypass page cache.
         bool use_odirect_for_wal = true; // NOT implemented
         /// Use 0 no cache is desired; the cache size in bytes otherwise
         size_t index_page_clock_cache_size_bytes = 3UL * GiB;
         /// Experimental; it's like a giant memtable; do not use
         size_t index_point_cache_size_bytes = 0;
         /// Number of background workers to be used for compaction. std::nullopt means "use static pool", 0 means "auto detect".
-        std::optional<size_t> background_workers = std::nullopt;
+        std::optional<size_t> num_background_workers = std::nullopt;
         /// Maximum number of concurrent memtable flushes allowed before backpressure
         size_t max_pending_flushes = 8;
 
@@ -160,8 +158,7 @@ namespace hedge::db
          */
         static expected<std::shared_ptr<database>> make_new(const std::filesystem::path& base_path, const db_config& config);
         /**
-         * @brief Factory function to load an existing database instance from a path. (Not implemented yet).
-         * TODO: Not implemented yet.
+         * @brief Factory function to load an existing database instance from a path.
          * @param base_path The root directory of the existing database.
          * @return An expected containing a shared pointer to the loaded database instance or an error.
          */

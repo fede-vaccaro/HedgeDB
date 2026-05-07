@@ -8,51 +8,44 @@
 #include <span>
 #include <vector>
 
-#include "io/io_executor.h"
-#include "async/wait_group.h"
 #include "db/block.h"
 #include "db/merge/sst_stream.h"
 #include "fs/fs.hpp"
+#include "io/io_executor.h"
 #include "types.h"
 
 using namespace hedge::db;
 using namespace hedge::fs;
 using namespace hedge;
 
-struct RollingBufferTest : public ::testing::TestWithParam<size_t>
+struct SstStreamTest : public ::testing::TestWithParam<size_t>
 {
     std::filesystem::path temp_file_path;
+    std::unique_ptr<hedge::io::io_executor> executor;
 
     void SetUp() override
     {
-        temp_file_path = std::filesystem::temp_directory_path() / "rolling_buffer_test.sst";
+        temp_file_path = std::filesystem::temp_directory_path() / "sst_stream_test.sst";
         if(std::filesystem::exists(temp_file_path))
-        {
             std::filesystem::remove(temp_file_path);
-        }
+
+        executor = std::make_unique<hedge::io::io_executor>(
+            hedge::io::executor_config{
+                .queue_depth = 32,
+                .n_threads = 1,
+                .auto_detect = false,
+            });
     }
 
     void TearDown() override
     {
+        executor.reset();
         if(std::filesystem::exists(temp_file_path))
-        {
             std::filesystem::remove(temp_file_path);
-        }
-    }
-
-    static void SetUpTestSuite()
-    {
-        try
-        {
-            hedge::async::executor_pool::init_static_pool(1, 32);
-        }
-        catch(...)
-        {
-        }
     }
 };
 
-TEST_P(RollingBufferTest, WriteAndReadBack)
+TEST_P(SstStreamTest, WriteAndReadBack)
 {
     size_t read_ahead_size = GetParam();
     size_t N_ITEMS = 5000;
@@ -73,9 +66,7 @@ TEST_P(RollingBufferTest, WriteAndReadBack)
         std::string key;
         key.reserve(len);
         for(int j = 0; j < len; ++j)
-        {
             key.push_back(static_cast<char>(char_dist(gen)));
-        }
 
         value_ptr_t val(dist_u64(gen), dist_u32(gen), dist_u32(gen));
 
@@ -128,105 +119,93 @@ TEST_P(RollingBufferTest, WriteAndReadBack)
     ASSERT_GT(file_size, 0);
 
     // 3. Read back
+    auto file_res = fs::file::from_path(temp_file_path, fs::file::open_mode::read_only);
+    ASSERT_TRUE(file_res) << "Failed to open file: " << file_res.error().to_string();
+    fs::file file = std::move(file_res.value());
+
+    fs::file_reader2_config config;
+    config.start_offset = 0;
+    config.end_offset = file_size;
+    config.read_ahead_size = read_ahead_size;
+
+    auto read_task = [&]() -> tmc::task<size_t>
     {
-        auto file_res = fs::file::from_path(temp_file_path, fs::file::open_mode::read_only);
-        ASSERT_TRUE(file_res) << "Failed to open file: " << file_res.error().to_string();
-        fs::file file = std::move(file_res.value());
+        sst_stream rb(file, config, config.read_ahead_size);
+        size_t idx = 0;
 
-        fs::file_reader2_config config;
-        config.start_offset = 0;
-        config.end_offset = file_size;
-        config.read_ahead_size = read_ahead_size;
-
-        auto wg = hedge::async::wait_group::make_shared();
-        wg->set(1);
-
-        auto executor_ptr = async::executor_pool::executor_from_static_pool();
-
-        auto read_task = [&]() -> async::task<void>
+        auto status = co_await rb.refresh();
+        if(!status)
         {
-            sst_stream rb(file, config, config.read_ahead_size);
-            size_t idx = 0;
+            std::cerr << "Initial refresh failed: " << status.error().to_string() << std::endl;
+            co_return idx;
+        }
 
-            auto status = co_await rb.refresh();
-            if(!status)
+        while(true)
+        {
+            if(rb.buffer_empty())
             {
-                std::cerr << "Initial refresh failed: " << status.error().to_string() << std::endl;
-                wg->decr();
-                co_return;
-            }
+                if(rb.is_eof())
+                    break;
 
-            while(true)
-            {
-                if(rb.buffer_empty())
+                status = co_await rb.refresh();
+                if(!status)
                 {
-                    if(rb.is_eof())
-                        break;
-
-                    status = co_await rb.refresh();
-                    if(!status)
-                    {
-                        std::cerr << "Refresh failed: " << status.error().to_string() << std::endl;
-                        break;
-                    }
-                    if(rb.buffer_empty())
-                        break;
-                }
-
-                const auto& it = rb.front();
-                auto read_key = it.key();
-                auto read_val = it.value();
-
-                if(idx >= data.size())
-                {
-                    EXPECT_LT(idx, data.size()) << "Read more items than expected";
+                    std::cerr << "Refresh failed: " << status.error().to_string() << std::endl;
                     break;
                 }
-
-                const auto& [exp_key_str, exp_val] = data[idx];
-                std::span<const std::byte> exp_key_span(reinterpret_cast<const std::byte*>(exp_key_str.data()), exp_key_str.size());
-                std::span<const std::byte> exp_val_span(reinterpret_cast<const std::byte*>(&exp_val), sizeof(exp_val));
-
-                auto spans_equal = [](std::span<const std::byte> a, std::span<const std::byte> b)
-                {
-                    return a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size()) == 0;
-                };
-
-                if(!spans_equal(read_key, exp_key_span))
-                {
-                    std::string rk(reinterpret_cast<const char*>(read_key.data()), read_key.size());
-                    EXPECT_EQ(rk, exp_key_str) << "Keys mismatch at index " << idx;
-                }
-
-                if(!spans_equal(read_val, exp_val_span))
-                {
-                    EXPECT_TRUE(false) << "Values mismatch at index " << idx;
-                }
-
-                rb.pop_front();
-                idx++;
+                if(rb.buffer_empty())
+                    break;
             }
 
-            EXPECT_EQ(idx, data.size()) << "Read fewer items than expected";
-            wg->decr();
-            co_return;
-        };
+            const auto& it = rb.front();
+            auto read_key = it.key();
+            auto read_val = it.value();
 
-        executor_ptr->submit_io_task(read_task());
-        wg->wait();
-    }
+            if(idx >= data.size())
+            {
+                EXPECT_LT(idx, data.size()) << "Read more items than expected";
+                break;
+            }
+
+            const auto& [exp_key_str, exp_val] = data[idx];
+            std::span<const std::byte> exp_key_span(reinterpret_cast<const std::byte*>(exp_key_str.data()), exp_key_str.size());
+            std::span<const std::byte> exp_val_span(reinterpret_cast<const std::byte*>(&exp_val), sizeof(exp_val));
+
+            auto spans_equal = [](std::span<const std::byte> a, std::span<const std::byte> b)
+            {
+                return a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size()) == 0;
+            };
+
+            if(!spans_equal(read_key, exp_key_span))
+            {
+                std::string rk(reinterpret_cast<const char*>(read_key.data()), read_key.size());
+                EXPECT_EQ(rk, exp_key_str) << "Keys mismatch at index " << idx;
+            }
+
+            if(!spans_equal(read_val, exp_val_span))
+                EXPECT_TRUE(false) << "Values mismatch at index " << idx;
+
+            rb.pop_front();
+            idx++;
+        }
+
+        co_return idx;
+    };
+
+    size_t items_read = tmc::post_waitable(*executor, read_task(), 0).get();
+    EXPECT_EQ(items_read, data.size()) << "Read item count differs from written";
 }
 
 INSTANTIATE_TEST_SUITE_P(
     ReadAheadSizes,
-    RollingBufferTest,
+    SstStreamTest,
     ::testing::Values(
         PAGE_SIZE_IN_BYTES,
         PAGE_SIZE_IN_BYTES * 2,
         PAGE_SIZE_IN_BYTES * 4,
         PAGE_SIZE_IN_BYTES * 8,
         PAGE_SIZE_IN_BYTES * 16),
-    [](const testing::TestParamInfo<RollingBufferTest::ParamType>& info)
+    [](const testing::TestParamInfo<SstStreamTest::ParamType>& info)
     {
         return "ReadAhead_" + std::to_string(info.param);
     });

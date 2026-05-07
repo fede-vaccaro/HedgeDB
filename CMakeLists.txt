@@ -192,84 +192,73 @@ add_executable(benchtool
     src/benchtool/range.cc)
 target_link_libraries(benchtool hedgedb ${MALLOC})
 
+# benchtool_threads — same benchmark using std::thread + db_ctx (manual_ctx.h)
+# for the worker fan-out, instead of dispatching to the static pool.
+add_executable(benchtool_threads
+    src/benchtool_threads/main.cc
+    src/benchtool_threads/utils.cc
+    src/benchtool_threads/load.cc
+    src/benchtool_threads/read.cc)
+target_link_libraries(benchtool_threads hedgedb ${MALLOC})
+
 # executor tests
 # executor_test - temporarily disabled due to pre-existing API changes (missing io request types)
-# add_executable(executor_test test/io_executor.spec.cc)
+# add_executable(executor_test test/io_executor_test.cc)
 # target_link_libraries(executor_test hedgedb_io gtest gtest_main)
 
 # index (merge) tests
 # Temporarily disabled: wait_group.h missing
-# add_executable(index_test test/index.spec.cc)
+# add_executable(index_test test/index_test.cc)
 # target_link_libraries(index_test hedgedb gtest gtest_main)
 
-# index2 tests
-add_executable(index2_test test/index2.spec.cc)
-target_link_libraries(index2_test hedgedb gtest gtest_main)
-
-# parallel flush tests
-add_executable(index_test_parallel_flush test/index_test.cc)
-target_link_libraries(index_test_parallel_flush hedgedb gtest gtest_main)
-
-# index (delete and merge) tests
-add_executable(index_delete_test test/index_delete.spec.cc)
-target_link_libraries(index_delete_test hedgedb gtest gtest_main)
+# sst tests (flush memtable → on-disk SST → lookup, with disk reload coverage)
+add_executable(sst_test test/sst_test.cc)
+target_link_libraries(sst_test hedgedb gtest gtest_main)
 
 # file_reader2 tests
-add_executable(file_reader2_test test/file_reader2.spec.cc)
+add_executable(file_reader2_test test/file_reader2_test.cc)
 target_link_libraries(file_reader2_test hedgedb gtest gtest_main)
 
-# worker tests
-add_executable(worker_test test/worker.spec.cc)
-target_link_libraries(worker_test hedgedb gtest gtest_main)
-
-# mpsc tests
-add_executable(mpsc_test test/mpsc.spec.cc)
-target_link_libraries(mpsc_test gtest gtest_main)
-
-# cache tests
-add_executable(cache_test test/cache.spec.cc)
-target_link_libraries(cache_test hedgedb gtest gtest_main)
-
 # database tests
-add_executable(database_test test/database.spec.cc)
+add_executable(database_test test/database_test.cc)
 target_link_libraries(database_test hedgedb gtest gtest_main tcmalloc tbb)
 
 # version history test
-add_executable(version_history_test test/version_history.spec.cc)
+add_executable(version_history_test test/version_history_test.cc)
 target_link_libraries(version_history_test hedgedb gtest gtest_main tbb)
 
 # WAL replay tests
-add_executable(wal_replay_test test/wal_replay.spec.cc)
+add_executable(wal_replay_test test/wal_replay_test.cc)
 target_link_libraries(wal_replay_test hedgedb gtest gtest_main tcmalloc)
 
 # varint tests
-add_executable(varint_test test/varint.spec.cc)
+add_executable(varint_test test/varint_test.cc)
 target_link_libraries(varint_test gtest gtest_main)
 
 # key tests
-add_executable(key_test test/key.spec.cc)
+add_executable(key_test test/key_test.cc)
 target_link_libraries(key_test gtest gtest_main)
 
 # block tests
-add_executable(block_test src/db/block.cc test/block.spec.cc)
+add_executable(block_test src/db/block.cc test/block_test.cc)
 target_link_libraries(block_test gtest gtest_main)
 
 # page_aligned_buffer tests
-add_executable(page_aligned_buffer_test test/page_aligned_buffer.spec.cc src/utils.cc)
+add_executable(page_aligned_buffer_test test/page_aligned_buffer_test.cc src/utils.cc)
 target_link_libraries(page_aligned_buffer_test gtest gtest_main)
 
-# rolling_buffer tests
-add_executable(rolling_buffer_test test/rolling_buffer.spec.cc)
-target_link_libraries(rolling_buffer_test hedgedb gtest gtest_main)
+# sst_stream tests
+add_executable(sst_stream_test test/sst_stream_test.cc)
+target_link_libraries(sst_stream_test hedgedb gtest gtest_main)
 
 # debug test
-add_executable(index_merge test/index_merge.spec.cc)
+add_executable(index_merge test/index_merge_test.cc)
 target_link_libraries(index_merge hedgedb gtest gtest_main tcmalloc)
 
 # concurrent_skiplist tests
-add_executable(concurrent_skiplist_test test/concurrent_skiplist.spec.cc)
+add_executable(concurrent_skiplist_test test/concurrent_skiplist_test.cc)
 target_link_libraries(concurrent_skiplist_test gtest gtest_main atomic tcmalloc)
 
 # range scan tests
-add_executable(range_scan_test test/range_scan.spec.cc)
+add_executable(range_scan_test test/range_scan_test.cc)
 target_link_libraries(range_scan_test hedgedb gtest gtest_main tcmalloc)

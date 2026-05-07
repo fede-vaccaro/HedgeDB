@@ -117,5 +117,7 @@ int main(int argc, char* argv[])
     db->wait_for_compactions_to_finish();
     io::static_pool::instance()->shutdown();
 
+    print_max_rss();
+
     return 0;
 }

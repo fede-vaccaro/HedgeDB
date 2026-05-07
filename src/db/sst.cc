@@ -89,9 +89,8 @@ namespace hedge::db
         }
 
         // Build super index if meta-index is large enough
-        // The super index is an auxiliary index over the meta-index that allows to quickly narrow down the search range in the meta-index for large SST files. 
+        // The super index is an auxiliary index over the meta-index that allows to quickly narrow down the search range in the meta-index for large SST files.
         // This needs to avoid polluting the cache with meta-index entries
-        // I'll be honest, I'm not sure it actually helps with performance
         std::optional<page_aligned_buffer<key_t>> super_index;
         constexpr size_t KEYS_PER_META_INDEX_PAGE = PAGE_SIZE_IN_BYTES / sizeof(key_t);
 
@@ -179,11 +178,6 @@ namespace hedge::db
         hedge::expected<value_t> res = sst::_find_in_page(key, guarded_buffer.buffer().data());
 
         co_return res;
-    }
-
-    void sst::stats() const
-    {
-        // TODO
     }
 
     hedge::expected<value_t> sst::_find_in_page(const key_t& key, const std::byte* page)

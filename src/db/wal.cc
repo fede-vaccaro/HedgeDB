@@ -219,6 +219,8 @@ namespace hedge::db
                                          " : " + maybe_file.error().to_string());
 
             ::fallocate(maybe_file.value().fd(), FALLOC_FL_KEEP_SIZE, 0, static_cast<off_t>(cfg.file_size_hint));
+            posix_fadvise(maybe_file.value().fd(), 0, 0, POSIX_FADV_DONTNEED);
+            
             this->_files.emplace_back(std::move(maybe_file.value()));
         }
     }

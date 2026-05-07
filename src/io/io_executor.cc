@@ -19,109 +19,12 @@ namespace hedge::io
             return *this;
 
 #ifdef TMC_USE_HWLOC
-        auto topology = tmc::topology::query();
-        tmc::topology::topology_filter filter;
-
-        if(!cfg.auto_detect)
-            goto skip_autodetect;
-
-        if(topology.is_hybrid())
-        {
-            std::cout << "Detected hybrid CPU topology: " << topology.core_count() << " cores, "
-                      << topology.group_count() << " groups, " << topology.numa_count() << " NUMA nodes\n";
-
-            auto resolve_kind_to_group = [&topology](tmc::topology::cpu_kind::value kind)
-            {
-                std::vector<size_t> groups;
-                size_t count{0};
-                for(const auto& group : topology.groups | std::views::filter([kind](const tmc::topology::core_group& g)
-                                                                             { return g.cpu_kind == kind; }))
-                {
-                    groups.emplace_back(group.index);
-                    count += group.core_indexes.size() * group.smt_level;
-                }
-
-                return std::make_pair(groups, count);
-            };
-
-            tmc::topology::cpu_kind::value kind = tmc::topology::cpu_kind::ALL;
-            switch(cfg.type)
-            {
-                case executor_type::FOREGROUND:
-                    kind = tmc::topology::cpu_kind::PERFORMANCE;
-                    break;
-                case executor_type::BACKGROUND:
-                    kind = tmc::topology::cpu_kind::EFFICIENCY1;
-                    break;
-                case executor_type::GENERAL_PURPOSE:
-                    kind = tmc::topology::cpu_kind::ALL;
-                    break;
-            }
-
-            auto [groups, count] = resolve_kind_to_group(kind);
-            filter.set_group_indexes(groups);
-            this->_n_threads = count;
-
-            // debug
-            std::cout << "Allowed groups for executor type " << static_cast<int>(cfg.type) << ": ";
-            for(size_t group_index : groups)
-                std::cout << group_index << " ";
-            std::cout << "\nTotal threads allowed for this executor: " << count << "\n";
-        }
-        else
-        {
-            switch(cfg.type)
-            {
-                case executor_type::FOREGROUND:
-                {
-                    // set lower half of cores for foreground, higher half for background
-                    auto core_indexes = std::vector<size_t>(topology.pu_count() / 2);
-                    std::ranges::iota(core_indexes, 0);
-
-                    if(cfg.n_threads.has_value() && cfg.n_threads.value() < core_indexes.size())
-                        core_indexes.resize(cfg.n_threads.value());
-
-                    filter.set_core_indexes(core_indexes);
-                    this->_n_threads = core_indexes.size();
-
-                    // debug
-                    std::cout << "Allowed cores for foreground executor: ";
-                    for(size_t core_index : core_indexes)
-                        std::cout << core_index << " ";
-                    std::cout << "\nTotal threads allowed for foreground executor: " << core_indexes.size() << "\n";
-                    break;
-                }
-                case executor_type::BACKGROUND:
-                {
-                    // set higher half of cores for background, lower half for foreground
-                    auto core_indexes = std::vector<size_t>(topology.pu_count() / 2);
-                    std::ranges::iota(core_indexes, topology.pu_count() / 2);
-                    if(cfg.n_threads.has_value() && cfg.n_threads.value() < core_indexes.size())
-                        core_indexes.resize(cfg.n_threads.value());
-
-                    filter.set_core_indexes(core_indexes);
-                    this->_n_threads = core_indexes.size();
-
-                    // debug
-                    std::cout << "Allowed cores for background executor: ";
-                    for(size_t core_index : core_indexes)
-                        std::cout << core_index << " ";
-                    std::cout << "\nTotal threads allowed for background executor: " << core_indexes.size() << "\n";
-                    break;
-                }
-                case executor_type::GENERAL_PURPOSE:
-                {
-                    this->_n_threads = topology.core_count();
-                    break;
-                }
-            }
-        }
+        auto filter = this->_hwloc_partition_filter(cfg);
 #else
         if(cfg.auto_detect)
             throw std::runtime_error("Auto-detecting topology requires hwloc support.");
 #endif
 
-    skip_autodetect:
         if(!cfg.auto_detect)
         {
             switch(cfg.type)
@@ -208,5 +111,121 @@ namespace hedge::io
             throw std::runtime_error("Failed to set thread affinity: " + std::string(strerror(result)));
         }
     };
+
+#ifdef TMC_USE_HWLOC
+    [[nodiscard]] tmc::topology::topology_filter io_executor::_hwloc_partition_filter_normal_cpu(const executor_config& cfg)
+    {
+        auto filter = tmc::topology::topology_filter{};
+        auto topology = tmc::topology::query();
+
+        std::cout << "Detected hybrid CPU topology: " << topology.core_count() << " cores, "
+                  << topology.group_count() << " groups, " << topology.numa_count() << " NUMA nodes\n";
+
+        auto resolve_kind_to_group = [&topology](tmc::topology::cpu_kind::value kind)
+        {
+            std::vector<size_t> groups;
+            size_t count{0};
+            for(const auto& group : topology.groups | std::views::filter([kind](const tmc::topology::core_group& g)
+                                                                         { return g.cpu_kind == kind; }))
+            {
+                groups.emplace_back(group.index);
+                count += group.core_indexes.size() * group.smt_level;
+            }
+
+            return std::make_pair(groups, count);
+        };
+
+        tmc::topology::cpu_kind::value kind = tmc::topology::cpu_kind::ALL;
+        switch(cfg.type)
+        {
+            case executor_type::FOREGROUND:
+                kind = tmc::topology::cpu_kind::PERFORMANCE;
+                break;
+            case executor_type::BACKGROUND:
+                kind = tmc::topology::cpu_kind::EFFICIENCY1;
+                break;
+            case executor_type::GENERAL_PURPOSE:
+                kind = tmc::topology::cpu_kind::ALL;
+                break;
+        }
+
+        auto [groups, count] = resolve_kind_to_group(kind);
+        filter.set_group_indexes(groups);
+        this->_n_threads = count;
+
+        // debug
+        std::cout << "Allowed groups for executor type " << static_cast<int>(cfg.type) << ": ";
+        for(size_t group_index : groups)
+            std::cout << group_index << " ";
+        std::cout << "\nTotal threads allowed for this executor: " << count << "\n";
+        return filter;
+    }
+
+    [[nodiscard]] tmc::topology::topology_filter io_executor::_hwloc_partition_filter_hybrid_cpu(const executor_config& cfg)
+    {
+        auto filter = tmc::topology::topology_filter{};
+        auto topology = tmc::topology::query();
+
+        switch(cfg.type)
+        {
+            case executor_type::FOREGROUND:
+            {
+                // set lower half of cores for foreground, higher half for background
+                auto core_indexes = std::vector<size_t>(topology.pu_count() / 2);
+                std::ranges::iota(core_indexes, 0);
+
+                if(cfg.n_threads.has_value() && cfg.n_threads.value() < core_indexes.size())
+                    core_indexes.resize(cfg.n_threads.value());
+
+                filter.set_core_indexes(core_indexes);
+                this->_n_threads = core_indexes.size();
+
+                // debug
+                std::cout << "Allowed cores for foreground executor: ";
+                for(size_t core_index : core_indexes)
+                    std::cout << core_index << " ";
+                std::cout << "\nTotal threads allowed for foreground executor: " << core_indexes.size() << "\n";
+                break;
+            }
+            case executor_type::BACKGROUND:
+            {
+                // set higher half of cores for background, lower half for foreground
+                auto core_indexes = std::vector<size_t>(topology.pu_count() / 2);
+                std::ranges::iota(core_indexes, topology.pu_count() / 2);
+                if(cfg.n_threads.has_value() && cfg.n_threads.value() < core_indexes.size())
+                    core_indexes.resize(cfg.n_threads.value());
+
+                filter.set_core_indexes(core_indexes);
+                this->_n_threads = core_indexes.size();
+
+                // debug
+                std::cout << "Allowed cores for background executor: ";
+                for(size_t core_index : core_indexes)
+                    std::cout << core_index << " ";
+                std::cout << "\nTotal threads allowed for background executor: " << core_indexes.size() << "\n";
+                break;
+            }
+            case executor_type::GENERAL_PURPOSE:
+            {
+                this->_n_threads = topology.core_count();
+                break;
+            }
+        }
+
+        return filter;
+    }
+
+    tmc::topology::topology_filter io_executor::_hwloc_partition_filter(const executor_config& cfg)
+    {
+        auto topology = tmc::topology::query();
+
+        if(!cfg.auto_detect)
+            return {};
+
+        return topology.is_hybrid()
+                   ? this->_hwloc_partition_filter_hybrid_cpu(cfg)
+                   : this->_hwloc_partition_filter_normal_cpu(cfg);
+    }
+#endif
 
 } // namespace hedge::io

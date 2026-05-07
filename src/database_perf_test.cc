@@ -82,7 +82,12 @@ int main(int argc, char* argv[])
     constexpr size_t NUM_THREADS = 8;
     constexpr uint32_t QD = 64;
 
-    auto& pool = hedge::io::static_pool::instance()->init(NUM_THREADS, QD, "io-pool");
+    auto& pool = hedge::io::static_pool::instance()->init(hedge::io::executor_config{
+        .name = "io-pool",
+        .queue_depth = QD,
+        .n_threads = NUM_THREADS,
+        .auto_detect = false,
+    });
 
     // --- CLI args ---
     size_t N_KEYS = 300'000'000;
@@ -137,11 +142,10 @@ int main(int argc, char* argv[])
     config.memtable_budget_bytes = MEMTABLE_CAPACITY_BYTES;
     config.num_partition_exponent = 4;
     config.bucket_ratio = 1.50;
-    config.use_odirect_for_ssts = true;
+    config.use_direct_io = true;
     config.index_page_clock_cache_size_bytes = 0;
     config.index_point_cache_size_bytes = 0;
-    config.background_workers = 6;
-    config.flush_io_workers = 6;
+    config.num_background_workers = 6;
     config.max_pending_flushes = 8;
     config.min_merge_width = 4;
     config.max_merge_width = 16;

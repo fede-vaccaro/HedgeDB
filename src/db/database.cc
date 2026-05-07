@@ -31,10 +31,9 @@ namespace hedge::db
     {
         db._memtable.emplace(
             memtable_config{
-                .max_inserts_cap = config.memtable_budget_bytes,
                 .memory_budget_cap = config.memtable_budget_bytes,
                 .auto_compaction = config.auto_compaction,
-                .use_odirect = config.use_odirect_for_ssts,
+                .use_odirect = config.use_direct_io,
                 .num_writer_threads = std::thread::hardware_concurrency(),
                 .use_wal = !config.disable_wal,
                 .max_pending_flushes = config.max_pending_flushes,
@@ -58,13 +57,13 @@ namespace hedge::db
         db->_base_path = base_path;
         db->_partitions_path = base_path / "partitions";
         db->_config = config;
-        db->_bg_pool = config.background_workers.has_value()
+        db->_bg_pool = config.num_background_workers.has_value()
                            ? std::make_shared<io::io_executor>(
                                  io::executor_config{
                                      .name = "bg",
                                      .queue_depth = 32,
                                      .type = io::executor_type::BACKGROUND,
-                                     .n_threads = config.background_workers.value() == 0 ? std::nullopt : config.background_workers,
+                                     .n_threads = config.num_background_workers.value() == 0 ? std::nullopt : config.num_background_workers,
                                      .auto_detect = true,
                                  })
                            : io::static_pool::instance();
@@ -94,13 +93,11 @@ namespace hedge::db
                 .max_merge_width = config.max_merge_width,
                 .bucket_ratio = config.bucket_ratio,
                 .compaction_read_ahead_size_bytes = config.compaction_read_ahead_size_bytes,
-                .use_odirect_for_ssts = config.use_odirect_for_ssts,
+                .use_odirect_for_ssts = config.use_direct_io,
                 .ssts_in_l0_block_write_threshold = config.ssts_in_l0_block_write_threshold,
                 .partitions_path = db->_partitions_path,
             },
-            // io::static_pool::instance(),
             db->_bg_pool,
-            // std::make_shared<io::io_executor>(config.compaction_io_workers, 32, "compactor"),
             db->_page_cache);
 
         // Setup memtable
@@ -118,13 +115,13 @@ namespace hedge::db
         db->_base_path = base_path;
         db->_partitions_path = base_path / "partitions";
         db->_config = config;
-        db->_bg_pool = config.background_workers.has_value()
+        db->_bg_pool = config.num_background_workers.has_value()
                            ? std::make_shared<io::io_executor>(
                                  io::executor_config{
                                      .name = "bg",
                                      .queue_depth = 32,
                                      .type = io::executor_type::BACKGROUND,
-                                     .n_threads = config.background_workers.value() == 0 ? std::nullopt : config.background_workers,
+                                     .n_threads = config.num_background_workers.value() == 0 ? std::nullopt : config.num_background_workers,
                                      .auto_detect = true,
                                  })
                            : io::static_pool::instance();
@@ -148,13 +145,11 @@ namespace hedge::db
                 .max_merge_width = config.max_merge_width,
                 .bucket_ratio = config.bucket_ratio,
                 .compaction_read_ahead_size_bytes = config.compaction_read_ahead_size_bytes,
-                .use_odirect_for_ssts = config.use_odirect_for_ssts,
+                .use_odirect_for_ssts = config.use_direct_io,
                 .ssts_in_l0_block_write_threshold = config.ssts_in_l0_block_write_threshold,
                 .partitions_path = db->_partitions_path,
             },
-            // io::static_pool::instance(),
             db->_bg_pool,
-            // std::make_shared<io::io_executor>(config.compaction_io_workers, 32),
             db->_page_cache);
 
         if(!maybe_sst_mgr)
@@ -183,7 +178,6 @@ namespace hedge::db
     {
         co_return co_await this->_memtable->put_async(key, value, hedge::value_type::IN_PLACE_VALUE);
     }
-
 
     tmc::task<expected<value_t>> database::_find_value(const key_t& key)
     {

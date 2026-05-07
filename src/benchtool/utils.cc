@@ -6,6 +6,7 @@
 #include <future>
 #include <iostream>
 #include <optional>
+#include <sys/resource.h>
 
 namespace hedge::db
 {
@@ -17,10 +18,10 @@ namespace hedge::db
         cfg.memtable_budget_bytes = 32 * MiB;
         cfg.num_partition_exponent = 4;
         cfg.bucket_ratio = 1.50;
-        cfg.use_odirect_for_ssts = true;
+        cfg.use_direct_io = false;
         cfg.index_page_clock_cache_size_bytes = 0;
         cfg.index_point_cache_size_bytes = 0;
-        cfg.background_workers = num_bg_threads;
+        cfg.num_background_workers = num_bg_threads;
         cfg.max_pending_flushes = 8;
         cfg.min_merge_width = 8;
         cfg.max_merge_width = 32;
@@ -63,6 +64,15 @@ namespace hedge::db
     {
         std::cout << "\n*** Note: Write latency measures memtable insert time (not disk flush). ***\n"
                   << "***       Actual durability includes WAL write. SST flush is async.      ***\n";
+    }
+
+    void print_max_rss()
+    {
+        rusage usage{};
+        if(getrusage(RUSAGE_SELF, &usage) != 0)
+            return;
+        double mib = usage.ru_maxrss / 1024.0;
+        std::cout << "Max RSS:    " << mib << " MiB\n";
     }
 
 } // namespace hedge::db

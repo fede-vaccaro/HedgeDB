@@ -130,21 +130,12 @@ namespace hedge::async
          */
         [[nodiscard]] acquired_writer acquire_writer(size_t this_thread_idx)
         {
-            // CRITICAL: We must announce our presence BEFORE checking the frozen state.
-            // This acts as a Store-Load barrier preventing the flusher from missing this writer.
-            //
-            // Protocol (Dekker-style):
-            //   Writer:  Store(Counter=1, release) -> fence(seq_cst) -> Load(Frozen, acquire)
-            //   Flusher: Store(Frozen=true, seq_cst)                 -> Load(Counter, seq_cst)
-            //
-            // A release-store + seq_cst-fence + acquire-load is equivalent to seq_cst-store +
-            // seq_cst-load for the purposes of this protocol.  On x86 the fence is an MFENCE;
-            // the release store and acquire load are plain MOVs (TSO gives them for free).
-            // This saves one XCHG (seq_cst store) on the common (unfrozen) path and one
-            // XCHG on the release path in ~acquired_writer(), replacing both with plain MOVs.
-
             auto& counter = this->_counters[this_thread_idx].c;
+
+            // We must announce our presence BEFORE checking the frozen state.
             counter.store(1, std::memory_order::release);
+
+            // The barrier prevents reordering of the store to counter with the load of _frozen
             std::atomic_thread_fence(std::memory_order::seq_cst);
 
             // Cannot write if it has been sealed

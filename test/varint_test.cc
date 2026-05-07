@@ -31,12 +31,12 @@ namespace hedge::test
         // 0
         std::byte* end = unsafe_varint(0U, buffer);
         EXPECT_EQ(end - buffer, 1);
-        EXPECT_EQ(buffer[0], 0);
+        EXPECT_EQ(buffer[0], std::byte{0});
 
         // 127 (last single byte value)
         end = unsafe_varint(127U, buffer);
         EXPECT_EQ(end - buffer, 1);
-        EXPECT_EQ(buffer[0], 127);
+        EXPECT_EQ(buffer[0], std::byte{127});
 
         // 128 (first 2-byte value)
         end = unsafe_varint(128U, buffer);
@@ -49,8 +49,8 @@ namespace hedge::test
         // val >>= 7 -> 1.
         // 1 < 0x80.
         // *ptr = 1.
-        EXPECT_EQ(buffer[0], 0x80);
-        EXPECT_EQ(buffer[1], 0x01);
+        EXPECT_EQ(buffer[0], std::byte{0x80});
+        EXPECT_EQ(buffer[1], std::byte{0x01});
 
         // Max 32-bit
         end = unsafe_varint(std::numeric_limits<uint32_t>::max(), buffer);
@@ -66,9 +66,9 @@ namespace hedge::test
         EXPECT_EQ(end - buffer, 10);
         for(int i = 0; i < 9; ++i)
         {
-            EXPECT_EQ(buffer[i], 0xFF);
+            EXPECT_EQ(buffer[i], std::byte{0xFF});
         }
-        EXPECT_EQ(buffer[9], 0x01);
+        EXPECT_EQ(buffer[9], std::byte{0x01});
     }
 
     TEST_F(VarintTest, RoundTrip32)
@@ -135,7 +135,7 @@ namespace hedge::test
         uint64_t val = 12345;
         std::byte* end = unsafe_varint(val, buffer);
         // Fill remainder with garbage
-        std::fill(end, buffer + 20, 0xCC);
+        std::fill(end, buffer + 20, std::byte{0xCC});
 
         // Pass large span
         std::span<std::byte> span(buffer, 20);
@@ -147,7 +147,7 @@ namespace hedge::test
     TEST_F(VarintTest, DecodeFailTooFewBytes)
     {
         // A single byte with MSB set, but no more bytes
-        std::byte buffer[] = {0x80};
+        std::byte buffer[] = {std::byte{0x80}};
         std::span<std::byte> span(buffer, 1);
         auto res = try_decode_varint(span);
         EXPECT_FALSE(res.has_value());
@@ -158,7 +158,7 @@ namespace hedge::test
     {
         // 10 bytes all with MSB set (continuation)
         std::byte buffer[10];
-        std::fill(std::begin(buffer), std::end(buffer), 0x80);
+        std::fill(std::begin(buffer), std::end(buffer), std::byte{0x80});
 
         std::span<std::byte> span(buffer, 10);
         // This hits the fast path because size >= 10
@@ -191,7 +191,7 @@ namespace hedge::test
             EXPECT_EQ(encoded_len, i + 1) << "Length mismatch for i=" << i;
 
             // Fill rest with garbage
-            std::fill(end, buffer + 20, 0xAA);
+            std::fill(end, buffer + 20, std::byte{0xAA});
 
             std::span<std::byte> span(buffer, 20);
             auto res = try_decode_varint(span);

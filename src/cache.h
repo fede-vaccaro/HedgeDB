@@ -1,242 +1,27 @@
 #pragma once
 
-#include <atomic>
-#include <cassert>
-#include <coroutine>
+#include <cstddef>
 #include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <memory>
 #include <optional>
-#include <shared_mutex>
-#include <stdexcept>
-#include <tsl/robin_map.h>
-#include <tsl/sparse_map.h>
-#include <utility>
-
-#include "async/spinlock.h"
-#include "types.h"
-#include "utils.h"
+#include <vector>
 
 namespace hedge::db
 {
-    struct page_tag
+    struct page_handle
     {
-        uint32_t id;
-        uint32_t page_index;
-
-        bool operator==(const page_tag& other) const
-        {
-            return id == other.id && page_index == other.page_index;
-        }
+        std::byte* data;
+        size_t idx;
     };
 
-    inline page_tag to_page_tag(uint64_t id, size_t offset)
+    struct sharded_page_cache
     {
-        assert(offset % PAGE_SIZE_IN_BYTES == 0);
+        sharded_page_cache(size_t /*size_bytes*/, uint32_t /*num_shards*/) {}
 
-        return page_tag{.id = static_cast<uint32_t>(id), .page_index = static_cast<uint32_t>(offset / PAGE_SIZE_IN_BYTES)};
-    }
-} // namespace hedge::db
-
-namespace std
-{
-    template <>
-    struct hash<hedge::db::page_tag>
-    {
-        size_t operator()(const hedge::db::page_tag& page_id) const noexcept
+        std::vector<std::optional<page_handle>> get_write_slots_range(uint32_t /*file_id*/,
+                                                                      size_t /*start_page*/,
+                                                                      size_t /*num_pages*/)
         {
-            size_t h;
-
-            h = (static_cast<size_t>(page_id.id) << 32);
-            h |= page_id.page_index;
-
-            h ^= h >> 33;
-            h *= 0xff51afd7ed558ccdULL;
-            h ^= h >> 33;
-
-            return h;
+            return {};
         }
     };
-} // namespace std
-
-namespace hedge::db
-{
-    constexpr uint64_t PAGE_FLAG_READY = (1ULL << 63);
-    constexpr uint64_t PAGE_FLAG_RECENTLY_USED = (1ULL << 62);
-    constexpr uint64_t PAGE_FLAG_REFERENCE_COUNT_MASK = ((1ULL << 62) - 1);
-
-    // Page cache
-    // Implemented using a reference-counted CLOCK algorithm;
-    class alignas(64) page_cache
-    {
-        friend class PageCacheTest;
-
-        alignas(64) std::shared_mutex _m{};
-        // alignas(64) async::rw_spinlock _m{};
-        alignas(64) std::atomic_size_t _clock_hand{};
-        size_t _max_page_capacity{};
-
-        struct alignas(64) _metadata
-        {
-            std::atomic_uint64_t flags{0};
-            async::spinlock waiters_mutex{};
-
-            page_tag key{};
-        };
-
-        std::vector<_metadata> _frames;
-        tsl::sparse_map<page_tag, size_t> _lut;
-        buffer_t _data = buffer_t(nullptr, std::free);
-
-    public:
-        explicit page_cache(size_t bytes);
-
-        struct awaitable_page_guard;
-
-        // Handles reading a page. Only releases reference count.
-        struct read_page_guard
-        {
-            read_page_guard() = default;
-            read_page_guard(std::byte* data, size_t idx, _metadata* frame);
-            ~read_page_guard();
-
-            read_page_guard(const read_page_guard&) = delete;
-            read_page_guard& operator=(const read_page_guard&) = delete;
-
-            read_page_guard(read_page_guard&& other) noexcept;
-            read_page_guard& operator=(read_page_guard&& other) noexcept;
-
-            std::byte* data{nullptr};
-            size_t offset{0}; // TODO: REMOVE THIS. This field is only used for debugging and testing purposes, it is not used for any logic in the cache implementation.
-
-            [[nodiscard]] const _metadata* frame() const { return this->_frame; }
-
-            [[nodiscard]] const std::byte* begin() const { return this->data + offset; }
-            [[nodiscard]] const std::byte* end() const { return this->data + offset + PAGE_SIZE_IN_BYTES; }
-
-        private:
-            friend struct awaitable_page_guard;
-            _metadata* _frame{nullptr};
-        };
-
-        // Handles writing a page. Resumes waiters and sets READY flag on destruction.
-        struct write_page_guard
-        {
-            write_page_guard() = default;
-            write_page_guard(std::byte* data, size_t idx, _metadata* frame);
-            ~write_page_guard();
-
-            write_page_guard(const write_page_guard&) = delete;
-            write_page_guard& operator=(const write_page_guard&) = delete;
-
-            write_page_guard(write_page_guard&& other) noexcept;
-            write_page_guard& operator=(write_page_guard&& other) noexcept;
-
-            std::byte* data{nullptr};
-            size_t idx{0};
-
-        private:
-            friend struct awaitable_page_guard;
-            _metadata* _frame{nullptr};
-        };
-
-        struct awaitable_page_guard
-        {
-            read_page_guard pg;
-
-            bool ready() const noexcept
-            {
-                return (pg._frame->flags.load() & PAGE_FLAG_READY) != 0UL;
-            }
-
-            [[nodiscard]] bool await_ready() const noexcept
-            {
-                return this->ready();
-            }
-
-            template <typename PROMISE_TYPE>
-            std::coroutine_handle<> await_suspend(std::coroutine_handle<PROMISE_TYPE> continuation) noexcept
-            {
-                if(!this->ready())
-                {
-                    std::cout << "cache error!\n";
-                }
-
-                return continuation;
-            }
-
-            read_page_guard&& await_resume()
-            {
-                return std::move(this->pg);
-            }
-        };
-
-        std::optional<write_page_guard> get_write_slot(page_tag page);
-        std::optional<write_page_guard> try_get_write_slot(page_tag page);
-
-        std::optional<awaitable_page_guard> lookup(page_tag page, bool hint_evict = false);
-        std::optional<awaitable_page_guard> try_lookup(page_tag page, bool hint_evict = false);
-
-    private:
-        std::optional<size_t> _find_frame();
-    };
-
-    class sharded_page_cache
-    {
-        std::unique_ptr<page_cache[], void (*)(void*)> _caches = std::unique_ptr<page_cache[], void (*)(void*)>(nullptr, std::free);
-        size_t _num_caches;
-
-    public:
-        explicit sharded_page_cache(size_t bytes, size_t num_caches)
-        {
-            void* caches = aligned_alloc(alignof(page_cache), sizeof(page_cache) * num_caches);
-            if(caches == nullptr)
-                throw std::runtime_error("Could not allocate memory for shared_page_cache caches");
-
-            this->_caches = std::unique_ptr<page_cache[], void (*)(void*)>(static_cast<page_cache*>(caches), std::free);
-            this->_num_caches = num_caches;
-            size_t per_cache_bytes = hedge::ceil(bytes, num_caches);
-
-            for(size_t i = 0; i < num_caches; ++i)
-                new(this->_caches.get() + i) page_cache(per_cache_bytes);
-        }
-
-        std::optional<page_cache::write_page_guard> get_write_slot(page_tag page)
-        {
-            size_t hash = std::hash<page_tag>{}(page) % this->_num_caches;
-            return this->_caches.get()[hash].get_write_slot(page);
-        }
-
-        std::optional<page_cache::write_page_guard> try_get_write_slot(page_tag page)
-        {
-            size_t hash = std::hash<page_tag>{}(page) % this->_num_caches;
-            return this->_caches.get()[hash].try_get_write_slot(page);
-        }
-
-        std::optional<page_cache::awaitable_page_guard> lookup(page_tag page)
-        {
-            size_t hash = std::hash<page_tag>{}(page) % this->_num_caches;
-            return this->_caches.get()[hash].lookup(page);
-        }
-
-        std::optional<page_cache::awaitable_page_guard> try_lookup(page_tag page, bool hint_evict = false)
-        {
-            size_t hash = std::hash<page_tag>{}(page) % this->_num_caches;
-            return this->_caches.get()[hash].try_lookup(page, hint_evict);
-        }
-
-        ~sharded_page_cache()
-        {
-            for(size_t i = 0; i < this->_num_caches; ++i)
-            {
-                auto& cache = this->_caches.get()[i];
-                cache.~page_cache();
-            }
-        }
-
-        std::vector<std::optional<page_cache::write_page_guard>> get_write_slots_range(uint32_t id, size_t start_page_index, size_t num_pages);
-        std::vector<std::optional<page_cache::awaitable_page_guard>> lookup_range(uint32_t id, size_t start_page_index, size_t num_pages, bool hint_evict);
-    };
-
 } // namespace hedge::db

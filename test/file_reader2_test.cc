@@ -33,7 +33,12 @@ namespace hedge::fs
             }
             std::filesystem::create_directories(TEST_DIR);
 
-            _executor = std::make_unique<hedge::io::io_executor>(1, 32);
+            _executor = std::make_unique<hedge::io::io_executor>(
+                hedge::io::executor_config{
+                    .queue_depth = 32,
+                    .n_threads = 1,
+                    .auto_detect = false,
+                });
         }
 
         void TearDown() override
@@ -56,7 +61,7 @@ namespace hedge::fs
 
                 for(size_t j = 0; j < PAGE_SIZE_IN_BYTES; ++j)
                 {
-                    buffer[j] = (j < chunk) ? static_cast<std::byte>((written + j) % 256) : 0;
+                    buffer[j] = (j < chunk) ? static_cast<std::byte>((written + j) % 256) : std::byte{0};
                 }
 
                 ofs.write(reinterpret_cast<const char*>(buffer.data()), PAGE_SIZE_IN_BYTES);
@@ -109,7 +114,7 @@ namespace hedge::fs
                     if(file_abs_offset >= end_offset)
                     {
                         // Padding verification
-                        if(data_span[i] != 0)
+                        if(data_span[i] != std::byte{0})
                         {
                             error_msg = "Non-zero padding at " + std::to_string(file_abs_offset);
                             break;
@@ -122,7 +127,8 @@ namespace hedge::fs
                         if(data_span[i] != expected)
                         {
                             error_msg = "Data mismatch at " + std::to_string(file_abs_offset) +
-                                        " Exp: " + std::to_string(expected) + " Got: " + std::to_string(data_span[i]);
+                                        " Exp: " + std::to_string(static_cast<unsigned>(expected)) +
+                                        " Got: " + std::to_string(static_cast<unsigned>(data_span[i]));
                             break;
                         }
                     }

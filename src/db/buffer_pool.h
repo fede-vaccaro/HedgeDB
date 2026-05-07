@@ -37,8 +37,6 @@ namespace hedge::db
 
     // read_buffer_pool manages a pool of pre-allocated buffers for reading pages from disk.
     // This pools are registered with io_uring for fixed buffer reads
-    // TODO re-enable: after migrating to TooManyCooks the fixed_buffers have been temporarily dropped because with
-    // work stealing might get problematic since the read_buffer_pool is thread_local
     class read_buffer_pool
     {
     private:

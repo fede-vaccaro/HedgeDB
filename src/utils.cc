@@ -37,7 +37,6 @@ namespace hedge
 
     std::pair<std::string, std::string> format_prefix(uint16_t prefix)
     {
-        // TODO: this works only for little-endian!
         auto as_array = reinterpret_cast<std::array<uint8_t, 2>&>(prefix);
         auto path = std::format("{:02x}", as_array[1]);
         auto filename = std::format("{:02x}{:02x}", as_array[1], as_array[0]);

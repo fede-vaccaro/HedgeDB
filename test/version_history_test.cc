@@ -75,11 +75,10 @@ namespace hedge::db
             cfg.compaction_read_ahead_size_bytes = 1 * MiB;
             cfg.num_partition_exponent = num_partition_exponent;
             cfg.bucket_ratio = 1.50;
-            cfg.use_odirect_for_ssts = true;
+            cfg.use_direct_io = true;
             cfg.index_page_clock_cache_size_bytes = 0;
             cfg.index_point_cache_size_bytes = 0;
-            cfg.background_workers = 2;
-            cfg.flush_io_workers = 2;
+            cfg.num_background_workers = 2;
             cfg.max_pending_flushes = 4; // Allow concurrent flushes (epoch ordering enforced by sst_manager)
             cfg.min_merge_width = 2;
             cfg.max_merge_width = 8;
@@ -154,7 +153,12 @@ namespace hedge::db
     {
         static void SetUpTestSuite()
         {
-            io::static_pool::instance()->init(NUM_WORKERS, QUEUE_DEPTH, "version-history-pool");
+            io::static_pool::instance()->init(io::executor_config{
+                .name = "version-history-pool",
+                .queue_depth = QUEUE_DEPTH,
+                .n_threads = NUM_WORKERS,
+                .auto_detect = false,
+            });
         }
 
         static void TearDownTestSuite()

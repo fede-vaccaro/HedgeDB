@@ -16,6 +16,7 @@
 #include <random>
 #include <string>
 #include <string_view>
+#include <sys/resource.h>
 #include <thread>
 #include <vector>
 #include <xxh64.hpp>
@@ -34,7 +35,7 @@ static constexpr uint64_t KEY_SEED = 0xDEADBEEF;
 static constexpr uint64_t OP_SEED = 0x12345678;
 static constexpr size_t NUNIQUEVALUES = 1024;
 static constexpr size_t MiB = 1024ULL * 1024;
-static constexpr size_t MULTIGET_BATCH_SIZE = 8;
+static constexpr size_t MULTIGET_BATCH_SIZE = 1;
 
 static constexpr size_t LATENCY_HISTOGRAM_BUCKETS = 10000;
 static constexpr uint64_t LATENCY_BUCKET_SIZE_NS = 500;
@@ -268,6 +269,15 @@ static void wait_for_compactions(rocksdb::DB* db)
         std::cerr << "WaitForCompact: " << status.ToString() << "\n";
 }
 
+static void print_max_rss()
+{
+    rusage usage{};
+    if(getrusage(RUSAGE_SELF, &usage) != 0)
+        return;
+    double mib = usage.ru_maxrss / 1024.0;
+    std::cout << "Max RSS:    " << mib << " MiB\n";
+}
+
 static void run_load(rocksdb::DB* db, const values_t& values, size_t n, size_t vsize, size_t num_threads, bool measure_latency)
 {
     std::unique_ptr<latency_histogram> hist;
@@ -335,7 +345,7 @@ static void run_read(rocksdb::DB* db, size_t n, size_t vsize, size_t num_threads
     auto worker = [&](size_t tid)
     {
         rocksdb::ReadOptions read_opts;
-        read_opts.async_io = true;
+        read_opts.async_io = false;
         read_opts.optimize_multiget_for_io = true;
 
         std::vector<std::string> key_strings;
@@ -665,5 +675,6 @@ int main(int argc, char* argv[])
         run_range(db.get(), cfg.num_ops, cfg.num_threads, cfg.measure_latency);
 
     std::cout << "\n=== DONE ===\n";
+    print_max_rss();
     return 0;
 }

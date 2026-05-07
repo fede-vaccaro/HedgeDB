@@ -225,9 +225,6 @@ namespace hedge
         }
 
         // Convert to std::string_view, then perform every needed operation
-        // TODO: That's convenient for sure, but what's faster between this
-        // and "unrolling" every combination?
-        // Or maybe branch-free?
         operator std::string_view() const
         {
             std::array<const char*, 2> ptrs{(char*)this->_storage.fixed.buf.data(), (char*)this->_storage.variable.buf};

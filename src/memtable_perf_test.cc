@@ -106,8 +106,18 @@ constexpr size_t FLUSH_THREADS = 4;
 int main()
 {
     // --- Main threadpool (runs put_async coroutines) ---
-    auto main_pool = std::make_shared<hedge::io::io_executor>(N_EXECUTORS, QD);
-    auto flusher_pool = std::make_shared<hedge::io::io_executor>(FLUSH_THREADS, QD / 2);
+    auto main_pool = std::make_shared<hedge::io::io_executor>(
+        hedge::io::executor_config{
+            .queue_depth = QD,
+            .n_threads = N_EXECUTORS,
+            .auto_detect = false,
+        });
+    auto flusher_pool = std::make_shared<hedge::io::io_executor>(
+        hedge::io::executor_config{
+            .queue_depth = QD / 2,
+            .n_threads = FLUSH_THREADS,
+            .auto_detect = false,
+        });
 
     // --- Memtable setup ---
     hedge::db::memtable_config cfg;

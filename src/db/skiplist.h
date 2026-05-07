@@ -29,7 +29,6 @@ namespace hedge::db
             auto span = arena_->allocate(n * sizeof(T));
             if(span.empty())
             {
-                // std::cout << "Arena out of memory when trying to allocate " << n * sizeof(T) << " bytes" << std::endl;
                 throw std::bad_alloc();
             }
             return reinterpret_cast<T*>(span.data());

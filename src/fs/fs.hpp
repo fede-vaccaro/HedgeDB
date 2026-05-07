@@ -16,22 +16,15 @@
 #include "tmc/task.hpp"
 
 /*
-    HedgeFS File Abstraction
-
+    HedgeDB File Abstraction
     Provides a simple file abstraction over POSIX file descriptors with support for asynchronous operations via io_uring.
 */
 namespace hedge::fs
 {
 
-    // todo: switch to a thread-safe version of strerror
+    // TODO: switch to a thread-safe version of strerror
     inline std::string get_error_message()
     {
-        // constexpr size_t BUF_SIZE = 1024;
-        // std::array<char, BUF_SIZE> buf{};
-
-        // strerror_r(errno, buf.data(), buf.size());
-
-        // return {buf.data()};
         return strerror(errno);
     }
 
@@ -51,9 +44,9 @@ namespace hedge::fs
         };
 
     private:
-        static std::atomic_size_t _GLOBAL_COUNTER;
+        static std::atomic_size_t global_counter;
 
-        uint32_t _id{std::numeric_limits<uint32_t>::max()};
+        uint64_t _id{std::numeric_limits<uint64_t>::max()};
         int _fd = -1;
         size_t _file_size{};
         std::filesystem::path _path;
@@ -108,8 +101,6 @@ namespace hedge::fs
 
             int fd = open(path.c_str(), flag, 0777); // NOLINT
 
-            // std::cout << "Opened file " << path.string() << " with fd " << fd << "\n";
-
             if(fd == -1)
             {
                 auto err = std::string(strerror(errno));
@@ -155,7 +146,7 @@ namespace hedge::fs
 
             file fd_wrapped{};
 
-            fd_wrapped._id = static_cast<uint32_t>(file::_GLOBAL_COUNTER.fetch_add(1, std::memory_order_relaxed));
+            fd_wrapped._id = static_cast<uint64_t>(file::global_counter.fetch_add(1, std::memory_order_relaxed));
             fd_wrapped._fd = fd;
             fd_wrapped._file_size = file_size;
             fd_wrapped._path = path;
@@ -226,7 +217,7 @@ namespace hedge::fs
 
             file fd_wrapped{};
 
-            fd_wrapped._id = static_cast<uint32_t>(file::_GLOBAL_COUNTER.fetch_add(1, std::memory_order_relaxed));
+            fd_wrapped._id = static_cast<uint64_t>(file::global_counter.fetch_add(1, std::memory_order_relaxed));
             fd_wrapped._fd = fd;
             fd_wrapped._file_size = file_size;
             fd_wrapped._path = path;
@@ -238,7 +229,7 @@ namespace hedge::fs
 
         file() = default;
 
-        file(file&& other) noexcept : _id(std::exchange(other._id, std::numeric_limits<uint32_t>::max())),
+        file(file&& other) noexcept : _id(std::exchange(other._id, std::numeric_limits<uint64_t>::max())),
                                       _fd(std::exchange(other._fd, -1)),
                                       _file_size(std::exchange(other._file_size, 0)),
                                       _path(std::move(other._path)),
@@ -252,7 +243,7 @@ namespace hedge::fs
             if(this == &other)
                 return *this;
 
-            this->_id = std::exchange(other._id, std::numeric_limits<size_t>::max());
+            this->_id = std::exchange(other._id, std::numeric_limits<uint64_t>::max());
             this->_fd = std::exchange(other._fd, -1);
             this->_file_size = std::exchange(other._file_size, 0);
             this->_path = std::move(other._path);

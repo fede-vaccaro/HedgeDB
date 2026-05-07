@@ -59,7 +59,12 @@ protected:
             std::filesystem::create_directories(this->_base_path);
         }
 
-        this->_executor = std::make_unique<hedge::io::io_executor>(4, 32);
+        this->_executor = std::make_unique<hedge::io::io_executor>(
+            hedge::io::executor_config{
+                .queue_depth = 32,
+                .n_threads = 4,
+                .auto_detect = false,
+            });
     }
 
     hedge::key_t generate_key(size_t length)
@@ -68,7 +73,7 @@ protected:
         auto span = static_cast<std::span<std::byte>>(k);
         for(size_t i = 0; i < length; ++i)
         {
-            span[i] = dist(generator);
+            span[i] = static_cast<std::byte>(dist(generator));
         }
         return k;
     }
@@ -83,7 +88,7 @@ protected:
             [&](std::byte& byte)
             {
                 byte = byte_seed;
-                byte_seed = byte_seed * 31 + 17; // Update seed for next byte
+                byte_seed = static_cast<std::byte>(static_cast<unsigned>(byte_seed) * 31 + 17); // Update seed for next byte
             });
     }
 

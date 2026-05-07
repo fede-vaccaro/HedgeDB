@@ -287,18 +287,16 @@ namespace hedge::db
         // Assign valure ref
         this->_value_ref = std::span<const std::byte>(this->_head, value_size);
         this->_head += value_size;
-
-        // std::cout << "Read restart key: " << to_hex_string(this->_key) << std::endl;
     }
 
     void block_iterator::_read_delta_key()
     {
         // Check prefix length
-        size_t shared_prefix_length = static_cast<size_t>(*this->_head);
+        auto shared_prefix_length = static_cast<size_t>(*this->_head);
         this->_head += 1;
 
         // Check delta key length
-        size_t delta_key_length = static_cast<size_t>(*this->_head);
+        auto delta_key_length = static_cast<size_t>(*this->_head);
         this->_head += 1;
 
         // Read delta key
@@ -317,8 +315,6 @@ namespace hedge::db
         // Assign valure ref
         this->_value_ref = std::span<const std::byte>(this->_head, value_size);
         this->_head += value_size;
-
-        // std::cout << "Read delta key: " << to_hex_string(this->_key) << std::endl;
     }
 
     bool block_iterator::operator==(block_iterator_sentinel /* sentinel */) const
@@ -375,8 +371,6 @@ namespace hedge::db
 
     std::span<const std::byte> block_decoder::find(std::span<const std::byte> key)
     {
-        // std::cout << "Finding key: " << to_hex_string(key) << std::endl;
-
         // Load offsets
         const auto* end = this->_base + this->_cfg.block_size_in_bytes;
         const auto* restart_count_ptr = end - sizeof(block_footer) - sizeof(uint16_t);
@@ -387,8 +381,7 @@ namespace hedge::db
         offsets.assign(reinterpret_cast<const uint16_t*>(offsets_base), reinterpret_cast<const uint16_t*>(restart_count_ptr));
 
         // Find the right Restart Point with binary search
-
-        inline_vector<std::byte> key_buffer; // TODO: std::vector should be backed from a stack allocated buffer
+        inline_vector<std::byte> key_buffer;
 
         auto offset_it = std::upper_bound( // NOLINT
             offsets.begin(),
@@ -400,8 +393,6 @@ namespace hedge::db
                 const std::byte encoded_key_size = *(this->_base + offset);
                 size_t key_size = decode_key_size(encoded_key_size);
                 key_buffer.assign(this->_base + offset + 1, this->_base + offset + 1 + key_size);
-
-                // std::cout << "Comparing with restart key: " << to_hex_string(key_buffer) << std::endl;
 
                 return key_comparator(key, key_buffer);
             });
@@ -425,8 +416,6 @@ namespace hedge::db
 
         for(; it != restart_group_sentinel; ++it)
         {
-            // std::cout << "Comparing with key: " << std::string(it.key().begin(), it.key().end()) << std::endl;
-
             if(std::ranges::equal(it.key(), key))
                 return {it.value().begin(), it.value().end()};
         }

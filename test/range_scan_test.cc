@@ -141,7 +141,12 @@ struct range_scan_test : public ::testing::TestWithParam<std::tuple<size_t, size
             std::filesystem::create_directories(this->_base_path);
         }
 
-        this->_executor = std::make_unique<hedge::io::io_executor>(8, 64);
+        this->_executor = std::make_unique<hedge::io::io_executor>(
+            hedge::io::executor_config{
+                .queue_depth = 64,
+                .n_threads = 8,
+                .auto_detect = false,
+            });
     }
 
     void TearDown() override
@@ -371,7 +376,12 @@ struct memtable_merged_scan_test : public ::testing::TestWithParam<std::tuple<si
             std::filesystem::remove_all(this->_base_path);
         std::filesystem::create_directories(this->_base_path);
 
-        this->_executor = std::make_unique<hedge::io::io_executor>(4, 32);
+        this->_executor = std::make_unique<hedge::io::io_executor>(
+            hedge::io::executor_config{
+                .queue_depth = 32,
+                .n_threads = 4,
+                .auto_detect = false,
+            });
     }
 
     void TearDown() override
@@ -379,9 +389,9 @@ struct memtable_merged_scan_test : public ::testing::TestWithParam<std::tuple<si
         this->_executor.reset();
     }
 
-    [[nodiscard]] hedge::db::memtable::rw_sync_table_ptr_t make_table(size_t budget = 16 * 1024 * 1024) const
+    [[nodiscard]] hedge::db::memtable::rw_sync_buffer_ptr_t make_table(size_t budget = 16 * 1024 * 1024) const
     {
-        return std::make_shared<hedge::db::memtable::rw_sync_table_t>(1, &_seq_nr, budget, 1, budget);
+        return std::make_shared<hedge::db::memtable::rw_sync_buffer_t>(1, &_seq_nr, budget, 1, budget);
     }
 
     [[nodiscard]] hedge::expected<std::vector<hedge::db::sst>> do_flush(hedge::db::skiplist_wrapper& mem, size_t flush_iter) const
