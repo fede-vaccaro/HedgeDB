@@ -19,7 +19,10 @@ namespace hedge::io
             return *this;
 
 #ifdef TMC_USE_HWLOC
-        auto filter = this->_hwloc_partition_filter(cfg);
+        std::cout << "Executor auto_detect is " << (cfg.auto_detect ? "enabled" : "disabled") << "\n";
+        tmc::topology::topology_filter filter{};
+        if(cfg.auto_detect)
+            filter = this->_hwloc_partition_filter(cfg);
 #else
         if(cfg.auto_detect)
             throw std::runtime_error("Auto-detecting topology requires hwloc support.");
@@ -113,7 +116,8 @@ namespace hedge::io
     };
 
 #ifdef TMC_USE_HWLOC
-    [[nodiscard]] tmc::topology::topology_filter io_executor::_hwloc_partition_filter_normal_cpu(const executor_config& cfg)
+    // This function creates a topology filter for hybrid CPUs (i.e. Intel Core with P and E cores) based on the executor type.
+    [[nodiscard]] tmc::topology::topology_filter io_executor::_hwloc_partition_filter_hybrid_cpu(const executor_config& cfg)
     {
         auto filter = tmc::topology::topology_filter{};
         auto topology = tmc::topology::query();
@@ -161,8 +165,11 @@ namespace hedge::io
         return filter;
     }
 
-    [[nodiscard]] tmc::topology::topology_filter io_executor::_hwloc_partition_filter_hybrid_cpu(const executor_config& cfg)
+    // This function creates a topology filter for normal CPUs (i.e. a single type of core) by splitting the cores between foreground and background executors.
+    [[nodiscard]] tmc::topology::topology_filter io_executor::_hwloc_partition_filter_normal_cpu(const executor_config& cfg)
     {
+        std::cout << "Detected normal CPU topology. Total cores: " << tmc::topology::query().core_count() << "\n";
+
         auto filter = tmc::topology::topology_filter{};
         auto topology = tmc::topology::query();
 
