@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <filesystem>
 #include <type_traits>
-#include <uuid.h>
 
 #include "types.h"
 
@@ -53,19 +52,6 @@ namespace hedge
     constexpr T floor_page_align(T value)
     {
         return (value / static_cast<T>(PAGE_SIZE_IN_BYTES)) * static_cast<T>(PAGE_SIZE_IN_BYTES);
-    }
-
-    inline uint16_t extract_prefix(const uuids::uuid& key)
-    {
-        const auto* array_view = reinterpret_cast<const std::byte*>(key.as_bytes().begin().base());
-
-        size_t prefix = 0;
-
-        // Warning: this is intended for little endian!
-        prefix |= static_cast<uint16_t>(array_view[1]);
-        prefix |= static_cast<uint16_t>(array_view[0]) << 8;
-
-        return prefix;
     }
 
     template <typename T>

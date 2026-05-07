@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <numeric>
 #include <ranges>
 #include <stdexcept>
@@ -220,7 +221,7 @@ namespace hedge::db
 
             ::fallocate(maybe_file.value().fd(), FALLOC_FL_KEEP_SIZE, 0, static_cast<off_t>(cfg.file_size_hint));
             posix_fadvise(maybe_file.value().fd(), 0, 0, POSIX_FADV_DONTNEED);
-            
+
             this->_files.emplace_back(std::move(maybe_file.value()));
         }
     }

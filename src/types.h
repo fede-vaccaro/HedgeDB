@@ -1,10 +1,9 @@
 #pragma once
 
-#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <sys/types.h>
-#include <uuid.h>
+#include <vector>
 
 #include "error.hpp"
 #include "key.h"

@@ -42,8 +42,19 @@ FetchContent_MakeAvailable(tsl_sparse_map)
 FetchContent_Declare(
     xxhashct
     GIT_REPOSITORY https://github.com/ekpyron/xxhashct.git
+    GIT_TAG 87a9dbcd06a36f31bbada4c0064db7e545b293df
 )
 FetchContent_MakeAvailable(xxhashct)
+
+
+# download TooManyCooks
+FetchContent_Declare(
+    tmc
+    GIT_REPOSITORY https://github.com/tzcnt/TooManyCooks.git
+    GIT_TAG c9423056bfc328674fbbb299931ae41777ce56d9
+)
+FetchContent_MakeAvailable(tmc)
+
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -55,13 +66,17 @@ endif()
 
 if (CMAKE_BUILD_TYPE MATCHES "Debug")
     message (STATUS "Building in Debug mode")
-    set(CMAKE_CXX_FLAGS "-O0 -g -fno-omit-frame-pointer -foptimize-sibling-calls -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined")
+    set(CMAKE_CXX_FLAGS "-O0 -g -fno-omit-frame-pointer -foptimize-sibling-calls -Wall -Wextra -Wpedantic -Werror")
 elseif (CMAKE_BUILD_TYPE MATCHES "Release")
     message (STATUS "Building in Release mode")
     set(CMAKE_CXX_FLAGS "-O2 -g -fno-omit-frame-pointer")
 endif()
 
-# add_compile_definitions(-DTMC_PRIORITY_COUNT=5)
+if (SANITIZERS)
+    message(STATUS "Enabling sanitizers: ${SANITIZERS}")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=${SANITIZERS}")
+    set(CMAKE_LINKER_FLAGS "${CMAKE_LINKER_FLAGS} -fsanitize=${SANITIZERS}")
+endif()
 
 find_library(HWLOC_LIB hwloc)
 if(HWLOC_LIB)
@@ -73,7 +88,6 @@ endif()
 
 set(PUBLIC_INCLUDES
     "include"
-    "include/api"
     "include/async"
 )
 
@@ -83,8 +97,7 @@ include_directories("src")
 include_directories(${tsl_robin_map_SOURCE_DIR}/include)
 include_directories(${tsl_sparse_map_SOURCE_DIR}/include)
 include_directories(${xxhashct_SOURCE_DIR})
-include_directories("/home/federico/TooManyCooks/include")
-
+include_directories(${tmc_SOURCE_DIR}/include)
 
 set(IO_EXECUTOR_SRCS
     src/io/static_pool.cc
@@ -145,43 +158,6 @@ else()
     message(STATUS "No custom allocator found")
 endif()
 
-# executor_read_test - temporarily disabled (io_executor.h renamed to .deprecated)
-# add_executable(executor_read_test src/executor_read_test.cc)
-# target_link_libraries(executor_read_test hedgedb_io tcmalloc)
-
-# skiplist_executor_test — benchmarks executor + skiplist insert without full DB machinery
-# Temporarily disabled due to missing wait_group.h and incorrect include paths
-# add_executable(skiplist_executor_test src/skiplist_executor_test.cc)
-# target_link_libraries(skiplist_executor_test hedgedb_io tcmalloc)
-
-# memtable_perf_test — benchmarks executor + memtable::put() (adds rw_sync + value arenas)
-add_executable(memtable_perf_test src/memtable_perf_test.cc)
-target_link_libraries(memtable_perf_test hedgedb)
-
-# memtable_perf_test_threads — same benchmark but using N plain std::threads instead of executors
-# Temporarily disabled due to pre-existing API changes (flush_io_workers removed, put_sync→put_async)
-# add_executable(memtable_perf_test_threads src/memtable_perf_test_threads.cc)
-# target_link_libraries(memtable_perf_test_threads hedgedb tcmalloc)
-
-# database_perf_test — full database write+read benchmark (no gtest)
-add_executable(database_perf_test src/database_perf_test.cc)
-target_link_libraries(database_perf_test hedgedb ${MALLOC})
-
-# database_perf_test_threads — same benchmark but using N plain std::threads + sync_submit instead of executor task loop
-# Temporarily disabled due to pre-existing API changes (wait_group.h missing)
-# add_executable(database_perf_test_threads src/database_perf_test_threads.cc)
-# target_link_libraries(database_perf_test_threads hedgedb ${MALLOC})
-
-# database_perf_test_mixed — 50/50 mixed read+write benchmark
-# Temporarily disabled due to pre-existing API changes
-# add_executable(database_perf_test_mixed src/database_perf_test_mixed.cc)
-# target_link_libraries(database_perf_test_mixed hedgedb ${MALLOC})
-
-# database_perf_test_mixed_batch — 50/50 mixed read+write benchmark
-# Temporarily disabled due to pre-existing API changes
-# add_executable(database_perf_test_mixed_batch src/database_perf_test_mixed_batch.cc)
-# target_link_libraries(database_perf_test_mixed_batch hedgedb ${MALLOC})
-
 # benchtool — unified benchmark CLI (write / read / rw / range modes)
 add_executable(benchtool
     src/benchtool/main.cc
@@ -192,73 +168,73 @@ add_executable(benchtool
     src/benchtool/range.cc)
 target_link_libraries(benchtool hedgedb ${MALLOC})
 
-# benchtool_threads — same benchmark using std::thread + db_ctx (manual_ctx.h)
-# for the worker fan-out, instead of dispatching to the static pool.
-add_executable(benchtool_threads
-    src/benchtool_threads/main.cc
-    src/benchtool_threads/utils.cc
-    src/benchtool_threads/load.cc
-    src/benchtool_threads/read.cc)
-target_link_libraries(benchtool_threads hedgedb ${MALLOC})
+# memtable_perf_test — benchmarks executor + memtable::put() (adds rw_sync + value arenas)
+add_executable(memtable_perf_test src/memtable_perf_test.cc)
+target_link_libraries(memtable_perf_test hedgedb)
 
-# executor tests
-# executor_test - temporarily disabled due to pre-existing API changes (missing io request types)
-# add_executable(executor_test test/io_executor_test.cc)
-# target_link_libraries(executor_test hedgedb_io gtest gtest_main)
+# database_perf_test — full database write+read benchmark (no gtest)
+add_executable(database_perf_test src/database_perf_test.cc)
+target_link_libraries(database_perf_test hedgedb ${MALLOC})
 
-# index (merge) tests
-# Temporarily disabled: wait_group.h missing
-# add_executable(index_test test/index_test.cc)
-# target_link_libraries(index_test hedgedb gtest gtest_main)
+if (BUILD_TESTS)
+    # benchtool_threads — same benchmark using std::thread + db_ctx (manual_ctx.h)
+    # for the worker fan-out, instead of dispatching to the static pool.
+    add_executable(benchtool_threads
+        src/benchtool_threads/main.cc
+        src/benchtool_threads/utils.cc
+        src/benchtool_threads/load.cc
+        src/benchtool_threads/read.cc)
+    target_link_libraries(benchtool_threads hedgedb ${MALLOC})
 
-# sst tests (flush memtable → on-disk SST → lookup, with disk reload coverage)
-add_executable(sst_test test/sst_test.cc)
-target_link_libraries(sst_test hedgedb gtest gtest_main)
+    # sst tests (flush memtable → on-disk SST → lookup, with disk reload coverage)
+    add_executable(sst_test test/sst_test.cc)
+    target_link_libraries(sst_test hedgedb gtest gtest_main)
 
-# file_reader2 tests
-add_executable(file_reader2_test test/file_reader2_test.cc)
-target_link_libraries(file_reader2_test hedgedb gtest gtest_main)
+    # file_reader2 tests
+    add_executable(file_reader2_test test/file_reader2_test.cc)
+    target_link_libraries(file_reader2_test hedgedb gtest gtest_main)
 
-# database tests
-add_executable(database_test test/database_test.cc)
-target_link_libraries(database_test hedgedb gtest gtest_main tcmalloc tbb)
+    # database tests
+    add_executable(database_test test/database_test.cc)
+    target_link_libraries(database_test hedgedb gtest gtest_main tcmalloc tbb)
 
-# version history test
-add_executable(version_history_test test/version_history_test.cc)
-target_link_libraries(version_history_test hedgedb gtest gtest_main tbb)
+    # version history test
+    add_executable(version_history_test test/version_history_test.cc)
+    target_link_libraries(version_history_test hedgedb gtest gtest_main tbb)
 
-# WAL replay tests
-add_executable(wal_replay_test test/wal_replay_test.cc)
-target_link_libraries(wal_replay_test hedgedb gtest gtest_main tcmalloc)
+    # WAL replay tests
+    add_executable(wal_replay_test test/wal_replay_test.cc)
+    target_link_libraries(wal_replay_test hedgedb gtest gtest_main tcmalloc)
 
-# varint tests
-add_executable(varint_test test/varint_test.cc)
-target_link_libraries(varint_test gtest gtest_main)
+    # varint tests
+    add_executable(varint_test test/varint_test.cc)
+    target_link_libraries(varint_test gtest gtest_main)
 
-# key tests
-add_executable(key_test test/key_test.cc)
-target_link_libraries(key_test gtest gtest_main)
+    # key tests
+    add_executable(key_test test/key_test.cc)
+    target_link_libraries(key_test gtest gtest_main)
 
-# block tests
-add_executable(block_test src/db/block.cc test/block_test.cc)
-target_link_libraries(block_test gtest gtest_main)
+    # block tests
+    add_executable(block_test src/db/block.cc test/block_test.cc)
+    target_link_libraries(block_test gtest gtest_main)
 
-# page_aligned_buffer tests
-add_executable(page_aligned_buffer_test test/page_aligned_buffer_test.cc src/utils.cc)
-target_link_libraries(page_aligned_buffer_test gtest gtest_main)
+    # page_aligned_buffer tests
+    add_executable(page_aligned_buffer_test test/page_aligned_buffer_test.cc src/utils.cc)
+    target_link_libraries(page_aligned_buffer_test gtest gtest_main)
 
-# sst_stream tests
-add_executable(sst_stream_test test/sst_stream_test.cc)
-target_link_libraries(sst_stream_test hedgedb gtest gtest_main)
+    # sst_stream tests
+    add_executable(sst_stream_test test/sst_stream_test.cc)
+    target_link_libraries(sst_stream_test hedgedb gtest gtest_main)
 
-# debug test
-add_executable(index_merge test/index_merge_test.cc)
-target_link_libraries(index_merge hedgedb gtest gtest_main tcmalloc)
+    # debug test
+    add_executable(index_merge test/index_merge_test.cc)
+    target_link_libraries(index_merge hedgedb gtest gtest_main tcmalloc)
 
-# concurrent_skiplist tests
-add_executable(concurrent_skiplist_test test/concurrent_skiplist_test.cc)
-target_link_libraries(concurrent_skiplist_test gtest gtest_main atomic tcmalloc)
+    # concurrent_skiplist tests
+    add_executable(concurrent_skiplist_test test/concurrent_skiplist_test.cc)
+    target_link_libraries(concurrent_skiplist_test gtest gtest_main atomic tcmalloc)
 
-# range scan tests
-add_executable(range_scan_test test/range_scan_test.cc)
-target_link_libraries(range_scan_test hedgedb gtest gtest_main tcmalloc)
+    # range scan tests
+    add_executable(range_scan_test test/range_scan_test.cc)
+    target_link_libraries(range_scan_test hedgedb gtest gtest_main tcmalloc)
+endif()

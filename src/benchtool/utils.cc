@@ -1,12 +1,13 @@
-#include "utils.h"
-#include "db/database.h"
-#include "io/static_pool.h"
-#include "tmc/sync.hpp"
 #include <filesystem>
 #include <future>
 #include <iostream>
 #include <optional>
 #include <sys/resource.h>
+
+#include "db/database.h"
+#include "io/static_pool.h"
+#include "tmc/sync.hpp"
+#include "utils.h"
 
 namespace hedge::db
 {

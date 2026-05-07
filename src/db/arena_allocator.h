@@ -1,13 +1,12 @@
 #pragma once
 
-#include "utils.h"
-
 #include <algorithm>
 #include <cstddef>
 #include <cstdlib>
 #include <memory>
 #include <vector>
 
+#include "utils.h"
 namespace hedge::db
 {
 
