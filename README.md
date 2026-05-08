@@ -1,82 +1,93 @@
-# HedgeDB - _Built for the Hardware_
+# HedgeDB — _Built for the Hardware_
 
 <p align="center">
 <img src="resources/logo.png" width="100%">
 </p>
 
-HedgeDB is a prototype of a larger-than-memory, persisted and embeddable key-value storage, inspired by [RocksDB](https://github.com/facebook/rocksdb), optimized for modern high throughput NVME SSDs. It aims to be performance oriented with low memory footprint.
+A prototype embeddable key-value store, built on a partitioned LSM-tree, C++23
+coroutines, and `io_uring`. Larger-than-memory, persisted, tuned for modern
+NVMe SSDs and modern CPUs.
 
-**Disclaimer**: as you might expect from a prototype it was not extensively tested, nor the code can be considered production ready.
+> **Disclaimer:** HedgeDB is a prototype. It has not been extensively tested
+> and the code is not production-ready.
 
-So far it is only Linux compatible as it heavily leverage [liburing](https://github.com/axboe/liburing), amongst other Linux syscalls; also linking againts a concurrency-friendly memory allocator like [tcmalloc](https://github.com/google/tcmalloc) or [jemalloc](https://github.com/jemalloc/jemalloc) installed heavily is recommended.
+---
 
-## Features & design principles
+## Features and core design
 
-- **io_uring-native coroutine executor**: HedgeDB is built from the ground up around [liburing](https://github.com/axboe/liburing) and C++20 coroutines via the [TooManyCooks](https://github.com/tzcnt/TooManyCooks) work-stealing scheduler. Every I/O operation is a coroutine that suspends on an `io_uring` submission and resumes on its completion — no callbacks jungle, no blocking threads. Each executor thread owns its own `io_uring` ring, so submissions and completions never contend across threads. The result is a write path that reaches NVMe IOPS limits without sacrificing code readability.
+HedgeDB is what came out of asking *"how far can a single NVMe go if the
+storage engine actually tries?"*. Inspired by RocksDB, the engine targets
+write-heavy workloads with uniformly-distributed keys (UUIDs, hashes), and is
+structured around:
 
-- **Partitioned LSM tree with compaction**: The focus of HedgeDB is storing keys with uniform distribution (UUIDs or hashes prefixes). The optimizaion we leaned into is dividing the key space into `2^N` independent partitions (default N=4). Each partition maintains its own level hierarchy in isolation. Background compaction jobs on different partitions are able to fully run in parallel, with very limited shared state. This approach is comparable to sharding, but allows for more flexibility.
+- **Asynchronous execution.** `io_uring` + C++23 coroutines via [TooManyCooks](https://github.com/tzcnt/TooManyCooks),
+  a work-stealing scheduler. Every I/O is a `co_await`; no callbacks, no thread-per-request.
+- **Partitioned LSM-tree.** The key space is sharded into `2^N` independent
+  partitions (default 16). Compactions on different partitions run fully in
+  parallel.
+- **Size-tiered compaction.** Lower write amplification than leveled, with a
+  quotient filter on the read path to skip SSTs that can't contain a key.
+- **Per-thread WAL.** Each writer thread owns its own WAL file — no inode
+  contention.
+- **Direct I/O.** `O_DIRECT` everywhere on the SST path: predictable latencies
+  and transparent memory usage, avoiding IO stalls from page-cache pressure.
+- **MVCC.** Snapshot isolation over range scans.
 
-- **Size-tiered style compaction** Size-Tiered compaction is used for contained write-amplification. Quotient filter is used to limit unnecessary IOs on read path.
+---
 
-- **Per-thread write path with no hot-path contention**: Each writer thread has its own own WAL file. After the memtable reaches the configured size limit, it gets swapped (double-buffering) to an empty one and the
-task of flushing the new one gets deferred to the flusher thread-pool.
+## Performance
 
-- **Direct I/O with a managed index cache**: `O_DIRECT` is available for IO operations, bypassing the OS page cache entirely. This gives the database predictable and transparent memory usage and predictable latency, avoiding IO stalls from huge flushes.
+Performance comparison with RocksDB on a **13th Gen Intel i7-13700H**
+(6 P-cores + 4 E-cores, 32 GB DDR5 RAM) with a **Samsung 980 Pro 1TB NVMe**;
+100M records, 24-byte keys, 100-byte values:
 
-## Dependencies
+| Workload | HedgeDB | RocksDB | HedgeDB / RocksDB |
+|---|---:|---:|---:|
+| Load (100M puts)            | **3.97M ops/s** | 1.14M ops/s | **3.5×** |
+| Load + compactions drained  | **3.59M ops/s** | 1.13M ops/s | **3.2×** |
+| Read (100M random gets)     | **1.03M ops/s** | 194K ops/s  | **5.3×** |
+| Mixed 50/50 read-write      | **1.33M ops/s** | 262K ops/s  | **5.1×** |
+
+---
+
+## Quickstart
+
+Linux only. See [Getting started](githubio/getting-started.md) for full
+prerequisites and the larger API surface.
+
+### Dependencies
 
 - Linux kernel `6.14.0-27-generic` or greater
+- `gcc 13.3.0` or greater (C++23)
+- [`liburing`](https://github.com/axboe/liburing) `2.14`
 
-- `gcc 13.3.0` or greater
+*Optional but highly recommended:*
 
-- `liburing 2.14` (you can launch `install_liburing.sh`)
+- [`hwloc`](https://www.open-mpi.org/projects/hwloc/) — `sudo apt install hwloc`
+- A concurrency-friendly allocator: [`jemalloc`](https://github.com/jemalloc/jemalloc) or [`tcmalloc`](https://github.com/google/tcmalloc)
 
-_Optional but highly recommended_
-
-- `hwloc`
-- A concurrent-friendly memory allocator (like `jemalloc` or `tcmalloc`)
-
-## What's missing
-
-If it wasn't clear enough already, HedgeDB is a **prototype**, not a production database, and many important features aren't here yet. Here's what's missing:
-
-- **Full-fledged crash recovery**: WAL replay works, but edge cases (partial writes, corrupted files) aren't handled.
-- **Battle-testing & hardening**: never tested in the wild with real-world workloads or long execution periods. Some edge cases are not handled.
-- **Cross-platform support**: it's Linux-only (`io_uring` dependency).
-- **Block compression**: many workloads can get meaningful size reduction from lossless compression algorithms, leading to noticeably lower space and write amplification.
-- **Batched operations**: batched writes and reads to amortize overheads.
-- Many small improvements I did not have time to apply.
-- **Column family support**: no explicit column family support.
-- **Large values support**: if `key.size() + value.size()` exceeds the index block page size, compaction will break.
-
-**Possible future Features**:
-
-- **Hyper-Clock Cache**: an approximate LRU cache that trades "least-recently-referenced" counting precision for a simpler and faster algorithm.
-- **Key-value separation**: SSTs would store only keys and pointers, with values in separate append-only `.vlog` files, dramatically reducing value write amplification during compaction (also depends on the GC implementation).
-- Improved handling of non-uniform key distributions (or implementing trivial moves).
-- **Rate-limiting**: stall writes at a specific rate if the SSTs in L0 exceed a soft threshold; this smooths long-tail latencies.
-
-## Benchmarks
-
-`benchtool` is the unified benchmark CLI. Build it with the regular cmake build, then:
+### Build
 
 ```bash
-ulimit -n 1048576
+# install dependencies (liburing is mandatory; hwloc/jemalloc are recommended)
+sudo sh install_liburing.sh
+sudo apt install hwloc
 
-# write 10M keys with 100-byte values into /tmp/bench_db
-./build/benchtool -m write -n 10000000 -v 100 -p /tmp/bench_db
-
-# read them back (loads existing db at path)
-./build/benchtool -m read  -n 10000000 -v 100 -p /tmp/bench_db
-
-# 50/50 mixed read+write
-./build/benchtool -m rw    -n 10000000 -v 100 -p /tmp/bench_db
-
-# range scans (small / medium / large tiers)
-./build/benchtool -m range -n 10000 -p /tmp/bench_db
+# configure & build
+cmake . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_JEMALLOC=1 -Wno-dev
+cmake --build build -j$(nproc)
 ```
 
-Flags:
+### Try it with `benchtool`
+
+```bash
+# Bump the FD limit (HedgeDB keeps many SST files open)
+ulimit -n 1048576
+
+# Write 1M keys with 100-byte values, then read them back
+./build/benchtool -m write -n 1000000 -v 100 -p /tmp/hedge_demo
+./build/benchtool -m read  -n 1000000 -v 100 -p /tmp/hedge_demo
+```
 
 | Flag | Long form | Default | Description |
 |------|-----------|---------|-------------|
@@ -85,93 +96,99 @@ Flags:
 | `-m` | `--mode` | `write` | `write` \| `read` \| `rw` \| `range` |
 | `-p` | `--path` | `/tmp/bench_db` | database directory |
 
-`read`, `rw`, and `range` modes load an existing database from `--path`; if none is found they exit with an error.
+### Hello world from the API
 
-### Sample output (24 byte keys, 100 byte values, 100M records, i7-13700H + Samsung 980 Pro 1TB NVMe)
+A minimal put-then-get-then-print (see `examples/hello_world.cc`):
 
-Load:
+```cpp
+#include <filesystem>
+#include <iostream>
+#include <string_view>
+#include <vector>
 
-```bash
-$ ./build/benchtool -n 100000000 -m load
-=== benchtool ===
-mode=load  n=100000000  vsize=100  path="/tmp/bench_db"
+#include "db/database.h"
+#include "io/static_pool.h"
+#include "tmc/sync.hpp"
+#include "tmc/task.hpp"
 
---- load ---
-Duration:   34023.68 ms
-Throughput: 2939129 ops/s
+tmc::task<void> run(std::shared_ptr<hedge::db::database> db)
+{
+    hedge::key_t k{"test_key"};
+    std::string v{"Hello, world!"};
+
+    if(auto s = co_await db->put_async(k, std::as_bytes(std::span{v})); !s)
+    {
+        std::cerr << "put failed: " << s.error().to_string() << "\n";
+        co_return;
+    }
+
+    auto maybe_value = co_await db->get_async(k);
+    if(!maybe_value)
+    {
+        std::cerr << "get failed: " << maybe_value.error().to_string() << "\n";
+        co_return;
+    }
+
+    const auto& bytes = maybe_value.value();
+    std::string_view readback(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    std::cout << "read back: " << readback << "\n";
+}
+
+int main()
+{
+    const std::filesystem::path db_path = "/tmp/examples_db";
+    if(std::filesystem::exists(db_path))
+        std::filesystem::remove_all(db_path);
+
+    hedge::io::static_pool::instance()->init(hedge::io::executor_config{
+        .name        = "examples-pool",
+        .queue_depth = 16,
+        .n_threads   = 4,
+    });
+
+    auto maybe_db = hedge::db::database::make_new(db_path, hedge::db::db_config{});
+    if(!maybe_db)
+    {
+        std::cerr << "failed to create database: " << maybe_db.error().to_string() << "\n";
+        return 1;
+    }
+
+    std::shared_ptr<hedge::db::database> db = std::move(maybe_db.value());
+    tmc::post_waitable(*hedge::io::static_pool::instance(), run(db)).wait();
+
+    db.reset();
+    hedge::io::static_pool::instance()->shutdown();
+}
 ```
 
-Readback:
+---
 
-```bash
-$ ./build/benchtool -n 100000000 -m read
-=== benchtool ===
-mode=read  n=100000000  vsize=100  path="/tmp/bench_db"
-[memtable] WAL replay: replayed 141808 entries from 12 WAL files
+## What's missing
 
---- read ---
-Duration:   121941.03 ms
-Throughput: 820068 ops/s
-```
+HedgeDB is a **prototype**. Things that aren't here yet:
 
-Mixed 50 writes/50 reads:
+- **Full-fledged crash recovery** — WAL replay works, but partial-write and
+  corrupted-file edge cases aren't handled.
+- **Battle-testing & hardening** — never run against real-world workloads
+  or for long execution periods.
+- **Cross-platform support** — Linux only (`io_uring`).
+- **Block compression** — many workloads would see meaningful size, space,
+  and write-amplification reduction from lossless compression.
+- **Batched operations** — no batch put/get APIs to amortize call overhead.
+- **Column families** — single keyspace per database.
+- **Large values support** — if `key.size() + value.size()` exceeds the
+  index-block page size (a bit less than 4 KB), the flush will break.
 
-```bash
-$ ./build/benchtool -n 100000000 -m rw
-=== benchtool ===
-mode=rw  n=100000000  vsize=100  path="/tmp/bench_db"
-[memtable] WAL replay: replayed 141808 entries from 12 WAL files
+## On the wishlist
 
---- rw mixed ---
-Duration:   75104.25 ms
-Throughput: 1331482 ops/s
-```
+- **Hyper-Clock Cache** — approximate LRU cache that trades counting precision
+  for a faster algorithm — works well with Direct I/O.
+- **Key-value separation** — SSTs would store keys + pointers, with values in
+  separate append-only `.vlog` files; dramatically reduces value
+  write-amplification during compaction (paired with a GC story).
+- **Rate-limiting** — soft-stall writes when L0 SSTs cross a threshold,
+  smoothing long-tail latencies due to compaction backlog.
 
-To summarize, running on a `13th Gen Intel(R) Core(TM) i7-13700H` with 20 threads, 32GB of ram and a `SAMSUNG 980 Pro 1TB`
+---
 
-- **2939K** write/s
-- **~820K** read/s
-- **~1331K** ops/s
-
-For comparison, here's a `fio` 30-seconds `randread` run (12 jobs) on my machine: it measures
-**866k IOPS**. HedgeDB almost gets 100% efficiency.
-
-```bash
-$ fio --name=randread     --filename=testfile     --rw=randread     --bs=4k     --iodepth=64     --numjobs=12     --direct=1     --size=20G     --time_based     --runtime=120s     --ioengine=io_uring --group_reporting
-randread: (g=0): rw=randread, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=io_uring, iodepth=64
-...
-fio-3.36
-Starting 12 processes
-randread: Laying out IO file (1 file / 20480MiB)
-Jobs: 12 (f=12): [r(12)][100.0%][r=4242MiB/s][r=1086k IOPS][eta 00m:00s]
-randread: (groupid=0, jobs=12): err= 0: pid=832213: Sun Apr 19 21:38:49 2026
-  read: IOPS=866k, BW=3382MiB/s (3546MB/s)(396GiB/120001msec)
-    slat (nsec): min=1211, max=27198k, avg=10424.90, stdev=54713.72
-    clat (usec): min=14, max=48346, avg=871.67, stdev=554.87
-     lat (usec): min=48, max=48349, avg=882.09, stdev=558.72
-    clat percentiles (usec):
-     |  1.00th=[  289],  5.00th=[  537], 10.00th=[  611], 20.00th=[  676],
-     | 30.00th=[  725], 40.00th=[  775], 50.00th=[  807], 60.00th=[  840],
-     | 70.00th=[  881], 80.00th=[  922], 90.00th=[ 1004], 95.00th=[ 1221],
-     | 99.00th=[ 3687], 99.50th=[ 4228], 99.90th=[ 7570], 99.95th=[ 9372],
-     | 99.99th=[13566]
-   bw (  MiB/s): min= 2492, max= 4344, per=100.00%, avg=3397.51, stdev=36.02, samples=2856
-   iops        : min=638187, max=1112272, avg=869760.18, stdev=9221.09, samples=2856
-  lat (usec)   : 20=0.01%, 50=0.01%, 100=0.02%, 250=0.69%, 500=3.16%
-  lat (usec)   : 750=31.23%, 1000=54.50%
-  lat (msec)   : 2=8.15%, 4=1.68%, 10=0.54%, 20=0.04%, 50=0.01%
-  cpu          : usr=13.47%, sys=67.12%, ctx=10814654, majf=0, minf=911
-  IO depths    : 1=0.1%, 2=0.1%, 4=0.1%, 8=0.1%, 16=0.1%, 32=0.1%, >=64=100.0%
-     submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
-     complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.1%, >=64=0.0%
-     issued rwts: total=103881968,0,0,0 short=0,0,0,0 dropped=0,0,0,0
-     latency   : target=0, window=0, percentile=100.00%, depth=64
-
-Run status group 0 (all jobs):
-   READ: bw=3382MiB/s (3546MB/s), 3382MiB/s-3382MiB/s (3546MB/s-3546MB/s), io=396GiB (426GB), run=120001-120001msec
-
-Disk stats (read/write):
-    dm-1: ios=103738927/725, sectors=829911416/8168, merge=0/0, ticks=38362185/886, in_queue=38363088, util=100.00%, aggrios=103881973/730, aggsectors=831055784/8168, aggrmerge=0/0, aggrticks=38361092/887, aggrin_queue=38361996, aggrutil=100.00%
-    dm-0: ios=103881973/730, sectors=831055784/8168, merge=0/0, ticks=38361092/887, in_queue=38361996, util=100.00%, aggrios=103881973/590, aggsectors=831055784/8168, aggrmerge=0/140, aggrticks=23677369/257, aggrin_queue=23677701, aggrutil=89.92%
-  nvme0n1: ios=103881973/590, sectors=831055784/8168, merge=0/140, ticks=23677369/257, in_queue=23677701, util=89.92%
-```
+Built and maintained by [Federico Vaccaro](https://github.com/fede-vaccaro).
