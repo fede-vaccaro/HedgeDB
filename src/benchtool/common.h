@@ -33,7 +33,7 @@ namespace hedge::db
 
         latency_histogram() : buckets(LATENCY_HISTOGRAM_BUCKETS)
         {
-            for (auto& bucket : buckets)
+            for(auto& bucket : buckets)
                 bucket.store(0, std::memory_order_relaxed);
         }
 
@@ -43,11 +43,11 @@ namespace hedge::db
             total_ns.fetch_add(ns, std::memory_order_relaxed);
 
             uint64_t old_min = min_ns.load(std::memory_order_relaxed);
-            while (ns < old_min && !min_ns.compare_exchange_weak(old_min, ns, std::memory_order_relaxed))
+            while(ns < old_min && !min_ns.compare_exchange_weak(old_min, ns, std::memory_order_relaxed))
                 ;
 
             uint64_t old_max = max_ns.load(std::memory_order_relaxed);
-            while (ns > old_max && !max_ns.compare_exchange_weak(old_max, ns, std::memory_order_relaxed))
+            while(ns > old_max && !max_ns.compare_exchange_weak(old_max, ns, std::memory_order_relaxed))
                 ;
 
             size_t bucket_idx = std::min<size_t>(ns / LATENCY_BUCKET_SIZE_NS, LATENCY_HISTOGRAM_BUCKETS - 1);
@@ -57,12 +57,12 @@ namespace hedge::db
         void print_percentiles(const char* label) const
         {
             uint64_t cnt = count.load(std::memory_order_relaxed);
-            if (cnt == 0)
+            if(cnt == 0)
                 return;
 
             std::vector<uint64_t> cumulative(LATENCY_HISTOGRAM_BUCKETS);
             uint64_t running = 0;
-            for (size_t i = 0; i < LATENCY_HISTOGRAM_BUCKETS; ++i)
+            for(size_t i = 0; i < LATENCY_HISTOGRAM_BUCKETS; ++i)
             {
                 running += buckets[i].load(std::memory_order_relaxed);
                 cumulative[i] = running;
@@ -102,7 +102,7 @@ namespace hedge::db
         std::filesystem::path db_path = "/tmp/bench_db";
         bool measure_latency = false;
         size_t num_threads = NUM_WORKERS;
-        size_t num_bg_threads = 0;
+        std::optional<size_t> num_bg_threads;
     };
 
 } // namespace hedge::db

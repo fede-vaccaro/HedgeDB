@@ -11,7 +11,7 @@
 
 namespace hedge::db
 {
-    db_config make_db_config(size_t num_bg_threads)
+    db_config make_db_config(std::optional<size_t> num_bg_threads)
     {
         db_config cfg;
         cfg.auto_compaction = true;
@@ -21,7 +21,6 @@ namespace hedge::db
         cfg.bucket_ratio = 1.50;
         cfg.use_direct_io = false;
         cfg.index_page_clock_cache_size_bytes = 0;
-        cfg.index_point_cache_size_bytes = 0;
         cfg.num_background_workers = num_bg_threads;
         cfg.max_pending_flushes = 8;
         cfg.min_merge_width = 8;

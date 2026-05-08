@@ -7,6 +7,8 @@
 
 namespace hedge::io
 {
+    std::atomic_bool io_executor::VERBOSE = false;
+
     io_executor::io_executor(const executor_config& cfg)
     {
         this->init(cfg);
@@ -19,7 +21,11 @@ namespace hedge::io
             return *this;
 
 #ifdef TMC_USE_HWLOC
-        std::cout << "Executor auto_detect is " << (cfg.auto_detect ? "enabled" : "disabled") << "\n";
+        if(io_executor::VERBOSE)
+        {
+            std::cout << "Executor auto_detect is " << (cfg.auto_detect ? "enabled" : "disabled") << "\n";
+        }
+
         tmc::topology::topology_filter filter{};
         if(cfg.auto_detect)
             filter = this->_hwloc_partition_filter(cfg);
@@ -47,6 +53,7 @@ namespace hedge::io
         this->_queue_depth = cfg.queue_depth;
         this->name_prefix = cfg.name;
 
+        assert(this->_n_threads > 0);
         this->_ctxs.resize(this->_n_threads);
 
         this->_ex.set_thread_count(this->num_threads())
@@ -122,15 +129,20 @@ namespace hedge::io
         auto filter = tmc::topology::topology_filter{};
         auto topology = tmc::topology::query();
 
-        std::cout << "Detected hybrid CPU topology: " << topology.core_count() << " cores, "
-                  << topology.group_count() << " groups, " << topology.numa_count() << " NUMA nodes\n";
+        if(io_executor::VERBOSE)
+        {
+            std::cout << "Detected hybrid CPU topology: "
+                      << topology.core_count() << " cores, "
+                      << topology.group_count() << " groups, "
+                      << topology.numa_count() << " NUMA nodes\n";
+        }
 
         auto resolve_kind_to_group = [&topology](tmc::topology::cpu_kind::value kind)
         {
             std::vector<size_t> groups;
             size_t count{0};
             for(const auto& group : topology.groups | std::views::filter([kind](const tmc::topology::core_group& g)
-                                                                         { return g.cpu_kind == kind; }))
+                                                                         { return (g.cpu_kind & kind) != 0; }))
             {
                 groups.emplace_back(group.index);
                 count += group.core_indexes.size() * group.smt_level;
@@ -155,20 +167,31 @@ namespace hedge::io
 
         auto [groups, count] = resolve_kind_to_group(kind);
         filter.set_group_indexes(groups);
+
+        if(cfg.n_threads.has_value() && cfg.n_threads.value() < count)
+            count = cfg.n_threads.value();
+
         this->_n_threads = count;
+        assert(this->_n_threads > 0);
 
         // debug
-        std::cout << "Allowed groups for executor type " << static_cast<int>(cfg.type) << ": ";
-        for(size_t group_index : groups)
-            std::cout << group_index << " ";
-        std::cout << "\nTotal threads allowed for this executor: " << count << "\n";
+        if(io_executor::VERBOSE)
+        {
+            std::cout << "Allowed groups for executor type " << to_string(cfg.type) << ": ";
+            for(size_t group_index : groups)
+                std::cout << group_index << " ";
+            std::cout << "\nTotal threads allowed for this executor: " << count << "\n";
+        }
         return filter;
     }
 
     // This function creates a topology filter for normal CPUs (i.e. a single type of core) by splitting the cores between foreground and background executors.
     [[nodiscard]] tmc::topology::topology_filter io_executor::_hwloc_partition_filter_normal_cpu(const executor_config& cfg)
     {
-        std::cout << "Detected normal CPU topology. Total cores: " << tmc::topology::query().core_count() << "\n";
+        if(io_executor::VERBOSE)
+        {
+            std::cout << "Detected normal CPU topology. Total cores: " << tmc::topology::query().core_count() << "\n";
+        }
 
         auto filter = tmc::topology::topology_filter{};
         auto topology = tmc::topology::query();
@@ -187,11 +210,13 @@ namespace hedge::io
                 filter.set_core_indexes(core_indexes);
                 this->_n_threads = core_indexes.size();
 
-                // debug
-                std::cout << "Allowed cores for foreground executor: ";
-                for(size_t core_index : core_indexes)
-                    std::cout << core_index << " ";
-                std::cout << "\nTotal threads allowed for foreground executor: " << core_indexes.size() << "\n";
+                if(io_executor::VERBOSE)
+                {
+                    std::cout << "Allowed cores for foreground executor: ";
+                    for(size_t core_index : core_indexes)
+                        std::cout << core_index << " ";
+                    std::cout << "\nTotal threads allowed for foreground executor: " << core_indexes.size() << "\n";
+                }
                 break;
             }
             case executor_type::BACKGROUND:
@@ -206,10 +231,13 @@ namespace hedge::io
                 this->_n_threads = core_indexes.size();
 
                 // debug
-                std::cout << "Allowed cores for background executor: ";
-                for(size_t core_index : core_indexes)
-                    std::cout << core_index << " ";
-                std::cout << "\nTotal threads allowed for background executor: " << core_indexes.size() << "\n";
+                if(io_executor::VERBOSE)
+                {
+                    std::cout << "Allowed cores for background executor: ";
+                    for(size_t core_index : core_indexes)
+                        std::cout << core_index << " ";
+                    std::cout << "\nTotal threads allowed for background executor: " << core_indexes.size() << "\n";
+                }
                 break;
             }
             case executor_type::GENERAL_PURPOSE:
@@ -234,5 +262,20 @@ namespace hedge::io
                    : this->_hwloc_partition_filter_normal_cpu(cfg);
     }
 #endif
+
+    std::string to_string(executor_type type)
+    {
+        switch(type)
+        {
+            case executor_type::FOREGROUND:
+                return "FOREGROUND";
+            case executor_type::BACKGROUND:
+                return "BACKGROUND";
+            case executor_type::GENERAL_PURPOSE:
+                return "GENERAL_PURPOSE";
+            default:
+                return "UNKNOWN";
+        }
+    }
 
 } // namespace hedge::io

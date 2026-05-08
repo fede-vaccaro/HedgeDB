@@ -26,8 +26,6 @@ namespace hedge::db
     {
         /// Maximum allowed exponent for partitioning (2^16 = 65536 partitions max).
         static constexpr size_t MAX_PARTITION_EXPONENT = 16;
-        /// Minimum number of keys required in the memtable before a flush is allowed.
-        static constexpr size_t MIN_KEYS_IN_MEM_BEFORE_FLUSH = 1000;
         /// Memory budget in bytes for the memtable before a flush is triggered.
         size_t memtable_budget_bytes = 64 * MiB;
         /// Exponent determining the number of partitions (2^num_partition_exponent). Affects index file organization.
@@ -49,24 +47,23 @@ namespace hedge::db
         /// If true, use O_DIRECT flag for WAL files I/O to bypass page cache.
         bool use_odirect_for_wal = true; // NOT implemented
         /// Use 0 no cache is desired; the cache size in bytes otherwise
-        size_t index_page_clock_cache_size_bytes = 3UL * GiB;
-        /// Experimental; it's like a giant memtable; do not use
-        size_t index_point_cache_size_bytes = 0;
+        size_t index_page_clock_cache_size_bytes = 0;
         /// Number of background workers to be used for compaction. std::nullopt means "use static pool", 0 means "auto detect".
         std::optional<size_t> num_background_workers = std::nullopt;
         /// Maximum number of concurrent memtable flushes allowed before backpressure
         size_t max_pending_flushes = 8;
-
+        /// Maximum number of levels in the LSM tree.
         size_t max_num_levels = 40;
-
+        /// Minimum number of sorted_index files in the same level needed to trigger a merge. 
+        /// Higher means less frequent compactions (lower write amplification) but higher read amplification.
         size_t min_merge_width = 4;
-
+        /// Maximum number of sorted_index files in the same level allowed before a merge is forced, regardless of their size ratio.
         size_t max_merge_width = 16;
-
         /// Per-partition L0 SST count threshold above which writes are blocked via backpressure.
         /// The effective threshold is multiplied by the total number of partitions.
         std::optional<size_t> ssts_in_l0_block_write_threshold = 40;
-
+        /// If true, the key-values will not be written to the WAL and will only exist in the memtable until flushed. 
+        /// This reduces write amplification but increases risk of data loss on crash.
         bool disable_wal = false;
     };
 
@@ -126,7 +123,7 @@ namespace hedge::db
          * @param executor The I/O executor context.
          * @return An async task resolving to a status indicating success or failure.
          */
-        tmc::task<hedge::status> put_async(const key_t& key, const byte_buffer_t& value);
+        tmc::task<hedge::status> put_async(const key_t& key, const std::span<const std::byte>& value);
 
         /**
          * @brief Asynchronously marks a key as deleted.

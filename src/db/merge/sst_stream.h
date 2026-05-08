@@ -225,8 +225,13 @@ namespace hedge::db
         {
             this->_it = lower ? this->_accessor.lower_bound(memtable_entry{*lower, std::numeric_limits<uint64_t>::max(), {}})
                               : this->_accessor.begin();
-            this->_end = upper ? this->_accessor.lower_bound(memtable_entry{*upper, std::numeric_limits<uint64_t>::max(), {}})
-                               : this->_accessor.end();
+
+            auto end = upper ? this->_accessor.lower_bound(memtable_entry{*upper, std::numeric_limits<uint64_t>::max(), {}})
+                             : this->_accessor.end();
+            if(end != this->_accessor.end())
+                end++;
+            this->_end = end;
+
             this->_skip_invisible();
         }
 

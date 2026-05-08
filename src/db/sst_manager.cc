@@ -155,14 +155,11 @@ namespace hedge::db
         uint64_t key_hash = xxh64::hash((const char*)key.data(), key.size(), sst::QF_SEED);
 
         std::optional<value_t> value_opt;
-        size_t ssts_visited = 0;
 
         for(const auto& [level_idx, level] : partition | std::views::enumerate)
         {
             for(const auto& [sst_index, sst_ptr] : level | std::views::enumerate | std::views::reverse)
             {
-                ++ssts_visited;
-
                 if(!sst_ptr->probe_filter(key_hash))
                     continue;
 
@@ -514,7 +511,7 @@ namespace hedge::db
     void sst_manager::launch_compaction_tasks(
         const partition_snapshot_map_t& index_snapshot,
         sst_manager::compaction_buckets_per_partition_t&& buckets_per_partition,
-        size_t min_merge_width,
+        size_t /*min_merge_width*/,
         size_t /*max_merge_width*/)
     {
         auto run_tasks_in_sequence = [](std::vector<tmc::task<void>> tasks) -> tmc::task<void>

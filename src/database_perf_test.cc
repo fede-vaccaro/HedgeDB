@@ -144,7 +144,6 @@ int main(int argc, char* argv[])
     config.bucket_ratio = 1.50;
     config.use_direct_io = true;
     config.index_page_clock_cache_size_bytes = 0;
-    config.index_point_cache_size_bytes = 0;
     config.num_background_workers = 6;
     config.max_pending_flushes = 8;
     config.min_merge_width = 4;

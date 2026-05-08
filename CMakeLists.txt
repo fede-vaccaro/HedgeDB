@@ -168,6 +168,10 @@ add_executable(benchtool
     src/benchtool/range.cc)
 target_link_libraries(benchtool hedgedb ${MALLOC})
 
+# examples — getting-started API smoke test
+add_executable(examples examples/hello_world.cc)
+target_link_libraries(examples hedgedb ${MALLOC})
+
 # memtable_perf_test — benchmarks executor + memtable::put() (adds rw_sync + value arenas)
 add_executable(memtable_perf_test src/memtable_perf_test.cc)
 target_link_libraries(memtable_perf_test hedgedb)

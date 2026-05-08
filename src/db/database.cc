@@ -24,6 +24,8 @@ namespace hedge::db
         if(config.num_partition_exponent > db_config::MAX_PARTITION_EXPONENT)
             return hedge::error("num_partition_exponent must be <= " + std::to_string(db_config::MAX_PARTITION_EXPONENT));
 
+        // TODO: add more config validation
+
         return hedge::ok();
     }
 
@@ -57,16 +59,14 @@ namespace hedge::db
         db->_base_path = base_path;
         db->_partitions_path = base_path / "partitions";
         db->_config = config;
-        db->_bg_pool = config.num_background_workers.has_value()
-                           ? std::make_shared<io::io_executor>(
-                                 io::executor_config{
-                                     .name = "bg",
-                                     .queue_depth = 32,
-                                     .type = io::executor_type::BACKGROUND,
-                                     .n_threads = config.num_background_workers.value() == 0 ? std::nullopt : config.num_background_workers,
-                                     .auto_detect = true,
-                                 })
-                           : io::static_pool::instance();
+        db->_bg_pool = std::make_shared<io::io_executor>(
+            io::executor_config{
+                .name = "bg-thread",
+                .queue_depth = 32,
+                .type = io::executor_type::BACKGROUND,
+                .n_threads = config.num_background_workers,
+                .auto_detect = true,
+            });
 
         if(auto status = _validate_config(config); !status)
             return status.error();
@@ -115,16 +115,14 @@ namespace hedge::db
         db->_base_path = base_path;
         db->_partitions_path = base_path / "partitions";
         db->_config = config;
-        db->_bg_pool = config.num_background_workers.has_value()
-                           ? std::make_shared<io::io_executor>(
-                                 io::executor_config{
-                                     .name = "bg",
-                                     .queue_depth = 32,
-                                     .type = io::executor_type::BACKGROUND,
-                                     .n_threads = config.num_background_workers.value() == 0 ? std::nullopt : config.num_background_workers,
-                                     .auto_detect = true,
-                                 })
-                           : io::static_pool::instance();
+        db->_bg_pool = std::make_shared<io::io_executor>(
+            io::executor_config{
+                .name = "bg-thread",
+                .queue_depth = 32,
+                .type = io::executor_type::BACKGROUND,
+                .n_threads = config.num_background_workers,
+                .auto_detect = true,
+            });
 
         if(auto status = _validate_config(config); !status)
             return status.error();
@@ -174,7 +172,7 @@ namespace hedge::db
         return db;
     }
 
-    tmc::task<hedge::status> database::put_async(const key_t& key, const byte_buffer_t& value)
+    tmc::task<hedge::status> database::put_async(const key_t& key, const std::span<const std::byte>& value)
     {
         co_return co_await this->_memtable->put_async(key, value, hedge::value_type::IN_PLACE_VALUE);
     }

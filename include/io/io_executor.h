@@ -16,13 +16,21 @@ namespace hedge::io
         GENERAL_PURPOSE
     };
 
+    std::string to_string(executor_type type);
+
     struct executor_config
     {
+#ifdef TMC_USE_HWLOC
+        static constexpr bool AUTO_DETECT_DEFAULT{true};
+#else
+        static constexpr bool AUTO_DETECT_DEFAULT{false};
+#endif
+
         std::string name;
         size_t queue_depth{8};
         executor_type type{executor_type::GENERAL_PURPOSE};
-        std::optional<size_t> n_threads{std::nullopt}; // auto-detect by default (hwloc needed)
-        bool auto_detect{true};
+        std::optional<size_t> n_threads{std::nullopt};
+        bool auto_detect{AUTO_DETECT_DEFAULT};
     };
     class io_executor
     {
@@ -36,6 +44,8 @@ namespace hedge::io
         std::string name_prefix;
 
     public:
+        static std::atomic_bool VERBOSE;
+
         explicit io_executor(const executor_config& cfg);
 
         io_executor() = default;
@@ -64,8 +74,8 @@ namespace hedge::io
 
     private:
 #ifdef TMC_USE_HWLOC
-        [[nodiscard]] tmc::topology::topology_filter _hwloc_partition_filter_normal_cpu(const executor_config& cfg);
         [[nodiscard]] tmc::topology::topology_filter _hwloc_partition_filter_hybrid_cpu(const executor_config& cfg);
+        [[nodiscard]] tmc::topology::topology_filter _hwloc_partition_filter_normal_cpu(const executor_config& cfg);
         [[nodiscard]] tmc::topology::topology_filter _hwloc_partition_filter(const executor_config& cfg);
 #endif
     };

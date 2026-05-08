@@ -74,6 +74,8 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    io::io_executor::VERBOSE = true;
+
     io::static_pool::instance()->init(
         io::executor_config{
             .name = "bench_pool",
@@ -91,7 +93,7 @@ int main(int argc, char* argv[])
               << "  path=" << cfg.db_path
               << "  latency=" << (cfg.measure_latency ? "enabled" : "disabled")
               << "  threads=" << cfg.num_threads
-              << "  bg_threads=" << cfg.num_bg_threads
+              << "  bg_threads=" << cfg.num_bg_threads.value_or(0)
               << "\n";
 
     expected<std::shared_ptr<database>> maybe_db = open_db(cfg);

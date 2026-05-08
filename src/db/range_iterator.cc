@@ -106,10 +106,19 @@ namespace hedge::db
     {
         auto seq = this->_memtable_snapshot.seq_nr;
         if(this->_memtable_snapshot.curr)
-            this->_mem_cursors.emplace_back(*this->_memtable_snapshot.curr->ptr(), this->_lower, this->_upper, std::numeric_limits<uint64_t>::max(), seq);
+            this->_mem_cursors.emplace_back(
+                *this->_memtable_snapshot.curr->ptr(),
+                this->_lower,
+                this->_upper,
+                std::numeric_limits<uint64_t>::max(),
+                seq);
 
         for(auto& [epoch, table_ptr] : this->_memtable_snapshot.pending_flushes)
-            this->_mem_cursors.emplace_back(*table_ptr->ptr(), this->_lower, this->_upper, epoch);
+            this->_mem_cursors.emplace_back(
+                *table_ptr->ptr(),
+                this->_lower,
+                this->_upper,
+                epoch);
 
         this->_heap.reserve(this->_ssts.size() + this->_mem_cursors.size());
     }
@@ -179,7 +188,7 @@ namespace hedge::db
         if(this->_lower && item.key < *this->_lower)
             return hedge::error("", errc::SKIP);
 
-        if(this->_upper && *this->_upper < item.key)
+        if(this->_upper && item.key > *this->_upper)
         {
             this->_exhausted = true;
             return hedge::error("End of scan", errc::END_OF_SCAN);
