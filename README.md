@@ -1,10 +1,10 @@
 # HedgeDB — _Built for the Hardware_
 
 <p align="center">
-<img src="resources/logo.png" width="100%">
+<img src="resources/logo_alpha.png" width="100%">
 </p>
 
-A prototype embeddable key-value store, built on a partitioned LSM-tree, C++23
+A prototype embeddable key-value store, built on a partitioned LSM-tree, C++20
 coroutines, and `io_uring`. Larger-than-memory, persisted, tuned for modern
 NVMe SSDs and modern CPUs.
 
@@ -20,7 +20,7 @@ storage engine actually tries?"*. Inspired by RocksDB, the engine targets
 write-heavy workloads with uniformly-distributed keys (UUIDs, hashes), and is
 structured around:
 
-- **Asynchronous execution.** `io_uring` + C++23 coroutines via [TooManyCooks](https://github.com/tzcnt/TooManyCooks),
+- **Asynchronous execution.** `io_uring` + C++20 coroutines via [TooManyCooks](https://github.com/tzcnt/TooManyCooks),
   a work-stealing scheduler. Every I/O is a `co_await`; no callbacks, no thread-per-request.
 - **Partitioned LSM-tree.** The key space is sharded into `2^N` independent
   partitions (default 16). Compactions on different partitions run fully in
@@ -57,9 +57,10 @@ prerequisites and the larger API surface.
 
 ### Dependencies
 
-- Linux kernel `6.14.0-27-generic` or greater
-- `gcc 13.3.0` or greater (C++23)
+- Linux kernel `6` or later
+- `gcc 13` or later (C++20)
 - [`liburing`](https://github.com/axboe/liburing) `2.14`
+- Other dependencies are managed via CMake
 
 *Optional but highly recommended:*
 
