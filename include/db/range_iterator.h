@@ -8,10 +8,10 @@
 
 #include <error.hpp>
 
-#include "memtable.h"
-#include "merge/merge_utils.h"
-#include "merge/sst_stream.h"
-#include "sst.h"
+#include "db/memtable.h"
+#include "db/merge/merge_utils.h"
+#include "db/merge/sst_stream.h"
+#include "db/sst.h"
 #include "tmc/task.hpp"
 #include "types.h"
 

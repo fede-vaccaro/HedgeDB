@@ -161,6 +161,20 @@ int main()
 }
 ```
 
+### Run tests
+
+```bash
+# Increase file descriptors limit
+ulimit -n 1048576
+
+# Build tests
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=1 -Wno-dev 
+cmake --build build -j$(nproc)
+
+# Run tests 
+ctest --test-dir build -V
+```
+
 ---
 
 ## What's missing

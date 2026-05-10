@@ -15,7 +15,7 @@
 
 #include "cache.h"
 #include "io/io_executor.h"
-#include "range_iterator.h"
+#include "db/range_iterator.h"
 #include "sst.h"
 #include "tmc/atomic_condvar.hpp"
 #include "tmc/channel.hpp"

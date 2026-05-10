@@ -54,7 +54,6 @@ namespace hedge
         [[nodiscard]] size_t capacity() const
         {
             return this->_capacity;
-            return this->_capacity;
         }
 
         [[nodiscard]] size_t used() const

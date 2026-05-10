@@ -34,11 +34,11 @@ namespace hedge
     // Usually used for page aligning sizes, so we require denominator to be a power of 2 for optimization
     template <typename T>
         requires std::is_integral_v<T> && std::is_unsigned_v<T>
-    constexpr T round_up(T value, T denominator)
+    constexpr T round_up(T value, T target)
     {
-        assert(std::has_single_bit(denominator) && "Denominator must be a power of 2");
+        assert(std::has_single_bit(target) && "Denominator must be a power of 2");
 
-        return (value + denominator - 1) & ~(denominator - 1);
+        return (value + target - 1) & ~(target - 1);
     }
 
     template <typename T>

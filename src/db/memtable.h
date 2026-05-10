@@ -14,10 +14,10 @@
 #include <vector>
 
 #include "arena_allocator.h"
+#include "async/rw_sync.h"
 #include "cache.h"
 #include "io/io_executor.h"
 #include "logger.h"
-#include "rw_sync.h"
 #include "single_buffer_arena_allocator.h"
 #include "skiplist.h"
 #include "sst.h"
@@ -195,7 +195,7 @@ namespace hedge::db
         // MVCC snapshot for consistent range scans
         snapshot acquire_snapshot();
 
-        hedge::status replay_wal(uint64_t skip_up_to_seq_nr = 0);
+        hedge::status replay_wal(std::optional<uint64_t> skip_up_to_seq_nr = std::nullopt);
 
     private:
         static constexpr size_t VALUE_DATA_ALIGNMENT = 16; // Deprecated, might use actual alignment (8 bytes)

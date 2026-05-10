@@ -104,7 +104,6 @@ namespace hedge::db
             cfg.bucket_ratio = 1.50;
             cfg.use_direct_io = true;
             cfg.index_page_clock_cache_size_bytes = 0;
-            cfg.index_point_cache_size_bytes = 0;
             cfg.num_background_workers = 2;
             cfg.max_pending_flushes = 4;
             cfg.min_merge_width = 2;

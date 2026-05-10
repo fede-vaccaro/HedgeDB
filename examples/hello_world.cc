@@ -1,9 +1,6 @@
-// Smoke-test: exercises the core API patterns from the getting-started guide.
-
 #include <cassert>
 #include <filesystem>
 #include <iostream>
-#include <variant>
 #include <vector>
 
 #include "db/database.h"

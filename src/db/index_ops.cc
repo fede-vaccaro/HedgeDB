@@ -10,7 +10,7 @@
 #include "db/merge/write_buffer.h"
 #include "db/quotient_filter.h"
 #include "db/skiplist.h"
-#include "generator.h"
+#include "async/generator.h"
 #include "index_ops.h"
 #include "io/io_requests.hpp"
 #include "page_aligned_buffer.h"

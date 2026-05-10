@@ -185,7 +185,10 @@ TEST_P(SstStreamTest, WriteAndReadBack)
             if(!spans_equal(read_val, exp_val_span))
                 EXPECT_TRUE(false) << "Values mismatch at index " << idx;
 
-            rb.pop_front();
+            auto s = rb.pop_front();
+            if(!s)
+                EXPECT_TRUE(false) << "Error on pop_front: " << s.error().to_string();
+
             idx++;
         }
 

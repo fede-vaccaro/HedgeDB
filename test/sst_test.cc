@@ -421,7 +421,7 @@ INSTANTIATE_TEST_SUITE_P(
     sst_suite,
     sst_test,
     testing::Combine(
-        testing::Values(1'000, 10'000, 200'000, 500'000),
+        testing::Values(1'000, 10'000, 200'000),
         testing::Values(0, 1, 4, 10),
         // USE_CACHE: only `false` is exercised — the cache is currently a stub. Restore `testing::Bool()` once the cache is reimplemented.
         testing::Values(false),

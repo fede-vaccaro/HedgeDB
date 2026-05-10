@@ -1,25 +1,19 @@
-#pragma once
-#include "tsl/robin_map.h"
-#include <atomic>
-#include <iostream>
-#include <stdexcept>
-#include <string>
-
+#include <cerrno>
 #include <chrono>
-#include <errno.h>
+#include <cstring>
 #include <linux/perf_event.h>
-#include <stdint.h>
-#include <string.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+
+// HedgeDB hardware counters utilities
 
 /*
 - To enable access to counters:
 sudo sh -c 'echo 1 >/proc/sys/kernel/perf_event_paranoid'
 sudo sh -c 'echo 0 >/proc/sys/kernel/kptr_restrict'
 
-- Disable turbo boost (0 for re-enabling): 
+- Disable turbo boost (0 for re-enabling):
 echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo
 
 - Max perf percent:
@@ -92,7 +86,7 @@ namespace hedge::prof
 
         void constexpr start() final {}
 
-        void constexpr  stop(bool /*ignore*/) final {}
+        void constexpr stop(bool /*ignore*/) final {}
         void constexpr reset() final {}
 
         [[nodiscard]] double constexpr avg() const final { return 0.0; }

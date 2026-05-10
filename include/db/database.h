@@ -10,9 +10,10 @@
 #include <sys/types.h> // POSIX types, consider if needed or include specific headers like <fcntl.h> if used
 
 #include "cache.h"
+#include "db/memtable.h"
+#include "db/range_iterator.h"
+#include "db/sst_manager.h"
 #include "io/io_executor.h"
-#include "memtable.h"
-#include "sst_manager.h"
 #include "tmc/task.hpp"
 #include "types.h"
 

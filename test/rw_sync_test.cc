@@ -1,7 +1,7 @@
 #include <memory>
 
+#include "async/rw_sync.h"
 #include <gtest/gtest.h>
-#include <rw_sync.h>
 
 namespace hedge::async
 {
@@ -12,21 +12,21 @@ namespace hedge::async
 
         std::shared_ptr<obj_t> shared_obj = std::make_shared<obj_t>(1, 42);
 
-        auto writer = shared_obj->acquire_writer(0);
+        {
+            auto writer = shared_obj->acquire_writer(0);
 
-        ASSERT_TRUE(writer);
+            ASSERT_TRUE(writer);
 
-        *writer = 42;
+            *writer = 42;
+        }
 
-        writer.~acquired_writer(); // call dtor
-
-        ASSERT_FALSE(writer);
+        bool any_writer = shared_obj->any_active_writer();
+        ASSERT_FALSE(any_writer);
 
         // After sealing, writers can no longer acquire
         shared_obj->freeze_writes();
 
-        bool any_writer = shared_obj->any_active_writer();
-
+        any_writer = shared_obj->any_active_writer();
         ASSERT_FALSE(any_writer);
 
         auto new_writer = shared_obj->acquire_writer(0);

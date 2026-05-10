@@ -13,7 +13,7 @@
 
 #include "error.hpp"
 #include "fs/fs.hpp"
-#include "generator.h"
+#include "async/generator.h"
 #include "hasher.h"
 #include "key.h"
 #include "logger.h"

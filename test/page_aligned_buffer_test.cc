@@ -265,18 +265,18 @@ namespace hedge
 
     TEST(page_aligned_buffer_test, shrink_to_fit)
     {
-        constexpr size_t element_size = sizeof(int);
-        constexpr size_t elements_per_page = PAGE_SIZE_IN_BYTES / element_size;
+        constexpr size_t element_size = sizeof(int); // 4
+        constexpr size_t elements_per_page = PAGE_SIZE_IN_BYTES / element_size; // 1024
 
         // Case 1: Capacity significantly larger than size
         {
-            page_aligned_buffer<int> buf(10, elements_per_page * 2);
-            EXPECT_EQ(buf.capacity(), elements_per_page * 2);
+            page_aligned_buffer<int> buf(10, elements_per_page * 2); // init at 2048
+            EXPECT_EQ(buf.capacity(), elements_per_page * 2); 
 
             buf.shrink_to_fit();
             
-            EXPECT_EQ(buf.size(), 10);
-            EXPECT_EQ(buf.capacity(), elements_per_page);
+            EXPECT_EQ(buf.size(), 10); 
+            EXPECT_EQ(buf.capacity(), elements_per_page); // should be resized to 1024
             EXPECT_EQ(reinterpret_cast<uintptr_t>(buf.raw_data()) % PAGE_SIZE_IN_BYTES, 0);
         }
 

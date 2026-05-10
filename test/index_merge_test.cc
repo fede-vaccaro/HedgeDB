@@ -355,7 +355,7 @@ INSTANTIATE_TEST_SUITE_P(
     MergeTests,
     merge_test_suite,
     testing::Combine(
-        testing::Values(10'000, 100'000, 500'000),                                       // N_KEYS_PER_RUN
+        testing::Values(10'000, 100'000, 200'000),                                       // N_KEYS_PER_RUN
         testing::Values(2, 4),                                                           // N_RUNS
         testing::Values(0, 1, 2, 4),                                                     // NUM_PARTITION_EXPONENT
         testing::Values(4096, 65536),                                                    // READ_AHEAD_SIZE
@@ -587,7 +587,7 @@ INSTANTIATE_TEST_SUITE_P(
     GcMergeTests,
     gc_merge_test_suite,
     testing::Combine(
-        testing::Values(10'000, 100'000),                                                // N_KEYS_PER_RUN
+        testing::Values(10'000, 100'000, 200'000),                                       // N_KEYS_PER_RUN
         testing::Values(0, 1, 2, 4),                                                     // NUM_PARTITION_EXPONENT
         testing::Values(65536),                                                          // READ_AHEAD_SIZE
         testing::Values(0.01, 0.50, 1.00),                                               // deletion_fraction

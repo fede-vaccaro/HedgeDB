@@ -11,24 +11,25 @@ namespace hedge
     // DIRECT_IO needs page aligned (4096-alignment) buffers.
     // These buffers are meant to be written to/read from file system.
     template <typename T>
+        requires(sizeof(T) < PAGE_SIZE_IN_BYTES)
     struct page_aligned_buffer
     {
     private:
         buffer_t _buf = buffer_t(nullptr, std::free);
-        size_t _size{0};
-        size_t _capacity{0};
+        size_t _size{0};     // Size expressed items count, not bytes
+        size_t _capacity{0}; // Capacity expressed in otem counts, not bytes
 
-        template <bool ZERO_MEMORY = false>
+        template <bool INIT_ZERO_MEMORY = false>
         static void _allocate_buffer(page_aligned_buffer& pab, size_t s, size_t c)
         {
-            size_t mem = hedge::round_up(c * sizeof(T), PAGE_SIZE_IN_BYTES);
+            size_t buf_size_bytes = hedge::ceil_page_align(c * sizeof(T));
 
-            pab._buf = buffer_t(static_cast<std::byte*>(std::aligned_alloc(PAGE_SIZE_IN_BYTES, mem)), std::free);
-            pab._capacity = mem / sizeof(T); // 'mem % sizeof(T) != 0' might not always hold
+            pab._buf = buffer_t(static_cast<std::byte*>(std::aligned_alloc(PAGE_SIZE_IN_BYTES, buf_size_bytes)), std::free);
+            pab._capacity = buf_size_bytes / sizeof(T); // Due to page size alignment, actual capacity might be larger than requested
             pab._size = s;
 
-            if constexpr(ZERO_MEMORY)
-                std::fill(pab._buf.get(), pab._buf.get() + mem, std::byte{0});
+            if constexpr(INIT_ZERO_MEMORY)
+                std::fill(pab._buf.get(), pab._buf.get() + buf_size_bytes, std::byte{0});
         }
 
         static void _init_buffer(page_aligned_buffer& pab)
@@ -190,7 +191,12 @@ namespace hedge
 
         void shrink_to_fit()
         {
-            if(hedge::ceil_page_align(this->_size) < this->_capacity)
+            const auto aligned_size_bytes =
+                hedge::ceil_page_align(this->_size * sizeof(T));
+
+            const auto aligned_capacity_bytes = this->_capacity * sizeof(T);
+
+            if(aligned_size_bytes < aligned_capacity_bytes)
                 page_aligned_buffer::_grow(*this, this->_size);
         }
 
@@ -219,13 +225,13 @@ namespace hedge
             ::new(this->data() + this->_size++) T{std::forward<Args>(args)...};
         }
 
-        static void _grow(page_aligned_buffer& pab, size_t new_capacity)
+        static void _grow(page_aligned_buffer& buf, size_t new_capacity)
         {
             assert(pab._size <= new_capacity);
             auto new_pab = page_aligned_buffer<T>();
-            page_aligned_buffer::_allocate_buffer(new_pab, pab.size(), new_capacity);
-            std::uninitialized_move(pab.begin(), pab.end(), new_pab.begin());
-            pab = std::move(new_pab);
+            page_aligned_buffer::_allocate_buffer(new_pab, buf.size(), new_capacity);
+            std::uninitialized_move(buf.begin(), buf.end(), new_pab.begin());
+            buf = std::move(new_pab);
         }
     };
 } // namespace hedge

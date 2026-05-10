@@ -76,9 +76,9 @@ struct NullStream
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
-#include "../src/db/skiplist/concurrent_skip_list/concurrent_skiplist.h"
+#include "db/skiplist/concurrent_skip_list/concurrent_skiplist.h"
 #pragma GCC diagnostic pop
-#include "../src/single_buffer_arena_allocator.h"
+#include "single_buffer_arena_allocator.h"
 #include "async/rw_sync.h"
 #include "types.h"
 
@@ -216,13 +216,12 @@ TEST(ConcurrentSkipListTest, LargeInsertRandom)
     const int N = 10000;
     std::vector<hedge::key_t> data;
     std::mt19937 rng(42);
-    uuids::uuid_random_generator gen(rng);
 
     for(int i = 0; i < N; ++i)
     {
-        auto u = gen();
-        auto b = u.as_bytes();
-        data.push_back(hedge::key_t(b.data(), b.size()));
+        std::array<std::byte, 16> buf;
+        std::generate(buf.begin(), buf.end(), [&] { return static_cast<std::byte>(rng()); });
+        data.push_back(hedge::key_t(buf.data(), buf.size()));
     }
 
     for(const auto& x : data)
@@ -632,12 +631,11 @@ namespace
         std::vector<hedge::key_t> keys;
         keys.reserve(total_items);
         std::mt19937 rng(42);
-        uuids::uuid_random_generator gen(rng);
         for(size_t i = 0; i < total_items; ++i)
         {
-            auto u = gen();
-            auto b = u.as_bytes();
-            keys.push_back(hedge::key_t(b.data(), b.size()));
+            std::array<std::byte, 16> buf;
+            std::generate(buf.begin(), buf.end(), [&] { return static_cast<std::byte>(rng()); });
+            keys.push_back(hedge::key_t(buf.data(), buf.size()));
         }
 
         std::vector<std::thread> threads;
@@ -755,12 +753,11 @@ namespace
         std::vector<hedge::key_t> keys;
         keys.reserve(total_items);
         std::mt19937 rng(42);
-        uuids::uuid_random_generator gen(rng);
         for(size_t i = 0; i < total_items; ++i)
         {
-            auto u = gen();
-            auto b = u.as_bytes();
-            keys.push_back(hedge::key_t(b.data(), b.size()));
+            std::array<std::byte, 16> buf;
+            std::generate(buf.begin(), buf.end(), [&] { return static_cast<std::byte>(rng()); });
+            keys.push_back(hedge::key_t(buf.data(), buf.size()));
         }
 
         std::vector<std::thread> threads;

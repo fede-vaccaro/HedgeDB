@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstddef>
+#include <format>
 #include <random>
 #include <string>
 #include <vector>

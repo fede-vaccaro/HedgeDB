@@ -15,6 +15,7 @@
 #include "index_ops.h"
 #include "io/io_executor.h"
 #include "key.h"
+#include "logger.h"
 #include "memtable.h"
 #include "tmc/atomic_condvar.hpp"
 #include "tmc/channel.hpp"
@@ -326,7 +327,7 @@ namespace hedge::db
             latencies.total_blocking = latencies.acquire_flush_slot + latencies.wait_pipelined + latencies.lock_for_swap;
 
             // Log if total > 100ms or any section > 50ms
-            constexpr bool ENABLE_FLUSH_LATENCY_LOGGING = false;
+            constexpr bool ENABLE_FLUSH_LATENCY_LOGGING = true;
             constexpr auto TOTAL_THRESHOLD = std::chrono::microseconds(10000);  // 10ms
             constexpr auto SECTION_THRESHOLD = std::chrono::microseconds(5000); // 5ms
 
@@ -451,7 +452,7 @@ namespace hedge::db
         co_return;
     }
 
-    hedge::status memtable::replay_wal(uint64_t skip_up_to_seq_nr)
+    hedge::status memtable::replay_wal(std::optional<uint64_t> skip_up_to_seq_nr)
     {
         auto table_ptr = this->_table.ref().load(std::memory_order::relaxed);
         auto* mt = table_ptr->ptr();
@@ -463,7 +464,7 @@ namespace hedge::db
             this->_indices_path,
             [&](const key_t& key, std::span<const std::byte> value, uint64_t seq_nr) -> bool
             {
-                if(seq_nr <= skip_up_to_seq_nr)
+                if(skip_up_to_seq_nr && seq_nr <= *skip_up_to_seq_nr)
                     return true; // already persisted in an SST
 
                 auto* ptr = mt->value_arenas[0]->allocate_many(value.size(), VALUE_DATA_ALIGNMENT);

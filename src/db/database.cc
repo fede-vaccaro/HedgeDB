@@ -8,7 +8,7 @@
 #include <variant>
 
 #include "cache.h"
-#include "database.h"
+#include "db/database.h"
 #include "db/memtable.h"
 #include "io/io_executor.h"
 #include "io/static_pool.h"
@@ -36,7 +36,7 @@ namespace hedge::db
                 .memory_budget_cap = config.memtable_budget_bytes,
                 .auto_compaction = config.auto_compaction,
                 .use_odirect = config.use_direct_io,
-                .num_writer_threads = std::thread::hardware_concurrency(),
+                .num_writer_threads = io::static_pool::instance()->num_threads(),
                 .use_wal = !config.disable_wal,
                 .max_pending_flushes = config.max_pending_flushes,
             },
