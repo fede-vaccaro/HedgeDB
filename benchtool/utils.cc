@@ -19,7 +19,7 @@ namespace hedge::db
         cfg.memtable_budget_bytes = 32 * MiB;
         cfg.num_partition_exponent = 4;
         cfg.bucket_ratio = 1.50;
-        cfg.use_direct_io = false;
+        cfg.use_direct_io = true;
         cfg.index_page_clock_cache_size_bytes = 0;
         cfg.num_background_workers = num_bg_threads;
         cfg.max_pending_flushes = 8;
