@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <limits>
 
@@ -183,8 +184,10 @@ namespace hedge::db
         co_return hedge::ok();
     }
 
-    expected<std::pair<key_t, value_t>> range_iterator::_emit(merge_entry_t& item)
+    expected<std::pair<key_t, std::vector<std::byte>>> range_iterator::_emit(merge_entry_t& item)
     {
+        using result_t = expected<std::pair<key_t, std::vector<std::byte>>>;
+
         if(this->_lower && item.key < *this->_lower)
             return hedge::error("", errc::SKIP);
 
@@ -198,10 +201,24 @@ namespace hedge::db
         if(!maybe_value.has_value())
             return hedge::error("Failed to parse value: " + maybe_value.error().to_string());
 
-        return std::pair{std::move(item.key), std::move(maybe_value.value())};
+        return std::visit(
+            hedge::overloaded{
+                [](const tombstone_t&) -> result_t
+                { return hedge::error("", errc::SKIP); },
+                [&](std::vector<std::byte>& bytes) -> result_t
+                { return std::pair{std::move(item.key), std::move(bytes)}; },
+                [&](const value_ptr_t& vp) -> result_t
+                {
+                    assert(false && "value_ptr dereference in range scan is not implemented");
+                    auto raw = std::span<const std::byte>{
+                        reinterpret_cast<const std::byte*>(&vp), sizeof(value_ptr_t)};
+                    return std::pair{std::move(item.key),
+                                     std::vector<std::byte>(raw.begin(), raw.end())};
+                }},
+            maybe_value.value());
     };
 
-    tmc::task<hedge::expected<std::pair<key_t, value_t>>> range_iterator::_next_inner()
+    tmc::task<hedge::expected<std::pair<key_t, std::vector<std::byte>>>> range_iterator::_next_inner()
     {
         while(true)
         {
@@ -256,7 +273,7 @@ namespace hedge::db
         }
     }
 
-    tmc::task<expected<std::pair<key_t, value_t>>> range_iterator::next()
+    tmc::task<expected<std::pair<key_t, std::vector<std::byte>>>> range_iterator::next()
     {
         if(!this->_initialized)
         {
@@ -276,23 +293,20 @@ namespace hedge::db
         if(maybe_kv.has_error() && maybe_kv.error().code() != errc::END_OF_SCAN)
             co_return hedge::error("Failed to get next item from scan iterator: " + maybe_kv.error().to_string());
 
-        // Drain the dedup lag (up to 2 items)
-        if(this->_dedup.ready())
+        // Drain the dedup lag (up to 2 items). Any of them may be a tombstone
+        // and skip — loop until one emits or we exhaust the buffered items.
+        while(this->_dedup.ready())
         {
             auto item = this->_dedup.pop();
             auto result = this->_emit(item);
 
-            if(!result.has_value())
-            {
-                if(result.error().code() == errc::END_OF_SCAN)
-                    co_return result.error();
-
-                // Below lower bound — fall through to force_pop
-            }
-            else
-            {
+            if(result.has_value())
                 co_return std::move(result.value());
-            }
+
+            if(result.error().code() == errc::END_OF_SCAN)
+                co_return result.error();
+
+            // SKIP -> try the next buffered item
         }
 
         // Last item from dedup
@@ -300,10 +314,11 @@ namespace hedge::db
         this->_exhausted = true;
 
         auto result = this->_emit(item);
-        if(!result.has_value())
-            co_return result.error();
+        if(result.has_value())
+            co_return std::move(result.value());
 
-        co_return std::move(result.value());
+        // Final item was a tombstone or below lower bound: treat as end of scan.
+        co_return hedge::error("End of scan", errc::END_OF_SCAN);
     }
 
 } // namespace hedge::db

@@ -91,6 +91,39 @@ struct scan_test_helpers
             value);
     }
 
+    // range_iterator now returns raw bytes; reconstruct the expected bytes
+    // based on the value_type the fixture was parametrized with.
+    [[nodiscard]] bool check_returned_bytes(std::span<const std::byte> bytes, size_t seed, hedge::value_type type) const
+    {
+        switch(type)
+        {
+            case hedge::value_type::IN_PLACE_VALUE:
+            {
+                if(bytes.size() != TEST_VALUE_SIZE)
+                    return false;
+                std::vector<std::byte> groundtruth(TEST_VALUE_SIZE);
+                generate_inline_value(groundtruth, seed);
+                return std::equal(groundtruth.begin(), groundtruth.end(), bytes.begin());
+            }
+            case hedge::value_type::VALUE_PTR:
+            {
+                if(bytes.size() != sizeof(hedge::value_ptr_t))
+                    return false;
+                hedge::value_ptr_t groundtruth{};
+                generate_value_ptr(
+                    std::span<std::byte>{reinterpret_cast<std::byte*>(&groundtruth), sizeof(groundtruth)}, seed);
+                hedge::value_ptr_t actual{};
+                std::memcpy(&actual, bytes.data(), sizeof(actual));
+                return groundtruth == actual;
+            }
+            case hedge::value_type::TOMBSTONE:
+                // Tombstones are filtered by next(); should never appear here.
+                return false;
+            default:
+                return false;
+        }
+    }
+
     std::span<std::byte> generate_value(hedge::single_buffer_arena_allocator& arena, size_t seed, hedge::value_type type)
     {
         std::span<std::byte> buffer;
@@ -329,7 +362,7 @@ TEST_P(range_scan_test, test_flush_and_range_scan_all_16b_keys)
                     }
 
                     // check value
-                    if(!test_fixture->check_returned_payload(v, keys_gt.at(prefix).at(c).seed))
+                    if(!test_fixture->check_returned_bytes(v, keys_gt.at(prefix).at(c).seed, test_fixture->VALUE_TYPE))
                     {
                         co_return hedge::error(
                             "Value mismatch for key " + to_hex_string(k) +
@@ -341,7 +374,11 @@ TEST_P(range_scan_test, test_flush_and_range_scan_all_16b_keys)
                 }
                 auto t1 = std::chrono::high_resolution_clock::now();
                 auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-                co_return test_result_t{.count = c, .expected = keys_gt.at(prefix).size(), .duration_us = duration};
+                // Tombstones are silently skipped by next(); the scan yields zero entries.
+                size_t expected = test_fixture->VALUE_TYPE == hedge::value_type::TOMBSTONE
+                                      ? 0
+                                      : keys_gt.at(prefix).size();
+                co_return test_result_t{.count = c, .expected = expected, .duration_us = duration};
             }(partition, prefix, keys_gt, this));
         futures.emplace_back(std::move(f));
     }
@@ -459,7 +496,7 @@ struct memtable_merged_scan_test : public ::testing::TestWithParam<std::tuple<si
 
     struct scan_result_t
     {
-        std::vector<std::pair<hedge::key_t, hedge::value_t>> entries;
+        std::vector<std::pair<hedge::key_t, std::vector<std::byte>>> entries;
         std::string error;
         int64_t duration_us{0};
     };
@@ -524,6 +561,12 @@ TEST_P(memtable_merged_scan_test, memtable_only)
               << result.duration_us / 1000.0 << " ms, throughput: "
               << static_cast<size_t>(result.entries.size() / (result.duration_us / 1e6)) << " keys/s\n";
 
+    if(this->VALUE_TYPE == hedge::value_type::TOMBSTONE)
+    {
+        ASSERT_EQ(result.entries.size(), 0u);
+        return;
+    }
+
     ASSERT_EQ(result.entries.size(), N);
 
     std::vector<hedge::key_t> keys;
@@ -537,7 +580,7 @@ TEST_P(memtable_merged_scan_test, memtable_only)
         expected_seed[all_keys[i]] = i;
 
     for(auto& [k, v] : result.entries)
-        EXPECT_TRUE(check_returned_payload(v, expected_seed.at(k))) << "value mismatch";
+        EXPECT_TRUE(check_returned_bytes(v, expected_seed.at(k), this->VALUE_TYPE)) << "value mismatch";
 }
 
 // Verify that live memtable keys are merged with SST keys during a scan,
@@ -591,6 +634,12 @@ TEST_P(memtable_merged_scan_test, single_sst_single_memtable)
               << result.duration_us / 1000.0 << " ms, throughput: "
               << static_cast<size_t>(result.entries.size() / (result.duration_us / 1e6)) << " keys/s\n";
 
+    if(this->VALUE_TYPE == hedge::value_type::TOMBSTONE)
+    {
+        ASSERT_EQ(result.entries.size(), 0u);
+        return;
+    }
+
     ASSERT_EQ(result.entries.size(), (2 * N) + OVERLAP);
 
     std::vector<hedge::key_t> keys;
@@ -608,7 +657,7 @@ TEST_P(memtable_merged_scan_test, single_sst_single_memtable)
         expected_seed[mem_only[i]] = (2 * N) + i;
 
     for(auto& [k, v] : result.entries)
-        EXPECT_TRUE(check_returned_payload(v, expected_seed.at(k))) << "value mismatch";
+        EXPECT_TRUE(check_returned_bytes(v, expected_seed.at(k), this->VALUE_TYPE)) << "value mismatch";
 }
 
 // Verify that keys from 2 SSTs and 2 live memtables are all merged,
@@ -679,6 +728,12 @@ TEST_P(memtable_merged_scan_test, multiple_ssts_multiple_memtables)
               << result.duration_us / 1000.0 << " ms, throughput: "
               << static_cast<size_t>(result.entries.size() / (result.duration_us / 1e6)) << " keys/s\n";
 
+    if(this->VALUE_TYPE == hedge::value_type::TOMBSTONE)
+    {
+        ASSERT_EQ(result.entries.size(), 0u);
+        return;
+    }
+
     ASSERT_EQ(result.entries.size(), 4 * N); // OVERLAP keys deduplicated, not added
 
     std::vector<hedge::key_t> keys;
@@ -700,7 +755,7 @@ TEST_P(memtable_merged_scan_test, multiple_ssts_multiple_memtables)
         expected_seed[sst1_keys[i]] = 4 * N + i; // mem2 wins
 
     for(auto& [k, v] : result.entries)
-        EXPECT_TRUE(check_returned_payload(v, expected_seed.at(k))) << "value mismatch";
+        EXPECT_TRUE(check_returned_bytes(v, expected_seed.at(k), this->VALUE_TYPE)) << "value mismatch";
 }
 
 // The skiplist stores every insert as a separate entry keyed by (key, seq_nr DESC).
@@ -738,6 +793,12 @@ TEST_P(memtable_merged_scan_test, intra_memtable_key_dedup)
     auto result = run_scan(build_iterator(empty_partition, std::move(snap)));
     ASSERT_TRUE(result.error.empty()) << result.error;
 
+    if(this->VALUE_TYPE == hedge::value_type::TOMBSTONE)
+    {
+        ASSERT_EQ(result.entries.size(), 0u);
+        return;
+    }
+
     // Each key must appear exactly once — no duplicates from older versions.
     ASSERT_EQ(result.entries.size(), N_UNIQUE);
 
@@ -755,7 +816,7 @@ TEST_P(memtable_merged_scan_test, intra_memtable_key_dedup)
         expected_seed[unique_keys[i]] = N_UNIQUE * N_OVERWRITES + i;
 
     for(auto& [k, v] : result.entries)
-        EXPECT_TRUE(check_returned_payload(v, expected_seed.at(k))) << "value mismatch";
+        EXPECT_TRUE(check_returned_bytes(v, expected_seed.at(k), this->VALUE_TYPE)) << "value mismatch";
 }
 
 // When multiple memtables are queued for flush, each one gets a distinct epoch
@@ -807,6 +868,12 @@ TEST_P(memtable_merged_scan_test, pending_flush_epoch_ordering)
     auto result = run_scan(build_iterator(empty_partition, std::move(snap)));
     ASSERT_TRUE(result.error.empty()) << result.error;
 
+    if(this->VALUE_TYPE == hedge::value_type::TOMBSTONE)
+    {
+        ASSERT_EQ(result.entries.size(), 0u);
+        return;
+    }
+
     // Overlap keys are deduplicated: 2*N unique + OVERLAP shared = 2*N + OVERLAP total.
     ASSERT_EQ(result.entries.size(), (2 * N) + OVERLAP);
 
@@ -825,7 +892,7 @@ TEST_P(memtable_merged_scan_test, pending_flush_epoch_ordering)
         expected_seed[overlap_keys[i]] = 3 * N + i; // epoch 20 wins
 
     for(auto& [k, v] : result.entries)
-        EXPECT_TRUE(check_returned_payload(v, expected_seed.at(k))) << "value mismatch";
+        EXPECT_TRUE(check_returned_bytes(v, expected_seed.at(k), this->VALUE_TYPE)) << "value mismatch";
 }
 
 // The current (live) memtable is assigned epoch = MAX_UINT64, which is strictly
@@ -873,6 +940,12 @@ TEST_P(memtable_merged_scan_test, current_memtable_beats_pending_flush)
     auto result = run_scan(build_iterator(empty_partition, std::move(snap)));
     ASSERT_TRUE(result.error.empty()) << result.error;
 
+    if(this->VALUE_TYPE == hedge::value_type::TOMBSTONE)
+    {
+        ASSERT_EQ(result.entries.size(), 0u);
+        return;
+    }
+
     // Overlap keys are deduplicated: 2*N unique + OVERLAP shared = 2*N + OVERLAP total.
     ASSERT_EQ(result.entries.size(), (2 * N) + OVERLAP);
 
@@ -891,7 +964,22 @@ TEST_P(memtable_merged_scan_test, current_memtable_beats_pending_flush)
         expected_seed[overlap_keys[i]] = 3 * N + i; // live memtable wins
 
     for(auto& [k, v] : result.entries)
-        EXPECT_TRUE(check_returned_payload(v, expected_seed.at(k))) << "value mismatch";
+        EXPECT_TRUE(check_returned_bytes(v, expected_seed.at(k), this->VALUE_TYPE)) << "value mismatch";
+}
+
+static const char* value_type_suffix(hedge::value_type t)
+{
+    switch(t)
+    {
+        case hedge::value_type::VALUE_PTR:
+            return "_VALUE_PTR";
+        case hedge::value_type::IN_PLACE_VALUE:
+            return "_IN_PLACE_VALUE";
+        case hedge::value_type::TOMBSTONE:
+            return "_TOMBSTONE";
+        default:
+            return "_UNKNOWN";
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -899,13 +987,12 @@ INSTANTIATE_TEST_SUITE_P(
     memtable_merged_scan_test,
     testing::Combine(
         testing::Values(1'000, 10'000, 200'000, 500'000),
-        testing::Values(hedge::value_type::VALUE_PTR, hedge::value_type::IN_PLACE_VALUE)),
+        testing::Values(hedge::value_type::VALUE_PTR, hedge::value_type::IN_PLACE_VALUE, hedge::value_type::TOMBSTONE)),
     [](const testing::TestParamInfo<memtable_merged_scan_test::ParamType>& info)
     {
         auto num_keys = std::get<0>(info.param);
         auto value_type = std::get<1>(info.param);
-        return "N_" + std::to_string(num_keys) +
-               (value_type == hedge::value_type::VALUE_PTR ? "_VALUE_PTR" : "_IN_PLACE_VALUE");
+        return "N_" + std::to_string(num_keys) + value_type_suffix(value_type);
     });
 
 INSTANTIATE_TEST_SUITE_P(
@@ -914,13 +1001,12 @@ INSTANTIATE_TEST_SUITE_P(
     testing::Combine(
         testing::Values(1'000, 10'000, 200'000, 500'000),
         testing::Values(0, 1, 4, 10),
-        testing::Values(hedge::value_type::VALUE_PTR, hedge::value_type::IN_PLACE_VALUE)),
+        testing::Values(hedge::value_type::VALUE_PTR, hedge::value_type::IN_PLACE_VALUE, hedge::value_type::TOMBSTONE)),
 
     [](const testing::TestParamInfo<range_scan_test::ParamType>& info)
     {
         auto num_keys = std::get<0>(info.param);
         auto num_partitions = 1 << std::get<1>(info.param);
         auto value_type = std::get<2>(info.param);
-        std::string name = "N_" + std::to_string(num_keys) + "_P_" + std::to_string(num_partitions) + (value_type == hedge::value_type::VALUE_PTR ? "_VALUE_PTR" : "_IN_PLACE_VALUE");
-        return name;
+        return "N_" + std::to_string(num_keys) + "_P_" + std::to_string(num_partitions) + value_type_suffix(value_type);
     });

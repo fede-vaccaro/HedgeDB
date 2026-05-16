@@ -58,12 +58,9 @@ tmc::task<void> run(std::shared_ptr<hedge::db::database> db)
     auto it = std::move(maybe_it.value());
     while(auto entry = co_await it.next())
     {
-        auto& [key, val] = entry.value();
+        auto& [key, value] = entry.value();
         std::string_view key_str(reinterpret_cast<const char*>(key.data()), key.size());
-        assert(std::holds_alternative<std::vector<std::byte>>(val));
-
-        const auto& bytes = std::get<std::vector<std::byte>>(val);
-        std::string_view val_str(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        std::string_view val_str(reinterpret_cast<const char*>(value.data()), value.size());
         std::cout << key_str << " -> " << val_str << "\n";
     }
 }

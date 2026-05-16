@@ -93,8 +93,8 @@ namespace hedge::db
 
         tmc::task<hedge::status> _refresh_buffers();
         tmc::task<hedge::status> _init();
-        expected<std::pair<key_t, value_t>> _emit(merge_entry_t& item);
-        tmc::task<hedge::expected<std::pair<key_t, value_t>>> _next_inner();
+        expected<std::pair<key_t, std::vector<std::byte>>> _emit(merge_entry_t& item);
+        tmc::task<hedge::expected<std::pair<key_t, std::vector<std::byte>>>> _next_inner();
 
     public:
         range_iterator(
@@ -110,7 +110,8 @@ namespace hedge::db
         range_iterator& operator=(const range_iterator&) = delete;
 
         /// Returns the next key-value pair in the range, or errc::END_OF_SCAN when exhausted.
-        [[nodiscard]] tmc::task<expected<std::pair<key_t, value_t>>> next();
+        /// Tombstones are skipped.
+        [[nodiscard]] tmc::task<expected<std::pair<key_t, std::vector<std::byte>>>> next();
 
         static hedge::expected<range_iterator> make_new(
             memtable* memtable,
