@@ -1,7 +1,7 @@
 # HedgeDB — _Built for the Hardware_
 
 <p align="center">
-<img src="resources/logo_alpha.png" width="100%">
+<img src="resources/logo.png" width="100%">
 </p>
 
 A prototype embeddable key-value store, built on a partitioned LSM-tree, C++20
@@ -10,6 +10,11 @@ NVMe SSDs and modern CPUs.
 
 > **Disclaimer:** HedgeDB is a prototype. It has not been extensively tested
 > and the code is not production-ready.
+
+[![C++23](https://img.shields.io/badge/C%2B%2B-23-blue)](https://github.com/fede-vaccaro/HedgeDB)
+[![Status](https://img.shields.io/badge/Version-0.0.1-orange)](https://github.com/fede-vaccaro/HedgeDB)
+[![License](https://img.shields.io/badge/license-Apache%20License%202.0-blue)](https://github.com/fede-vaccaro/HedgeDB)
+[![Build](https://github.com/fede-vaccaro/HedgeDB/actions/workflows/build.yml/badge.svg)](https://github.com/fede-vaccaro/HedgeDB/actions/workflows/build.yml)
 
 ---
 
