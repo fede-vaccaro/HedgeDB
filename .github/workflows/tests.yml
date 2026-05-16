@@ -1,0 +1,45 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            gcc-14 g++-14 \
+            libxxhash-dev \
+            libhwloc-dev \
+
+      - name: build and install liburing
+        run: chmod +x install_liburing.sh && bash ./install_liburing.sh
+
+      # - name: build and install jemalloc
+      # run: chmod +x install_jemalloc.sh && bash ./install_jemalloc.sh
+
+      - name: configure cmake
+        env:
+          CC: gcc-14
+          CXX: g++-14
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DUSE_JEMALLOC=0 -DBUILD_TESTS=1 -Wno-dev
+
+      - name: build
+        run: cmake --build build -j$(nproc)
+
+      - name: test
+        working-directory: build
+        run: |
+          sudo prlimit --pid $$ --nofile=1048576:1048576
+          ctest --output-on-failure --timeout 600

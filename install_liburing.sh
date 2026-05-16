@@ -17,7 +17,7 @@ echo "Downloading liburing..."
 cd "${BUILD_DIR}"
 curl -L -o liburing.zip "${LIBURING_URL}"
 unzip -q liburing.zip
-cd "${LIBURING_VERSION}"
+cd liburing-"${LIBURING_VERSION}"
 
 # Configure build
 echo "Configuring..."

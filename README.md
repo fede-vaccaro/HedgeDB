@@ -70,9 +70,9 @@ prerequisites and the larger API surface.
 ### Build
 
 ```bash
-# install dependencies (liburing is mandatory; hwloc/jemalloc are recommended)
+# install dependencies (liburing is mandatory; hwloc/jemalloc are recommended); full list in .github/workflows/tests.yml
 sudo sh install_liburing.sh
-sudo apt install hwloc
+sudo apt install libhwloc-dev
 
 # configure & build
 cmake . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_JEMALLOC=1 -Wno-dev

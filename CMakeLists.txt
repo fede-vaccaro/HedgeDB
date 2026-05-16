@@ -15,7 +15,6 @@ if(BUILD_TESTS)
 
     set(INSTALL_GTEST OFF)
     FetchContent_MakeAvailable(googletest)
-
 endif()
 
 # download outcome.hpp
@@ -83,7 +82,7 @@ include_directories(${PUBLIC_INCLUDES})
 include_directories("src")
 
 include_directories(${xxhashct_SOURCE_DIR})
-include_directories(/home/federico/TooManyCooks/include)
+include_directories(${tmc_SOURCE_DIR}/include)
 
 set(IO_EXECUTOR_SRCS
     src/io/static_pool.cc
@@ -170,17 +169,17 @@ if (BUILD_TESTS)
 
     # database tests
     add_executable(database_test test/database_test.cc)
-    target_link_libraries(database_test hedgedb gtest gtest_main tcmalloc tbb)
+    target_link_libraries(database_test hedgedb gtest gtest_main ${MALLOC})
     add_test(NAME database_test COMMAND database_test)
 
     # version history test
     add_executable(version_history_test test/version_history_test.cc)
-    target_link_libraries(version_history_test hedgedb gtest gtest_main tbb)
+    target_link_libraries(version_history_test hedgedb gtest gtest_main)
     add_test(NAME version_history_test COMMAND version_history_test)
 
     # WAL replay tests
     add_executable(wal_replay_test test/wal_replay_test.cc)
-    target_link_libraries(wal_replay_test hedgedb gtest gtest_main tcmalloc)
+    target_link_libraries(wal_replay_test hedgedb gtest gtest_main)
     add_test(NAME wal_replay_test COMMAND wal_replay_test)
 
     # varint tests
@@ -210,7 +209,7 @@ if (BUILD_TESTS)
 
     # index merge tests
     add_executable(index_merge test/index_merge_test.cc)
-    target_link_libraries(index_merge hedgedb gtest gtest_main tcmalloc)
+    target_link_libraries(index_merge hedgedb gtest gtest_main ${MALLOC})
     add_test(NAME index_merge COMMAND index_merge)
 
     # rw_sync tests
@@ -220,10 +219,10 @@ if (BUILD_TESTS)
 
     # concurrent_skiplist tests
     add_executable(concurrent_skiplist_test test/concurrent_skiplist_test.cc)
-    target_link_libraries(concurrent_skiplist_test gtest gtest_main atomic tcmalloc)
+    target_link_libraries(concurrent_skiplist_test gtest gtest_main atomic ${MALLOC})
 
     # range scan tests
     add_executable(range_scan_test test/range_scan_test.cc)
-    target_link_libraries(range_scan_test hedgedb gtest gtest_main tcmalloc)
+    target_link_libraries(range_scan_test hedgedb gtest gtest_main ${MALLOC})
     add_test(NAME range_scan_test COMMAND range_scan_test)
 endif()
