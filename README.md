@@ -4,7 +4,7 @@
 <img src="resources/logo.png" width="100%">
 </p>
 
-A prototype embeddable key-value store, built on a partitioned LSM-tree, C++20
+HedgeDB is a key-value store, built on a partitioned LSM-tree, C++23
 coroutines, and `io_uring`. Larger-than-memory, persisted, tuned for modern
 NVMe SSDs and modern CPUs.
 
@@ -20,10 +20,7 @@ NVMe SSDs and modern CPUs.
 
 ## Features and core design
 
-HedgeDB is what came out of asking *"how far can a single NVMe go if the
-storage engine actually tries?"*. Inspired by RocksDB, the engine targets
-write-heavy workloads with uniformly-distributed keys (UUIDs, hashes), and is
-structured around:
+HedgeDB is an LSM-Tree engine designed to saturate the NVMe device. Inspired by RocksDB, the engine targets write-heavy workloads with uniformly-distributed keys (UUIDs, hashes), and is structured around:
 
 - **Asynchronous execution.** `io_uring` + C++20 coroutines via [TooManyCooks](https://github.com/tzcnt/TooManyCooks),
   a work-stealing scheduler. Every I/O is a `co_await`; no callbacks, no thread-per-request.
@@ -199,7 +196,7 @@ HedgeDB is a **prototype**. Things that aren't here yet:
 - **Large values support** — if `key.size() + value.size()` exceeds the
   index-block page size (a bit less than 4 KB), the flush will break.
 
-## On the wishlist
+## Future plans
 
 - **Hyper-Clock Cache** — approximate LRU cache that trades counting precision
   for a faster algorithm — works well with Direct I/O.
@@ -208,6 +205,7 @@ HedgeDB is a **prototype**. Things that aren't here yet:
   write-amplification during compaction (paired with a GC story).
 - **Rate-limiting** — soft-stall writes when L0 SSTs cross a threshold,
   smoothing long-tail latencies due to compaction backlog.
+- *Rewrite in Rust?* — 👀
 
 ---
 
