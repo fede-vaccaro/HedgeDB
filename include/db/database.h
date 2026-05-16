@@ -83,10 +83,6 @@ namespace hedge::db
         // --- Configuration ---
         db_config _config; ///< Database configuration settings.
 
-        // --- Value tables ---
-        alignas(64) mutable std::shared_mutex _value_tables_mutex{}; ///< Protects access to the `_value_tables` map.
-        std::atomic_size_t _last_table_id{0};                        ///< Atomic ID counter for the next value_table file to be created.
-
         // Memtable & flushes
         std::optional<memtable> _memtable;
 

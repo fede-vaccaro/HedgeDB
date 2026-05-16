@@ -120,7 +120,7 @@ namespace hedge::db
 
             void* new_extent_mem{nullptr};
 
-            constexpr size_t block_alignment = std::max(size_t(64), alignof(T));
+            constexpr size_t block_alignment = std::max(size_t(CACHE_LINE_SIZE), alignof(T));
             if(posix_memalign(&new_extent_mem, block_alignment, this->_extent_size) != 0)
                 return nullptr;
 

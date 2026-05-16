@@ -2,8 +2,9 @@
 
 #include <algorithm>
 #include <atomic>
-#include <stdexcept>
 #include <vector>
+
+#include "types.h"
 
 namespace hedge::async
 {
@@ -34,13 +35,13 @@ namespace hedge::async
     class rw_sync
     {
 
-        struct alignas(64) counter_t
+        struct alignas(CACHE_LINE_SIZE) counter_t
         {
             std::atomic_int64_t c{0};
         };
 
         T _obj;
-        alignas(64) std::atomic_bool _frozen;
+        alignas(CACHE_LINE_SIZE) std::atomic_bool _frozen;
         std::vector<counter_t> _counters;
 
     public:

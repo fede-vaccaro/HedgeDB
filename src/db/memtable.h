@@ -86,7 +86,7 @@ namespace hedge::db
     // Memtable object including WAL and per-thread value arenas
     struct write_buffer : skiplist_wrapper
     {
-        alignas(64) std::atomic_size_t bytes_written{0};
+        alignas(CACHE_LINE_SIZE) std::atomic_size_t bytes_written{0};
         std::vector<std::unique_ptr<hedge::db::arena_allocator<std::byte>>> value_arenas; // One-per-thread, the values get stored here
         std::unique_ptr<wal> _wal;
 
@@ -139,16 +139,16 @@ namespace hedge::db
         tmc::chan_tok<std::unique_ptr<wal>> _wal_ch;
 
         // Global sequence number shared across all memtable instances
-        alignas(64) std::atomic_uint64_t _seq_nr{0};
+        alignas(CACHE_LINE_SIZE) std::atomic_uint64_t _seq_nr{0};
 
         // Current memtable and pipelined
-        alignas(64) tmc::atomic_condvar<rw_sync_buffer_ptr_t> _table{nullptr};
-        alignas(64) tmc::atomic_condvar<rw_sync_buffer_ptr_t> _pipelined_table{nullptr}; // For double buffering
-        alignas(64) std::atomic_bool _flush_mutex;                                       // One thread at a time takes the responsability of flushing when
+        alignas(CACHE_LINE_SIZE) tmc::atomic_condvar<rw_sync_buffer_ptr_t> _table{nullptr};
+        alignas(CACHE_LINE_SIZE) tmc::atomic_condvar<rw_sync_buffer_ptr_t> _pipelined_table{nullptr}; // For double buffering
+        alignas(CACHE_LINE_SIZE) std::atomic_bool _flush_mutex;                                       // One thread at a time takes the responsability of flushing when
 
         // Pending flushes
-        alignas(64) std::atomic_size_t _table_switch_epoch;
-        alignas(64) mutable std::shared_mutex _pending_flushes_mutex;
+        alignas(CACHE_LINE_SIZE) std::atomic_size_t _table_switch_epoch;
+        alignas(CACHE_LINE_SIZE) mutable std::shared_mutex _pending_flushes_mutex;
         tmc::semaphore _pending_flush_slots;
         std::condition_variable_any _pending_flushes_cv_sync; // Only used when waiting for every flush to complete
         std::map<size_t, rw_sync_buffer_ptr_t> _pending_flushes;

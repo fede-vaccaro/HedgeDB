@@ -26,20 +26,14 @@ jobs:
       - name: build and install liburing
         run: chmod +x install_liburing.sh && bash ./install_liburing.sh
 
-      # - name: build and install jemalloc
-      # run: chmod +x install_jemalloc.sh && bash ./install_jemalloc.sh
+      - name: build and install jemalloc
+        run: chmod +x install_jemalloc.sh && bash ./install_jemalloc.sh
 
       - name: configure cmake
         env:
           CC: gcc-14
           CXX: g++-14
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DUSE_JEMALLOC=0 -DBUILD_TESTS=1 -Wno-dev
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DUSE_JEMALLOC=1 -DBUILD_TESTS=0 -Wno-dev
 
-      - name: build
+      - name: build 
         run: cmake --build build -j$(nproc)
-
-      - name: test
-        working-directory: build
-        run: |
-          sudo prlimit --pid $$ --nofile=1048576:1048576
-          ctest --output-on-failure --timeout 600

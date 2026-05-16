@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <new>
 #include <sys/types.h>
 #include <vector>
 
@@ -15,6 +16,11 @@ namespace hedge
     // Used in HedgeDB for representing keys
     using key_t = hedge::key<>;
 
+    // CACHE_LINE_SIZE represents the CPU cache line size
+    // Usually needed for fields cache-alignment in order to prevent false sharing
+    constexpr size_t CACHE_LINE_SIZE = std::hardware_destructive_interference_size;
+
+    // Max and Min supported key size
     constexpr size_t MAX_KEY_LEN = 256;
     constexpr size_t MIN_KEY_LEN = 1;
 

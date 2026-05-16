@@ -107,7 +107,7 @@ namespace hedge::db
         using sst_level_created_t = std::vector<uint8_t>;
         struct _partition_state
         {
-            alignas(64) mutable std::shared_mutex mutex;
+            alignas(CACHE_LINE_SIZE) mutable std::shared_mutex mutex;
             partition_t levels;
             permissions_t permissions;   // For fine-grained coordination between compaction commits
             sst_level_created_t created; // For tracking (for each level) whether it's been created, or whether a running compaction task will create it
@@ -146,7 +146,7 @@ namespace hedge::db
         int64_t _total_pending_compacting_sst_count{0};
         std::condition_variable _pending_compactions_cv;
 
-        alignas(64) tmc::atomic_condvar<bool> _compaction_backpressure{false};
+        alignas(CACHE_LINE_SIZE) tmc::atomic_condvar<bool> _compaction_backpressure{false};
 
         logger _logger{"sst_manager"};
 

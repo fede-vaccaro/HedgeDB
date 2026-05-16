@@ -54,10 +54,10 @@ endif()
 
 if (CMAKE_BUILD_TYPE MATCHES "Debug")
     message (STATUS "Building in Debug mode")
-    set(CMAKE_CXX_FLAGS "-O0 -g -fno-omit-frame-pointer -foptimize-sibling-calls -Wall -Wextra -Wpedantic -Werror")
+    set(CMAKE_CXX_FLAGS "-O0 -g -fno-omit-frame-pointer -foptimize-sibling-calls -Wall -Wextra -Wpedantic -Werror -Wno-interference-size")
 elseif (CMAKE_BUILD_TYPE MATCHES "Release")
     message (STATUS "Building in Release mode")
-    set(CMAKE_CXX_FLAGS "-O2 -g -fno-omit-frame-pointer")
+    set(CMAKE_CXX_FLAGS "-O2 -g -fno-omit-frame-pointer -Wno-interference-size -fno-rtti")
 endif()
 
 if (SANITIZERS)
