@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <ranges>
+#include <numeric>
 
 #include "io/io_executor.h"
 #include "tmc/ex_cpu.hpp"
