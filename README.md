@@ -4,14 +4,10 @@
 <img src="resources/logo.png" width="100%">
 </p>
 
-HedgeDB is a key-value store, built on a partitioned LSM-tree, C++23
-coroutines, and `io_uring`. Larger-than-memory, persisted, tuned for modern
+HedgeDB is a key-value store, built on a partitioned LSM-tree, C++20 coroutines, and `io_uring`. Larger-than-memory, persisted, tuned for modern
 NVMe SSDs and modern CPUs.
 
-> **Disclaimer:** HedgeDB is a prototype. It has not been extensively tested
-> and the code is not production-ready.
-
-[![C++23](https://img.shields.io/badge/C%2B%2B-23-blue)](https://github.com/fede-vaccaro/HedgeDB)
+[![C++20](https://img.shields.io/badge/C%2B%2B-23-blue)](https://github.com/fede-vaccaro/HedgeDB)
 [![Status](https://img.shields.io/badge/Version-0.0.1-orange)](https://github.com/fede-vaccaro/HedgeDB)
 [![License](https://img.shields.io/badge/license-Apache%20License%202.0-blue)](https://github.com/fede-vaccaro/HedgeDB)
 [![Build](https://github.com/fede-vaccaro/HedgeDB/actions/workflows/build.yml/badge.svg)](https://github.com/fede-vaccaro/HedgeDB/actions/workflows/build.yml)
@@ -54,8 +50,8 @@ Performance comparison with RocksDB on a **13th Gen Intel i7-13700H**
 
 ## Quickstart
 
-Linux only. See [Getting started](githubio/getting-started.md) for full
-prerequisites and the larger API surface.
+Linux only. See the [HedgeDB documentation site](https://fede-vaccaro.github.io/hedgedb.github.io/)
+for full prerequisites and the larger API surface.
 
 ### Dependencies
 
@@ -66,13 +62,13 @@ prerequisites and the larger API surface.
 
 *Optional but highly recommended:*
 
-- [`hwloc`](https://www.open-mpi.org/projects/hwloc/) — `sudo apt install hwloc`
+- [`hwloc`](https://www.open-mpi.org/projects/hwloc/)
 - A concurrency-friendly allocator: [`jemalloc`](https://github.com/jemalloc/jemalloc) or [`tcmalloc`](https://github.com/google/tcmalloc)
 
 ### Build
 
 ```bash
-# install dependencies (liburing is mandatory; hwloc/jemalloc are recommended); full list in .github/workflows/tests.yml
+# install dependencies (liburing is mandatory; hwloc/jemalloc are recommended); full list in .github/workflows/build.yml
 sudo sh install_liburing.sh
 sudo apt install libhwloc-dev
 
@@ -208,5 +204,7 @@ HedgeDB is a **prototype**. Things that aren't here yet:
 - *Rewrite in Rust?* — 👀
 
 ---
+
+_Join us on the [Discord channel](https://discord.gg/kHdxG3AF9x)!_
 
 Built and maintained by [Federico Vaccaro](https://github.com/fede-vaccaro).
