@@ -1,4 +1,4 @@
-# HedgeDB — _Built for the Hardware_
+# HedgeDB - _Built for the Hardware_
 
 <p align="center">
 <img src="resources/logo.png" width="100%">
@@ -19,14 +19,14 @@ NVMe SSDs and modern CPUs.
 HedgeDB is an LSM-Tree engine designed to saturate the NVMe device. Inspired by RocksDB, the engine targets write-heavy workloads with uniformly-distributed keys (UUIDs, hashes), and is structured around:
 
 - **Asynchronous execution.** `io_uring` + C++20 coroutines via [TooManyCooks](https://github.com/tzcnt/TooManyCooks),
-  a work-stealing scheduler. Every I/O is a `co_await`; no callbacks, no thread-per-request.
+  a work-stealing scheduler. Every I/O is `co_await`ed;
 - **Partitioned LSM-tree.** The key space is sharded into `2^N` independent
   partitions (default 16). Compactions on different partitions run fully in
   parallel.
 - **Size-tiered compaction.** Lower write amplification than leveled, with a
   quotient filter on the read path to skip SSTs that can't contain a key.
-- **Per-thread WAL.** Each writer thread owns its own WAL file — no inode
-  contention.
+- **Per-thread WAL.** Each writer thread owns its own WAL file, no inode
+  contention on the hot path.
 - **Direct I/O.** `O_DIRECT` everywhere on the SST path: predictable latencies
   and transparent memory usage, avoiding IO stalls from page-cache pressure.
 - **MVCC.** Snapshot isolation over range scans.
@@ -84,8 +84,8 @@ cmake --build build -j$(nproc)
 ulimit -n 1048576
 
 # Write 1M keys with 100-byte values, then read them back
-./build/benchtool -m write -n 1000000 -v 100 -p /tmp/hedge_demo
-./build/benchtool -m read  -n 1000000 -v 100 -p /tmp/hedge_demo
+./build/benchtool -m load -n 10000000 -v 100 -p /tmp/hedge_demo
+./build/benchtool -m read  -n 10000000 -v 100 -p /tmp/hedge_demo
 ```
 
 | Flag | Long form | Default | Description |

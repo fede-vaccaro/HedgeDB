@@ -4,7 +4,6 @@
 #include <cstring>
 #include <error.hpp>
 
-#include "qf.h"
 #include "quotient_filter.h"
 
 namespace hedge::db

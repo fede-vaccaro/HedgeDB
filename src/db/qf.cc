@@ -10,7 +10,11 @@
 #include <cstring>
 #include <stdexcept>
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcpp"
 #include "qf.h"
+#pragma GCC diagnostic pop
+
 #include "types.h"
 #include "utils.h"
 

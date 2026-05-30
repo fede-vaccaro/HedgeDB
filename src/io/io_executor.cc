@@ -1,6 +1,6 @@
 #include <cstddef>
-#include <ranges>
 #include <numeric>
+#include <ranges>
 
 #include "io/io_executor.h"
 #include "tmc/ex_cpu.hpp"
@@ -197,47 +197,93 @@ namespace hedge::io
         auto filter = tmc::topology::topology_filter{};
         auto topology = tmc::topology::query();
 
+        // idx == -1 means not found
+        // idx >   0 is the group id
+        auto find_core_group = [&topology](size_t core_index) -> int32_t
+        {
+            for(const auto& group : topology.groups)
+            {
+                if(std::ranges::find(group.core_indexes, core_index) == group.core_indexes.end())
+                    continue;
+
+                return static_cast<int32_t>(group.index);
+            }
+
+            return -1;
+        };
+
+        // 0 means error
+        // 1 returns no SMT
+        // 2 returns SMT available
+        auto resolve_core_smt_level = [&topology, find_core_group](size_t core_index) -> int32_t
+        {
+            const int32_t group_idx = find_core_group(core_index);
+            if(group_idx < 0)
+                return 0;
+
+            return static_cast<int32_t>(topology.groups[group_idx].smt_level);
+        };
+
         switch(cfg.type)
         {
+
             case executor_type::FOREGROUND:
             {
                 // set lower half of cores for foreground, higher half for background
-                auto core_indexes = std::vector<size_t>(topology.pu_count() / 2);
+                auto core_indexes = std::vector<size_t>(topology.core_count() / 2);
                 std::ranges::iota(core_indexes, 0);
 
                 if(cfg.n_threads.has_value() && cfg.n_threads.value() < core_indexes.size())
                     core_indexes.resize(cfg.n_threads.value());
 
                 filter.set_core_indexes(core_indexes);
-                this->_n_threads = core_indexes.size();
+                this->_n_threads = std::accumulate(
+                    core_indexes.begin(),
+                    core_indexes.end(),
+                    0UL,
+                    [resolve_core_smt_level](size_t acc, size_t core_index) -> size_t
+                    {
+                        auto smt_level = resolve_core_smt_level(core_index);
+                        assert(smt_level != 0);
+                        return acc + smt_level;
+                    });
 
                 if(io_executor::VERBOSE)
                 {
                     std::cout << "Allowed cores for foreground executor: ";
                     for(size_t core_index : core_indexes)
-                        std::cout << core_index << " ";
-                    std::cout << "\nTotal threads allowed for foreground executor: " << core_indexes.size() << "\n";
+                        std::cout << core_index << " (group : " << find_core_group(core_index) << ") ";
+                    std::cout << "\nTotal threads allowed for foreground executor: " << this->_n_threads << "\n";
                 }
                 break;
             }
             case executor_type::BACKGROUND:
             {
                 // set higher half of cores for background, lower half for foreground
-                auto core_indexes = std::vector<size_t>(topology.pu_count() / 2);
-                std::ranges::iota(core_indexes, topology.pu_count() / 2);
+                auto core_indexes = std::vector<size_t>(topology.core_count() / 2);
+                std::ranges::iota(core_indexes, topology.core_count() / 2);
                 if(cfg.n_threads.has_value() && cfg.n_threads.value() < core_indexes.size())
                     core_indexes.resize(cfg.n_threads.value());
 
                 filter.set_core_indexes(core_indexes);
-                this->_n_threads = core_indexes.size();
+                this->_n_threads = std::accumulate(
+                    core_indexes.begin(),
+                    core_indexes.end(),
+                    0UL,
+                    [resolve_core_smt_level](size_t acc, size_t core_index) -> size_t
+                    {
+                        auto smt_level = resolve_core_smt_level(acc);
+                        assert(smt_level != 0);
+                        return acc + resolve_core_smt_level(core_index);
+                    });
 
                 // debug
                 if(io_executor::VERBOSE)
                 {
                     std::cout << "Allowed cores for background executor: ";
                     for(size_t core_index : core_indexes)
-                        std::cout << core_index << " ";
-                    std::cout << "\nTotal threads allowed for background executor: " << core_indexes.size() << "\n";
+                        std::cout << core_index << " (group : " << find_core_group(core_index) << ") ";
+                    std::cout << "\nTotal threads allowed for background executor: " << this->_n_threads << "\n";
                 }
                 break;
             }

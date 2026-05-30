@@ -227,7 +227,7 @@ namespace hedge
 
         static void _grow(page_aligned_buffer& buf, size_t new_capacity)
         {
-            assert(pab._size <= new_capacity);
+            assert(buf._size <= new_capacity);
             auto new_pab = page_aligned_buffer<T>();
             page_aligned_buffer::_allocate_buffer(new_pab, buf.size(), new_capacity);
             std::uninitialized_move(buf.begin(), buf.end(), new_pab.begin());

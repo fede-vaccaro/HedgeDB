@@ -26,7 +26,7 @@ namespace hedge::io
         static constexpr bool AUTO_DETECT_DEFAULT{false};
 #endif
 
-        std::string name;
+        std::string name{"hdb-pool"};
         size_t queue_depth{8};
         executor_type type{executor_type::GENERAL_PURPOSE};
         std::optional<size_t> n_threads{std::nullopt};

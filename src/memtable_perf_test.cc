@@ -108,12 +108,15 @@ int main()
     // --- Main threadpool (runs put_async coroutines) ---
     auto main_pool = std::make_shared<hedge::io::io_executor>(
         hedge::io::executor_config{
+            .name = "test-pool",
             .queue_depth = QD,
             .n_threads = N_EXECUTORS,
             .auto_detect = false,
         });
+
     auto flusher_pool = std::make_shared<hedge::io::io_executor>(
         hedge::io::executor_config{
+            .name = "test-pool",
             .queue_depth = QD / 2,
             .n_threads = FLUSH_THREADS,
             .auto_detect = false,

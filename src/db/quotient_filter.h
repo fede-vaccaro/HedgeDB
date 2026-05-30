@@ -1,9 +1,13 @@
 #pragma once
 
+
 #include <error.hpp>
 #include <span>
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcpp"
 #include "qf.h"
+#pragma GCC diagnostic pop
 
 namespace hedge::db
 {
