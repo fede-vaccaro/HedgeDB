@@ -39,6 +39,7 @@ namespace hedge::db
             bool use_odirect_for_ssts{true};
             std::optional<size_t> ssts_in_l0_block_write_threshold{40};
             std::filesystem::path partitions_path;
+            bool acquire_compaction_stats{false};
         };
 
         sst_manager() = default;
@@ -53,7 +54,7 @@ namespace hedge::db
 
         // push_new_ssts_to_l0 Push a batch of SSTs to L0 as the most recent
         // Returns a second callback (via tmc::task) that should be called for updating the manifest
-        tmc::task<void> push_new_ssts_to_l0(std::vector<sst> new_ssts);
+        tmc::task<void> push_new_ssts_to_l0(std::vector<sst> new_ssts, std::optional<compaction_stats> compaction_stats);
 
         // SST lookup for the read path
         tmc::task<expected<value_t>> lookup_async(const key_t& key, size_t matching_partition_id);
@@ -72,6 +73,7 @@ namespace hedge::db
         // Observability
         [[nodiscard]] double read_amplification_factor();
         void print_tree_structure() const;
+        void print_compaction_stats() const;
 
         // Returns the highest max_seq_nr across all SSTs at all levels and partitions.
         // Returns 0 if no SSTs are loaded (first boot or empty DB).
@@ -83,28 +85,14 @@ namespace hedge::db
         // Flush iteration counter (shared with memtable for SST naming)
         std::atomic_size_t& flush_iteration() { return this->_flush_iteration; }
 
-        struct compaction_stats
-        {
-            size_t input_bytes{0};
-            size_t output_bytes{0};
-            size_t num_inputs{0};
-            size_t items_merged{0};
-
-            compaction_stats& operator+=(const compaction_stats& other)
-            {
-                this->input_bytes += other.input_bytes;
-                this->output_bytes += other.output_bytes;
-                this->num_inputs += other.num_inputs;
-                this->items_merged += other.items_merged;
-                return *this;
-            }
-        };
-
     private:
         friend class sst_manager_helpers;
 
         using permissions_t = std::vector<std::shared_ptr<tmc::semaphore>>;
         using sst_level_created_t = std::vector<uint8_t>;
+        using stats = std::vector<compaction_stats>;
+        using stats_per_level = std::vector<stats>;
+
         struct _partition_state
         {
             alignas(CACHE_LINE_SIZE) mutable std::shared_mutex mutex;
@@ -112,6 +100,8 @@ namespace hedge::db
             permissions_t permissions;   // For fine-grained coordination between compaction commits
             sst_level_created_t created; // For tracking (for each level) whether it's been created, or whether a running compaction task will create it
                                          // Needed for coordinating tombstone garbage collection
+            stats_per_level stats_per_lvl;
+
             std::atomic_size_t levels_seq_num{0};
             fs::file state_file{};
             std::optional<int> dir_fd{};
@@ -150,21 +140,6 @@ namespace hedge::db
 
         logger _logger{"sst_manager"};
 
-        struct compaction_output
-        {
-            struct compaction_args
-            {
-                std::vector<sst_ptr_t> inputs;
-                hedge::expected<sst_ptr_t> output;
-
-                size_t input_bytes{};
-                size_t output_bytes{};
-            };
-
-            std::mutex m;
-            std::vector<compaction_args> results;
-        };
-
         // Manifest related methods
         inline const static std::string MANIFEST_FILENAME = "manifest";
         static std::string _serialize_levels(const partition_t& levels);
@@ -187,7 +162,7 @@ namespace hedge::db
             std::vector<sst_ptr_t> inputs,
             bool discard_deleted_keys);
 
-        hedge::expected<compaction_stats> _schedule_compaction(bool compact_all);
+        hedge::status _schedule_compaction(bool compact_all);
 
         static void create_buckets_from_level(
             compaction_buckets_t& out_buckets,

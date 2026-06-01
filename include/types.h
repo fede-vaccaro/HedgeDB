@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <new>
 #include <sys/types.h>
@@ -175,5 +176,26 @@ namespace hedge
 
     // Standard page size used for I/O operations (4 KiB).
     constexpr size_t PAGE_SIZE_IN_BYTES = 4 * KiB;
+
+    // Struct for collecting statistics about a compaction job
+    struct compaction_stats
+    {
+        size_t input_bytes{0};
+        size_t output_bytes{0};
+        size_t num_inputs{0};
+        size_t items_merged{0};
+
+        std::chrono::high_resolution_clock::time_point time_start{};
+        std::chrono::high_resolution_clock::time_point time_end{};
+
+        compaction_stats& operator+=(const compaction_stats& other)
+        {
+            this->input_bytes += other.input_bytes;
+            this->output_bytes += other.output_bytes;
+            this->num_inputs += other.num_inputs;
+            this->items_merged += other.items_merged;
+            return *this;
+        }
+    };
 
 } // namespace hedge

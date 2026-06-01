@@ -44,8 +44,8 @@ namespace hedge::db
         size_t num_writer_threads = std::thread::hardware_concurrency();
         bool use_wal = true;
         /* bool use_fsync = false; // NOT IMPLEMENTED */
-        bool fdatasync_flushed_sst = true;
         size_t max_pending_flushes = 4;
+        bool acquire_flush_statistics = true;
     };
 
     // Currently unused
@@ -125,7 +125,7 @@ namespace hedge::db
 
         // DB state & callbacks
         std::atomic_size_t* _flush_epoch{};
-        std::function<tmc::task<void>(std::vector<sst>)> _push_new_ssts_callback;
+        std::function<tmc::task<void>(std::vector<sst>, std::optional<compaction_stats>)> _push_new_ssts_callback;
         std::function<void()> _schedule_compaction_callback;
         tmc::atomic_condvar<bool>* _compaction_backpressure{};
 
@@ -169,7 +169,7 @@ namespace hedge::db
                  std::filesystem::path indices_path,
                  std::atomic_size_t* flush_epoch_ptr,
                  std::shared_ptr<io::io_executor> flusher_executor,
-                 std::function<tmc::task<void>(std::vector<sst>)> push_new_ssts_callback,
+                 std::function<tmc::task<void>(std::vector<sst>, std::optional<compaction_stats>)> push_new_ssts_callback,
                  std::function<void()> schedule_compaction_callback,
                  std::shared_ptr<db::sharded_page_cache> page_cache,
                  tmc::atomic_condvar<bool>* compaction_backpressure = nullptr);

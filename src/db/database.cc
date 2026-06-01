@@ -39,13 +39,14 @@ namespace hedge::db
                 .num_writer_threads = io::static_pool::instance()->num_threads(),
                 .use_wal = !config.disable_wal,
                 .max_pending_flushes = config.max_pending_flushes,
+                .acquire_flush_statistics = config.acquire_flush_stats,
             },
             config.num_partition_exponent,
             db._partitions_path,
             &db._sst_manager->flush_iteration(),
             db._bg_pool,
-            [&sst_mgr = *db._sst_manager](std::vector<sst> sst_batch) -> tmc::task<void>
-            { return sst_mgr.push_new_ssts_to_l0(std::move(sst_batch)); },
+            [&sst_mgr = *db._sst_manager](std::vector<sst> sst_batch, std::optional<compaction_stats> stats_opt) -> tmc::task<void>
+            { return sst_mgr.push_new_ssts_to_l0(std::move(sst_batch), std::move(stats_opt)); },
             [&sst_mgr = *db._sst_manager]()
             { sst_mgr.schedule_compaction(false); },
             db._page_cache,
@@ -96,6 +97,7 @@ namespace hedge::db
                 .use_odirect_for_ssts = config.use_direct_io,
                 .ssts_in_l0_block_write_threshold = config.ssts_in_l0_block_write_threshold,
                 .partitions_path = db->_partitions_path,
+                .acquire_compaction_stats = config.acquire_compaction_stats,
             },
             db->_bg_pool,
             db->_page_cache);
@@ -268,6 +270,11 @@ namespace hedge::db
     void database::print_tree_structure() const
     {
         this->_sst_manager->print_tree_structure();
+    }
+
+    void database::print_compaction_stats() const
+    {
+        this->_sst_manager->print_compaction_stats();
     }
 
     hedge::status database::flush()

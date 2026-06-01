@@ -34,7 +34,8 @@ namespace hedge::db
         try
         {
             auto seq = this->_seq_nr->fetch_add(1, std::memory_order::relaxed);
-            this->_accessor.insert(memtable_entry(key, seq, value));
+            [[maybe_unused]] auto [it, ok] = this->_accessor.insert(memtable_entry(key, seq, value));
+            assert(ok);
             return {true, seq};
         }
         catch(const std::bad_alloc&)
@@ -57,7 +58,7 @@ namespace hedge::db
                        std::filesystem::path indices_path,
                        std::atomic_size_t* flush_epoch_ptr,
                        std::shared_ptr<io::io_executor> flusher_executor,
-                       std::function<tmc::task<void>(std::vector<sst>)> push_new_ssts_callback,
+                       std::function<tmc::task<void>(std::vector<sst>, std::optional<compaction_stats>)> push_new_ssts_callback,
                        std::function<void()> schedule_compaction_callback,
                        std::shared_ptr<db::sharded_page_cache> page_cache,
                        tmc::atomic_condvar<bool>* compaction_backpressure)
@@ -327,7 +328,7 @@ namespace hedge::db
             latencies.total_blocking = latencies.acquire_flush_slot + latencies.wait_pipelined + latencies.lock_for_swap;
 
             // Log if total > 100ms or any section > 50ms
-            constexpr bool ENABLE_FLUSH_LATENCY_LOGGING = true;
+            constexpr bool ENABLE_FLUSH_LATENCY_LOGGING = false;
             constexpr auto TOTAL_THRESHOLD = std::chrono::microseconds(10000);  // 10ms
             constexpr auto SECTION_THRESHOLD = std::chrono::microseconds(5000); // 5ms
 
@@ -375,13 +376,13 @@ namespace hedge::db
         std::shared_ptr<tmc::semaphore> can_write,
         std::shared_ptr<tmc::semaphore> next_can_write)
     {
-        auto t0 = std::chrono::high_resolution_clock::now();
-
         while(memtable_to_flush->any_active_writer()) // Wait until every writer is done with the object
             std::this_thread::yield();
 
         auto accessor = memtable_to_flush->ptr()->accessor();
 
+
+        auto t0 = std::chrono::high_resolution_clock::now();
         // The flush procedure generates 2^num_partition_exponent SSTs (1 per partition)
         auto partitioned_sorted_indices = co_await index_ops::flush_memtable(
             this->_indices_path,
@@ -391,8 +392,9 @@ namespace hedge::db
             curr_flush_epoch,
             this->_cache,
             this->_cfg.use_odirect,
-            this->_flush_executor->ex(),
-            this->_cfg.fdatasync_flushed_sst);
+            this->_flush_executor->ex());
+
+        auto t1 = std::chrono::high_resolution_clock::now();
 
         if(!partitioned_sorted_indices.has_value())
         {
@@ -401,6 +403,17 @@ namespace hedge::db
             co_return;
         }
 
+        const size_t flushed_bytes = memtable_to_flush.get()->ptr()->bytes_written.load(std::memory_order::relaxed);
+
+        [[maybe_unused]] compaction_stats stats{
+            .input_bytes = flushed_bytes,
+            .output_bytes = flushed_bytes,
+            .num_inputs = 1,
+            .items_merged = accessor.size(),
+            .time_start = t0,
+            .time_end = t1,
+        };
+
         // Acquire permission to push (for respecting new SSTs chronological ordering)
         co_await *can_write;
 
@@ -408,7 +421,7 @@ namespace hedge::db
         tmc::task<void> update_manifest_callback{};
         {
             std::unique_lock lk(this->_pending_flushes_mutex);
-            update_manifest_callback = this->_push_new_ssts_callback(std::move(partitioned_sorted_indices.value()));
+            update_manifest_callback = this->_push_new_ssts_callback(std::move(partitioned_sorted_indices.value()), this->_cfg.acquire_flush_statistics ? std::optional{stats} : std::nullopt);
             auto it = this->_pending_flushes.find(curr_flush_epoch);
             assert(it->second == memtable_to_flush);
             this->_pending_flushes.erase(it); // LSM-tree updated, can safely erase the memtable from memory
@@ -446,9 +459,6 @@ namespace hedge::db
         if(this->_cfg.auto_compaction)
             this->_schedule_compaction_callback();
 
-        auto t1 = std::chrono::high_resolution_clock::now();
-        [[maybe_unused]] auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
-        [[maybe_unused]] double throughput = (double)memtable_to_flush->ptr()->size() / (duration.count() / 1'000'000.0);
         co_return;
     }
 

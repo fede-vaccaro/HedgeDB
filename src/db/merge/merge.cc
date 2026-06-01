@@ -190,6 +190,13 @@ namespace hedge::db
                     std::string(strerror(-write_response.error_code)));
             }
 
+            if(write_response.bytes_written != write_response.bytes_expected)
+            {
+                co_return hedge::error(
+                    std::format("Flushed less bytes than requested on merge: {} < {}",
+                                write_response.bytes_written, write_response.bytes_expected));
+            }
+
             bytes_written += write_response.bytes_written;
 
             co_return hedge::ok();
@@ -528,12 +535,9 @@ namespace hedge::db
 
         merged_meta_index.shrink_to_fit();
 
-        if(config.fdatasync_output)
-        {
-            int32_t res = co_await hedge::io::fdatasync(output_file.fd());
-            if(res < 0)
-                co_return hedge::error("Failed to fdatasync merged file: " + std::string(strerror(-res)));
-        }
+        int32_t res = co_await hedge::io::fdatasync(output_file.fd());
+        if(res < 0)
+            co_return hedge::error("Failed to fdatasync merged file: " + std::string(strerror(-res)));
 
         if(!output_file.has_direct_access())
             posix_fadvise(output_file.fd(), 0, 0, POSIX_FADV_RANDOM);

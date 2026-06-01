@@ -113,13 +113,12 @@ int main(int argc, char* argv[])
         run_rw(db, values, cfg.num_ops, cfg.vsize, cfg.num_threads, cfg.measure_latency);
     else if(cfg.mode == "range")
         run_range(db, cfg.num_ops, cfg.num_threads, cfg.measure_latency);
+    db->print_compaction_stats();
 
     std::cout << "\n=== DONE ===\n";
 
     db->wait_for_compactions_to_finish();
+    std::this_thread::sleep_for(std::chrono::seconds(1));
     io::static_pool::instance()->shutdown();
-
     print_max_rss();
-
-    return 0;
 }

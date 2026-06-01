@@ -47,7 +47,9 @@ namespace hedge::db
             state->created.resize(cfg.max_num_levels, 0);
             for(auto& s : state->permissions)
                 s = std::make_shared<tmc::semaphore>(1);
-            _sorted_indices.emplace(partition_id, std::move(state));
+            state->stats_per_lvl.resize(cfg.max_num_levels);
+
+            this->_sorted_indices.emplace(partition_id, std::move(state));
         }
     }
 
@@ -62,9 +64,8 @@ namespace hedge::db
                 if(!compact_all)
                     break;
 
-                auto maybe_stats = sst_manager->_schedule_compaction(compact_all.value());
-                if(!maybe_stats)
-                    sst_manager->_logger.log("Compaction job failed: ", maybe_stats.error().to_string());
+                if(auto ok = sst_manager->_schedule_compaction(compact_all.value()); !ok)
+                    sst_manager->_logger.log("Compaction job failed: ", ok.error().to_string());
 
                 sst_manager->_compaction_jobs_in_flight.fetch_sub(1, std::memory_order::relaxed);
             }
@@ -73,9 +74,18 @@ namespace hedge::db
         tmc::post(*this->_compaction_pool, make_compaction_job(this));
     }
 
-    tmc::task<void> sst_manager::push_new_ssts_to_l0(std::vector<sst> new_ssts)
+    tmc::task<void> sst_manager::push_new_ssts_to_l0(std::vector<sst> new_ssts, std::optional<compaction_stats> flush_stats_opt)
     {
         std::vector<uint16_t> affected_partitions;
+
+        // The flush stats are already aggregated across partitions
+        // However, stats are counted per partition
+        // We adapt the stats to this scheme
+        if (flush_stats_opt)
+        {
+            flush_stats_opt->input_bytes /= new_ssts.size();
+            flush_stats_opt->output_bytes /= new_ssts.size();
+        }
 
         for(auto& new_sorted_index : new_ssts)
         {
@@ -86,23 +96,18 @@ namespace hedge::db
             auto it = this->_sorted_indices.find(prefix);
             assert(it != this->_sorted_indices.end() && "Partition not found in pre-initialized map");
 
-            auto& state = *it->second;
-
             {
+                auto& state = *it->second;
                 std::lock_guard lk(state.mutex);
                 auto& l0 = state.levels[0];
                 l0.emplace_back(std::move(sorted_index_ptr));
                 state.levels_seq_num.fetch_add(1, std::memory_order::release);
                 affected_partitions.push_back(prefix);
+
+                if (flush_stats_opt.has_value())
+                    state.stats_per_lvl[0].emplace_back(*flush_stats_opt);
             }
         }
-
-        // Deduplicate partition IDs
-        std::ranges::sort(affected_partitions);
-        auto unique = std::ranges::unique(affected_partitions);
-        affected_partitions.erase(
-            unique.begin(),
-            unique.end());
 
         if(affected_partitions.empty())
             return tmc::task<void>{};
@@ -215,15 +220,23 @@ namespace hedge::db
             .populate_cache_with_output = false,
         };
 
+        compaction_stats compaction_stats;
+
         std::vector<const sst*> input_ptrs;
         input_ptrs.reserve(inputs.size());
         for(const auto& i : inputs)
+        {
             input_ptrs.emplace_back(i.get());
+            compaction_stats.input_bytes += i->file_size();
+        }
 
+        compaction_stats.num_inputs = inputs.size();
+        compaction_stats.time_start = std::chrono::high_resolution_clock::now();
         hedge::expected<sst> merge_result =
             co_await index_ops::k_way_merge_async2(merge_config,
                                                    input_ptrs,
                                                    this->_page_cache);
+        compaction_stats.time_end = std::chrono::high_resolution_clock::now();
 
         std::vector<size_t> input_file_ids;
         input_file_ids.reserve(inputs.size());
@@ -234,6 +247,8 @@ namespace hedge::db
         if(merge_result)
         {
             auto output_ptr = std::make_shared<sst>(std::move(merge_result.value()));
+            compaction_stats.output_bytes = output_ptr->file_size();
+            compaction_stats.items_merged = output_ptr->size();
 
             // Apply index update under exclusive lock — all inputs belong to the same partition
             auto partition_prefix = inputs[0]->upper_bound();
@@ -255,6 +270,9 @@ namespace hedge::db
             auto& target_level = state.levels[next_level_idx];
             target_level.push_back(std::move(output_ptr));
             state.levels_seq_num.fetch_add(1, std::memory_order::release);
+
+            if(this->_cfg.acquire_compaction_stats)
+                state.stats_per_lvl[next_level_idx].emplace_back(compaction_stats);
 
             lk.unlock();
 
@@ -604,12 +622,11 @@ namespace hedge::db
         }
     }
 
-    hedge::expected<sst_manager::compaction_stats> sst_manager::_schedule_compaction(bool compact_all)
+    hedge::status sst_manager::_schedule_compaction(bool compact_all)
     {
         const size_t min_merge_width = compact_all ? 2 : this->_cfg.min_merge_width;
         const size_t max_merge_width = compact_all ? std::numeric_limits<size_t>::max() : this->_cfg.max_merge_width;
 
-        compaction_stats stats{};
         partition_snapshot_map_t index_snapshot;
 
         for(const auto& [partition_id, state_ptr] : this->_sorted_indices)
@@ -630,7 +647,7 @@ namespace hedge::db
             this->launch_compaction_tasks(index_snapshot, std::move(buckets_per_partition), min_merge_width, max_merge_width);
         }
 
-        return stats;
+        return hedge::ok();
     }
 
     void sst_manager::schedule_compaction(bool compact_all)
@@ -734,4 +751,142 @@ namespace hedge::db
             }
         }
     }
+
+    void sst_manager::print_compaction_stats() const
+    {
+        std::vector<std::vector<compaction_stats>> all_compaction_stats_per_level(this->_cfg.max_num_levels);
+
+        // Group the stats
+        for(const auto& state_ptr : this->_sorted_indices | std::views::values)
+        {
+            std::shared_lock lk(state_ptr->mutex);
+            for(size_t lvl = 0; lvl < this->_cfg.max_num_levels; lvl++)
+            {
+                const auto& stats_at_level = state_ptr->stats_per_lvl[lvl];
+                for(const auto& stat : stats_at_level)
+                    all_compaction_stats_per_level[lvl].emplace_back(stat);
+            }
+        }
+
+        // '_global' suffix refers to level-aggregate statistics
+        size_t bytes_written_global{};
+        size_t items_merged_global{};
+
+        auto min_time_point_global = std::chrono::high_resolution_clock::time_point::max();
+        auto max_time_point_global = std::chrono::high_resolution_clock::time_point::min();
+
+        struct time_segment
+        {
+            std::chrono::high_resolution_clock::time_point time_start;
+            std::chrono::high_resolution_clock::time_point time_end;
+        };
+
+        // Needed for finding "holes" for having the true Wall clock time spent on compaction
+        std::vector<time_segment> time_segments;
+
+        // Start collecting global statistics
+        for(size_t lvl = 0; lvl < this->_cfg.max_num_levels; lvl++)
+        {
+            for(const auto& stat : all_compaction_stats_per_level[lvl])
+            {
+                min_time_point_global = std::min(min_time_point_global, stat.time_start);
+                max_time_point_global = std::max(max_time_point_global, stat.time_end);
+
+                time_segments.emplace_back(stat.time_start, stat.time_end);
+            }
+        }
+
+        // Find how much time has been spent in idle between global start and global end
+        std::sort(time_segments.begin(), time_segments.end(), [](const time_segment& lhs, const time_segment& rhs)
+        {
+            return lhs.time_start < rhs.time_start;
+        });
+
+        size_t time_idling_us_global{0};
+
+        auto curr_segment = time_segments.begin();
+        for (size_t idx = 1; idx < time_segments.size(); idx++)
+        {
+            if (curr_segment->time_end >= time_segments[idx].time_start)
+            {
+                curr_segment->time_end = std::max(curr_segment->time_end, time_segments[idx].time_end);
+                continue;
+            }
+
+            time_idling_us_global += std::chrono::duration_cast<std::chrono::microseconds>(time_segments[idx].time_start - curr_segment->time_end).count();
+            curr_segment->time_start = time_segments[idx].time_start;
+            curr_segment->time_end = time_segments[idx].time_end;
+        }
+
+
+        const double total_time_us_global = std::chrono::duration_cast<std::chrono::microseconds>(max_time_point_global - min_time_point_global).count() - time_idling_us_global;
+        double cumulative_bytes_per_us_global{0.0};
+        double cumulative_items_per_us_global{0.0};
+
+        for(size_t lvl = 0; lvl < this->_cfg.max_num_levels; lvl++)
+        {
+            size_t bytes_written_at_lvl{};
+            size_t items_merged_at_lvl{};
+
+            auto min_time_point = std::chrono::high_resolution_clock::time_point::max();
+            auto max_time_point = std::chrono::high_resolution_clock::time_point::min();
+
+            for(const auto& stat : all_compaction_stats_per_level[lvl])
+            {
+                bytes_written_at_lvl += stat.output_bytes;
+                items_merged_at_lvl += stat.items_merged;
+
+                min_time_point = std::min(min_time_point, stat.time_start);
+                min_time_point_global = std::min(min_time_point_global, stat.time_start);
+
+                max_time_point = std::max(max_time_point, stat.time_end);
+                max_time_point_global = std::max(max_time_point_global, stat.time_end);
+            }
+
+            double cumulative_bytes_per_us{0.0};
+            double cumulative_items_per_us{0.0};
+
+            // For computing the aggregated stats across parallel compactions, we weigh a compaction by its time-share of the total compaction time
+            const double total_time_us = static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(max_time_point - min_time_point).count());
+
+            for(const auto& stat : all_compaction_stats_per_level[lvl])
+            {
+                const double duration_us = std::chrono::duration_cast<std::chrono::microseconds>(stat.time_end - stat.time_start).count();
+                const double time_share = static_cast<double>(duration_us) / static_cast<double>(total_time_us);
+                const double time_share_global = static_cast<double>(duration_us) / static_cast<double>(total_time_us_global);
+
+                cumulative_bytes_per_us += (static_cast<double>(stat.output_bytes) / duration_us) * time_share;
+                cumulative_items_per_us += (static_cast<double>(stat.items_merged) / duration_us) * time_share;
+
+                cumulative_bytes_per_us_global += (static_cast<double>(stat.output_bytes) / duration_us) * time_share_global;
+                cumulative_items_per_us_global += (static_cast<double>(stat.items_merged) / duration_us) * time_share_global;
+
+                bytes_written_global += stat.output_bytes;
+                items_merged_global += stat.items_merged;
+            }
+
+            if(all_compaction_stats_per_level[lvl].empty())
+                continue;
+
+            // B/us correspond to MiB/s
+            size_t mb_per_sec = static_cast<size_t>(cumulative_bytes_per_us * 1'000'000.0 / MiB);
+            size_t items_per_sec = static_cast<size_t>(cumulative_items_per_us * 1'000'000);
+
+            std::cout << "Compaction throughput at level " << lvl << " : " << mb_per_sec << " MB/s, " << items_per_sec << " entries/s\n"
+                      << "Bytes written at level: " << static_cast<size_t>(static_cast<double>(bytes_written_at_lvl / MB)) << " MB\n"
+                      << "Num compactions at level: " << all_compaction_stats_per_level[lvl].size() << " compactions\n";
+        }
+
+        size_t mb_per_sec_global = static_cast<size_t>(cumulative_bytes_per_us_global * 1'000'000.0 / MiB);
+        size_t items_per_sec_global = static_cast<size_t>(cumulative_items_per_us_global * 1'000'000);
+        size_t num_compactions = std::accumulate(all_compaction_stats_per_level.begin(), all_compaction_stats_per_level.end(), 0, [](size_t acc, const auto& o)
+        {
+            return acc + o.size();
+        });
+
+        std::cout << "Compaction throughput global: : " << mb_per_sec_global << " MB/s, " << items_per_sec_global << " entries/s\n"
+                  << "Bytes written global: " << static_cast<size_t>(static_cast<double>(bytes_written_global / MB)) << " MB\n"
+                  << "Num compactions at level: " << num_compactions << " compactions\n";
+    }
+
 } // namespace hedge::db

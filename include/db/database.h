@@ -55,7 +55,7 @@ namespace hedge::db
         size_t max_pending_flushes = 8;
         /// Maximum number of levels in the LSM tree.
         size_t max_num_levels = 40;
-        /// Minimum number of sorted_index files in the same level needed to trigger a merge. 
+        /// Minimum number of sorted_index files in the same level needed to trigger a merge.
         /// Higher means less frequent compactions (lower write amplification) but higher read amplification.
         size_t min_merge_width = 4;
         /// Maximum number of sorted_index files in the same level allowed before a merge is forced, regardless of their size ratio.
@@ -63,9 +63,14 @@ namespace hedge::db
         /// Per-partition L0 SST count threshold above which writes are blocked via backpressure.
         /// The effective threshold is multiplied by the total number of partitions.
         std::optional<size_t> ssts_in_l0_block_write_threshold = 40;
-        /// If true, the key-values will not be written to the WAL and will only exist in the memtable until flushed. 
+        /// If true, the key-values will not be written to the WAL and will only exist in the memtable until flushed.
         /// This reduces write amplification but increases risk of data loss on crash.
         bool disable_wal = false;
+        /// If true, collects statistics about flush
+        bool acquire_flush_stats = false;
+        /// If true, collects statistics about compaction
+        bool acquire_compaction_stats = false;
+
     };
 
     /**
@@ -177,6 +182,11 @@ namespace hedge::db
          * @brief Prints the LSM tree structure showing SST count and average file size per level per partition.
          */
         void print_tree_structure() const;
+
+        /**
+         * @brief Print some statistics about background compaction regarding throughput and bytes written.
+         */
+        void print_compaction_stats() const;
 
     private:
         /**
