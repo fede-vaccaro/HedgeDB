@@ -44,8 +44,18 @@ namespace hedge::db
     {
         static constexpr std::array tiers = {
             scan_tier{.label = "small  (1 - 100)", .min_entries = 1, .max_entries = 100, .read_ahead_size = 4 * KiB, .op_dividend = 1000},
-            scan_tier{.label = "medium (512 - 1024)", .min_entries = 512, .max_entries = 1024, .read_ahead_size = 4 * KiB, .op_dividend = 1000},
-            scan_tier{.label = "large  (114688 - 131072)", .min_entries = 114688, .max_entries = 131072, .read_ahead_size = 64 * KiB, .op_dividend = 10000},
+            scan_tier{.label = "small  (1 - 100)", .min_entries = 1, .max_entries = 100, .read_ahead_size = 4 * KiB, .op_dividend = 1000},
+            scan_tier{.label = "small  (1 - 100)", .min_entries = 1, .max_entries = 100, .read_ahead_size = 4 * KiB, .op_dividend = 1000},
+            scan_tier{.label = "small  (1 - 100)", .min_entries = 1, .max_entries = 100, .read_ahead_size = 4 * KiB, .op_dividend = 1000},
+            scan_tier{.label = "small  (1 - 100)", .min_entries = 1, .max_entries = 100, .read_ahead_size = 4 * KiB, .op_dividend = 1000},
+            scan_tier{.label = "small  (1 - 100)", .min_entries = 1, .max_entries = 100, .read_ahead_size = 4 * KiB, .op_dividend = 1000},
+            // scan_tier{.label = "medium (512 - 1024)", .min_entries = 512, .max_entries = 1024, .read_ahead_size = 4 * KiB, .op_dividend = 1000},
+            // scan_tier{.label = "medium (512 - 1024)", .min_entries = 512, .max_entries = 1024, .read_ahead_size = 4 * KiB, .op_dividend = 1000},
+            // scan_tier{.label = "medium (512 - 1024)", .min_entries = 512, .max_entries = 1024, .read_ahead_size = 4 * KiB, .op_dividend = 1000},
+            // scan_tier{.label = "medium (512 - 1024)", .min_entries = 512, .max_entries = 1024, .read_ahead_size = 4 * KiB, .op_dividend = 1000},
+            // scan_tier{.label = "medium (512 - 1024)", .min_entries = 512, .max_entries = 1024, .read_ahead_size = 4 * KiB, .op_dividend = 1000},
+            // scan_tier{.label = "medium (512 - 1024)", .min_entries = 512, .max_entries = 1024, .read_ahead_size = 4 * KiB, .op_dividend = 1000},
+            // scan_tier{.label = "large  (114688 - 131072)", .min_entries = 114688, .max_entries = 131072, .read_ahead_size = 64 * KiB, .op_dividend = 10000},
         };
 
         std::vector<uint64_t> seeds(num_threads);
@@ -124,7 +134,7 @@ namespace hedge::db
                 for(size_t op = tid; op < n_ops; op += num_threads)
                 {
                     co_await sem;
-                    co_await pin_to_thread{executor, tid}; // Hack around tmc for better thread-locality
+                    // co_await pin_to_thread{executor, tid}; // Hack around tmc for better thread-locality
                     size_t lower = xorshift64(rng) % n_ops;
                     size_t entries = tier.min_entries + (xorshift64(rng) % (tier.max_entries - tier.min_entries + 1));
                     fg.fork(do_scan(db, tier.read_ahead_size, lower, entries, scan_count, sem, measure_latency, hist));
@@ -155,6 +165,7 @@ namespace hedge::db
                 std::string label = std::string("seek (range ") + tier.label + ")";
                 hist->print_percentiles(label.c_str());
             }
+            std::this_thread::sleep_for(std::chrono::seconds{1});
         }
     }
 
