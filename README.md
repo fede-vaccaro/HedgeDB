@@ -19,7 +19,7 @@ NVMe SSDs and modern CPUs.
 HedgeDB is an LSM-Tree engine designed to saturate the NVMe device. Inspired by RocksDB, the engine targets write-heavy workloads with uniformly-distributed keys (UUIDs, hashes), and is structured around:
 
 - **Asynchronous execution.** `io_uring` + C++20 coroutines via [TooManyCooks](https://github.com/tzcnt/TooManyCooks),
-  a work-stealing scheduler. Every I/O is `co_await`ed;
+  a work-stealing scheduler. This allows to perform I/O batching and switching context within user-space.
 - **Partitioned LSM-tree.** The key space is sharded into `2^N` independent
   partitions (default 16). Compactions on different partitions run fully in
   parallel.
@@ -27,8 +27,8 @@ HedgeDB is an LSM-Tree engine designed to saturate the NVMe device. Inspired by 
   quotient filter on the read path to skip SSTs that can't contain a key.
 - **Per-thread WAL.** Each writer thread owns its own WAL file, no inode
   contention on the hot path.
-- **Direct I/O.** `O_DIRECT` everywhere on the SST path: predictable latencies
-  and transparent memory usage, avoiding IO stalls from page-cache pressure.
+- **Direct I/O.** reads, flush and compactions use `O_DIRECT`: predictable latencies
+  and transparent memory usage, with no IO stalls from page-cache pressure.
 - **MVCC.** Snapshot isolation over range scans.
 
 ---
@@ -94,6 +94,7 @@ ulimit -n 1048576
 | `-v` | `--vsize` | `100` | value size in bytes |
 | `-m` | `--mode` | `write` | `write` \| `read` \| `rw` \| `range` |
 | `-p` | `--path` | `/tmp/bench_db` | database directory |
+| `-s` | `--stats` | `disabled` | collect and print flush/compaction statistics |
 
 ### Hello world from the API
 
@@ -180,28 +181,28 @@ ctest --test-dir build -V
 
 HedgeDB is a **prototype**. Things that aren't here yet:
 
-- **Full-fledged crash recovery** — WAL replay works, but partial-write and
+- **Full-fledged crash recovery:** WAL replay works, but partial-write and
   corrupted-file edge cases aren't handled.
-- **Battle-testing & hardening** — never run against real-world workloads
+- **Battle-testing & hardening:** never run against real-world workloads
   or for long execution periods.
-- **Cross-platform support** — Linux only (`io_uring`).
-- **Block compression** — many workloads would see meaningful size, space,
+- **Cross-platform support:** Linux only (`io_uring`).
+- **Block compression:** many workloads would see meaningful size, space,
   and write-amplification reduction from lossless compression.
-- **Batched operations** — no batch put/get APIs to amortize call overhead.
-- **Column families** — single keyspace per database.
-- **Large values support** — if `key.size() + value.size()` exceeds the
+- **Batched operations:** no batch put/get APIs to amortize call overhead.
+- **Column families:** single keyspace per database.
+- **Large values support:** if `key.size() + value.size()` exceeds the
   index-block page size (a bit less than 4 KB), the flush will break.
 
 ## Future plans
 
-- **Hyper-Clock Cache** — approximate LRU cache that trades counting precision
-  for a faster algorithm — works well with Direct I/O.
-- **Key-value separation** — SSTs would store keys + pointers, with values in
-  separate append-only `.vlog` files; dramatically reduces value
-  write-amplification during compaction (paired with a GC story).
-- **Rate-limiting** — soft-stall writes when L0 SSTs cross a threshold,
+- **Hyper-Clock Cache:** an approximate LRU cache that trades counting precision
+  for a faster algorithm. Works well with Direct I/O.
+- **Key-value separation:** SSTs would store keys + pointers, with values in
+  separate append-only `.vlog` files. This cuts value write-amplification
+  during compaction a lot (paired with a GC story).
+- **Rate-limiting:** soft-stall writes when L0 SSTs cross a threshold,
   smoothing long-tail latencies due to compaction backlog.
-- *Rewrite in Rust?* — 👀
+- *Rewrite in Rust?* 👀
 
 ---
 
