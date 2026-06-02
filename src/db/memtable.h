@@ -200,7 +200,7 @@ namespace hedge::db
     private:
         static constexpr size_t VALUE_DATA_ALIGNMENT = 16; // Deprecated, might use actual alignment (8 bytes)
 
-        [[nodiscard]] tmc::task<std::shared_ptr<rw_sync_buffer_t>> _make_memtable();
+        [[nodiscard]] tmc::task<std::shared_ptr<rw_sync_buffer_t>> _make_memtable(tmc::chan_tok<std::unique_ptr<wal>>& tok);
         tmc::task<bool> _flush(rw_sync_buffer_ptr_t expected_table);
         tmc::task<void> _flush_inner(size_t curr_flush_epoch,
                                      rw_sync_buffer_ptr_t memtable_to_flush,

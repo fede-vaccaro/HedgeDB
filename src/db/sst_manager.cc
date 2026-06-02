@@ -57,9 +57,11 @@ namespace hedge::db
     {
         auto make_compaction_job = [](sst_manager* sst_manager) -> tmc::task<void>
         {
+            auto ch_tok = sst_manager->_compaction_scheduler_signal_chan.new_token();
+
             while(true)
             {
-                auto compact_all = co_await sst_manager->_compaction_scheduler_signal_chan.pull();
+                auto compact_all = co_await ch_tok.pull();
 
                 if(!compact_all)
                     break;
@@ -81,10 +83,11 @@ namespace hedge::db
         // The flush stats are already aggregated across partitions
         // However, stats are counted per partition
         // We adapt the stats to this scheme
-        if (flush_stats_opt)
+        if(flush_stats_opt)
         {
             flush_stats_opt->input_bytes /= new_ssts.size();
             flush_stats_opt->output_bytes /= new_ssts.size();
+            flush_stats_opt->items_merged /= new_ssts.size();
         }
 
         for(auto& new_sorted_index : new_ssts)
@@ -104,8 +107,8 @@ namespace hedge::db
                 state.levels_seq_num.fetch_add(1, std::memory_order::release);
                 affected_partitions.push_back(prefix);
 
-                if (flush_stats_opt.has_value())
-                    state.stats_per_lvl[0].emplace_back(*flush_stats_opt);
+                if(flush_stats_opt.has_value())
+                    state.stats_per_lvl[0].emplace_back(flush_stats_opt.value());
             }
         }
 
@@ -653,7 +656,8 @@ namespace hedge::db
     void sst_manager::schedule_compaction(bool compact_all)
     {
         // Signal the compaction worker to start a new round of compaction
-        this->_compaction_scheduler_signal_chan.post(compact_all);
+        auto ch_tok = this->_compaction_scheduler_signal_chan.new_token();
+        ch_tok.post(compact_all);
     }
 
     void sst_manager::wait_for_compactions_to_finish()
@@ -661,7 +665,8 @@ namespace hedge::db
 
         [[maybe_unused]] auto make_wait_job = [](sst_manager* sst_manager) -> tmc::task<void>
         {
-            co_await sst_manager->_compaction_scheduler_signal_chan.drain();
+            auto ch_tok = sst_manager->_compaction_scheduler_signal_chan.new_token();
+            co_await ch_tok.drain();
         };
 
         // Wait for all in-flight self-completing tasks on executor pool
@@ -798,16 +803,14 @@ namespace hedge::db
 
         // Find how much time has been spent in idle between global start and global end
         std::sort(time_segments.begin(), time_segments.end(), [](const time_segment& lhs, const time_segment& rhs)
-        {
-            return lhs.time_start < rhs.time_start;
-        });
+                  { return lhs.time_start < rhs.time_start; });
 
         size_t time_idling_us_global{0};
 
         auto curr_segment = time_segments.begin();
-        for (size_t idx = 1; idx < time_segments.size(); idx++)
+        for(size_t idx = 1; idx < time_segments.size(); idx++)
         {
-            if (curr_segment->time_end >= time_segments[idx].time_start)
+            if(curr_segment->time_end >= time_segments[idx].time_start)
             {
                 curr_segment->time_end = std::max(curr_segment->time_end, time_segments[idx].time_end);
                 continue;
@@ -817,7 +820,6 @@ namespace hedge::db
             curr_segment->time_start = time_segments[idx].time_start;
             curr_segment->time_end = time_segments[idx].time_end;
         }
-
 
         const double total_time_us_global = std::chrono::duration_cast<std::chrono::microseconds>(max_time_point_global - min_time_point_global).count() - time_idling_us_global;
         double cumulative_bytes_per_us_global{0.0};
@@ -874,19 +876,25 @@ namespace hedge::db
 
             std::cout << "Compaction throughput at level " << lvl << " : " << mb_per_sec << " MB/s, " << items_per_sec << " entries/s\n"
                       << "Bytes written at level: " << static_cast<size_t>(static_cast<double>(bytes_written_at_lvl / MB)) << " MB\n"
+                      << "Entries written at level: " << items_merged_at_lvl << "\n"
                       << "Num compactions at level: " << all_compaction_stats_per_level[lvl].size() << " compactions\n";
         }
 
         size_t mb_per_sec_global = static_cast<size_t>(cumulative_bytes_per_us_global * 1'000'000.0 / MiB);
         size_t items_per_sec_global = static_cast<size_t>(cumulative_items_per_us_global * 1'000'000);
-        size_t num_compactions = std::accumulate(all_compaction_stats_per_level.begin(), all_compaction_stats_per_level.end(), 0, [](size_t acc, const auto& o)
-        {
-            return acc + o.size();
-        });
+        size_t num_compactions = std::accumulate(
+            all_compaction_stats_per_level.begin(),
+            all_compaction_stats_per_level.end(),
+            0,
+            [](size_t acc, const auto& o)
+            {
+                return acc + o.size();
+            });
 
         std::cout << "Compaction throughput global: : " << mb_per_sec_global << " MB/s, " << items_per_sec_global << " entries/s\n"
                   << "Bytes written global: " << static_cast<size_t>(static_cast<double>(bytes_written_global / MB)) << " MB\n"
-                  << "Num compactions at level: " << num_compactions << " compactions\n";
+                  << "Entries written at level: " << items_merged_global << "\n"
+                  << "Total num compaction: " << num_compactions << " compactions\n";
     }
 
 } // namespace hedge::db

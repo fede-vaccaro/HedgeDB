@@ -109,8 +109,9 @@ namespace hedge::db
             *this->_flush_executor,
             [](memtable* self) -> tmc::task<void>
             {
-                self->_table.ref().store(co_await self->_make_memtable());
-                self->_pipelined_table.ref().store(co_await self->_make_memtable());
+                auto ch_tok = self->_wal_ch.new_token();
+                self->_table.ref().store(co_await self->_make_memtable(ch_tok));
+                self->_pipelined_table.ref().store(co_await self->_make_memtable(ch_tok));
             }(this))
             .wait();
     }
@@ -124,12 +125,12 @@ namespace hedge::db
             ::close(*this->_wal_dir_fd);
     }
 
-    tmc::task<std::shared_ptr<memtable::rw_sync_buffer_t>> memtable::_make_memtable()
+    tmc::task<std::shared_ptr<memtable::rw_sync_buffer_t>> memtable::_make_memtable(tmc::chan_tok<std::unique_ptr<wal>>& ch_tok)
     {
         std::unique_ptr<wal> wal_slot;
         if(this->_cfg.use_wal)
         {
-            wal_slot = (co_await this->_wal_ch.pull()).value_or(nullptr);
+            wal_slot = (co_await ch_tok.pull()).value_or(nullptr);
             assert(wal_slot != nullptr);
         }
 
@@ -349,7 +350,9 @@ namespace hedge::db
 
             tmc::spawn([](memtable* self) -> tmc::task<void>
                        {
-                self->_pipelined_table.ref().store(co_await self->_make_memtable(), std::memory_order::relaxed);
+                thread_local auto ch_tok = self->_wal_ch.new_token();
+
+                self->_pipelined_table.ref().store(co_await self->_make_memtable(ch_tok), std::memory_order::relaxed);
                 self->_pipelined_table.notify_one();
                 co_return; }(this))
                 .run_on(*this->_flusher)
@@ -380,7 +383,6 @@ namespace hedge::db
             std::this_thread::yield();
 
         auto accessor = memtable_to_flush->ptr()->accessor();
-
 
         auto t0 = std::chrono::high_resolution_clock::now();
         // The flush procedure generates 2^num_partition_exponent SSTs (1 per partition)
@@ -449,7 +451,8 @@ namespace hedge::db
         if(auto& w = memtable_to_flush->ptr()->_wal; w)
         {
             w->reset();
-            [[maybe_unused]] bool ok = co_await this->_wal_ch.push(std::move(w));
+            auto ch_tok = this->_wal_ch.new_token();
+            [[maybe_unused]] bool ok = co_await ch_tok.push(std::move(w));
             assert(ok);
         }
 
