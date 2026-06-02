@@ -169,6 +169,18 @@ namespace hedge::io
         }
     };
 
+    struct io_fsync_request final : io_request
+    {
+        int32_t fd;
+
+        io_fsync_request(int32_t fd) : fd(fd) {}
+
+        void prepare_sqe(io_uring_sqe* sqe) override
+        {
+            io_uring_prep_fsync(sqe, fd, 0);
+        }
+    };
+
     struct io_ftruncate_request final : io_request
     {
         int32_t fd;

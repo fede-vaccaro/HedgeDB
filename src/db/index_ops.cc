@@ -6,11 +6,11 @@
 #include <size_literals.h>
 #include <sys/mman.h>
 
+#include "async/generator.h"
 #include "db/block.h"
 #include "db/merge/write_buffer.h"
 #include "db/quotient_filter.h"
 #include "db/skiplist.h"
-#include "async/generator.h"
 #include "index_ops.h"
 #include "io/io_requests.hpp"
 #include "page_aligned_buffer.h"
@@ -268,8 +268,7 @@ namespace hedge::db
         size_t upper_bound,
         size_t epoch,
         [[maybe_unused]] std::shared_ptr<db::sharded_page_cache> cache,
-        bool use_odirect,
-        bool fdatasync_output)
+        bool use_odirect)
     {
         std::optional<quotient_filter> qf = create_qf_for_key_count(entry_count);
 
@@ -352,12 +351,9 @@ namespace hedge::db
         if(!use_odirect)
             posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM);
 
-        if(fdatasync_output) [[likely]]
-        {
-            int32_t sync_res = co_await hedge::io::fdatasync(fd);
-            if(sync_res < 0)
-                co_return hedge::error("Failed to fdatasync file: " + std::string(strerror(-sync_res)));
-        }
+        int32_t sync_res = co_await hedge::io::fsync(fd);
+        if(sync_res < 0)
+            co_return hedge::error("Failed to fdatasync file: " + std::string(strerror(-sync_res)));
 
         co_return sst(std::move(file), std::move(meta_index), footer, std::nullopt, std::move(qf));
     }
@@ -375,8 +371,7 @@ namespace hedge::db
         std::mutex* results_mutex,
         std::vector<sst>* results,
         std::vector<hedge::error>* errors,
-        tmc::latch* latch,
-        bool fdatasync_output)
+        tmc::latch* latch)
     {
         size_t avg_kv_len = hedge::ceil(sum_kv_len, entry_count);
 
@@ -389,8 +384,7 @@ namespace hedge::db
             partition_id,
             flush_iteration,
             std::move(cache),
-            use_odirect,
-            fdatasync_output);
+            use_odirect);
 
         {
             std::lock_guard lk(*results_mutex);
@@ -411,8 +405,7 @@ namespace hedge::db
         size_t flush_iteration,
         std::shared_ptr<db::sharded_page_cache> cache,
         bool use_odirect,
-        tmc::ex_cpu& flush_executor,
-        bool fdatasync_ssts)
+        tmc::ex_cpu& flush_executor)
     {
         if(num_partition_exponent > 16)
             co_return hedge::error("Number of partitions exponent must be less than or equal to 16");
@@ -452,8 +445,7 @@ namespace hedge::db
                           &results_mutex,
                           &results,
                           &errors,
-                          &latch,
-                          fdatasync_ssts),
+                          &latch),
                       0, thread_hint++ % thread_count);
 
             range_count++;

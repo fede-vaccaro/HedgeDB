@@ -99,8 +99,7 @@ namespace hedge::db
             size_t flush_iteration,
             std::shared_ptr<db::sharded_page_cache> cache,
             bool use_odirect,
-            tmc::ex_cpu& flush_executor,
-            bool fdatasync_ssts);
+            tmc::ex_cpu& flush_executor);
 
         struct merge_config
         {
@@ -112,7 +111,6 @@ namespace hedge::db
                                                    ///< Set `true` when this is the final merge for the partition to eliminate tombstones and reclaim space.
             bool create_new_with_odirect{false};   ///< If `true`, opens the output file with O_DIRECT flag for direct I/O access.
             bool populate_cache_with_output{true}; ///< If `true`, tries to fill the cache with the resulting sorted index
-            bool fdatasync_output{true};           ///< If `true`, issues an fdatasync on the output file descriptor before completing the merge, to ensure durability of the merged index on disk before it becomes visible to the rest of the system.
         };
 
         static tmc::task<hedge::expected<sst>> k_way_merge_async2(

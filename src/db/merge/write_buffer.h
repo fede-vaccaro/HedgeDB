@@ -17,6 +17,7 @@ namespace hedge::db
     struct write_result
     {
         size_t bytes_written{0};
+        size_t bytes_expected{0};
         int32_t error_code{0};
     };
 
@@ -91,6 +92,7 @@ namespace hedge::db
 
             co_return write_result{
                 .bytes_written = res >= 0 ? static_cast<size_t>(res) : 0,
+                .bytes_expected = bytes_written,
                 .error_code = res < 0 ? res : 0};
         }
 

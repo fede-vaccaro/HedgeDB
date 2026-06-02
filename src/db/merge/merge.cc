@@ -535,7 +535,7 @@ namespace hedge::db
 
         merged_meta_index.shrink_to_fit();
 
-        int32_t res = co_await hedge::io::fdatasync(output_file.fd());
+        int32_t res = co_await hedge::io::fsync(output_file.fd());
         if(res < 0)
             co_return hedge::error("Failed to fdatasync merged file: " + std::string(strerror(-res)));
 

@@ -15,6 +15,7 @@ namespace hedge::io
     hedge::io::aw_io close(int32_t fd);
     hedge::io::aw_io statx(std::string path, struct statx* buf, unsigned int mask = STATX_SIZE | STATX_BASIC_STATS);
     hedge::io::aw_io fdatasync(int32_t fd);
+    hedge::io::aw_io fsync(int32_t fd);
     hedge::io::aw_io ftruncate(int32_t fd, size_t length);
     hedge::io::aw_io unlink(std::string path, int32_t flags = 0);
     hedge::io::aw_io send_msg(int32_t target_ring_fd, uint64_t data, int32_t len);
@@ -70,6 +71,11 @@ namespace hedge::io
     hedge::io::aw_io fdatasync(int32_t fd)
     {
         return hedge::io::aw_io{std::make_unique<hedge::io::io_fdatasync_request>(fd)};
+    }
+
+    hedge::io::aw_io fsync(int32_t fd)
+    {
+        return hedge::io::aw_io{std::make_unique<hedge::io::io_fsync_request>(fd)};
     }
 
     hedge::io::aw_io ftruncate(int32_t fd, size_t length)

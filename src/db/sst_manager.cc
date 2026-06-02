@@ -399,7 +399,7 @@ namespace hedge::db
             }
         }
 
-        auto fsync_res = co_await io::fdatasync(state.state_file.fd());
+        auto fsync_res = co_await io::fsync(state.state_file.fd());
         if(fsync_res < 0)
         {
             this->_logger.log("fdatasync failed for partition state file: ", strerror(-fsync_res));
