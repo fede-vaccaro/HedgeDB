@@ -142,7 +142,7 @@ int main()
         /*indices_path=*/"/tmp/indices_test",
         &flush_epoch,
         flusher_pool,
-        /*push_new_indices=*/[](std::vector<hedge::db::sst> /**/) -> tmc::task<void>
+        /*push_new_indices=*/[](std::vector<hedge::db::sst> /**/, std::optional<hedge::compaction_stats> /**/) -> tmc::task<void>
         { co_return; },
         /*trigger_compaction_callback=*/[] {},
         /*page_cache=*/nullptr);

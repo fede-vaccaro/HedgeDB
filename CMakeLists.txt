@@ -152,10 +152,6 @@ target_link_libraries(hello_world hedgedb ${MALLOC})
 add_executable(memtable_perf_test src/memtable_perf_test.cc)
 target_link_libraries(memtable_perf_test hedgedb)
 
-# database_perf_test - full database write+read benchmark (no gtest)
-add_executable(database_perf_test src/database_perf_test.cc)
-target_link_libraries(database_perf_test hedgedb ${MALLOC})
-
 if (BUILD_TESTS)
     # sst tests (flush memtable -> on-disk SST -> lookup, with disk reload coverage)
     add_executable(sst_test test/sst_test.cc)
