@@ -22,7 +22,8 @@ namespace hedge::db
                   << "  -p, --path <path>      database path              (default: /tmp/bench_db)\n"
                   << "  -l, --latency          enable latency measurement (default: disabled)\n"
                   << "  -t, --threads <N>      foreground workers         (default: 12)\n"
-                  << "  -b, --bg-threads <N>   background workers, 0=auto (default: 0)\n";
+                  << "  -b, --bg-threads <N>   background workers, 0=auto (default: 0)\n"
+                  << "  -s, --stats            print compaction statistics (default: disabled)\n";
     }
 
     static bench_config parse_args(int argc, char* argv[])
@@ -48,6 +49,8 @@ namespace hedge::db
                 cfg.num_threads = std::strtoull(next(), nullptr, 10);
             else if(arg == "-b" || arg == "--bg-threads")
                 cfg.num_bg_threads = std::strtoull(next(), nullptr, 10);
+            else if(arg == "-s" || arg == "--stats")
+                cfg.print_stats = true;
         }
         return cfg;
     }
@@ -94,6 +97,7 @@ int main(int argc, char* argv[])
               << "  latency=" << (cfg.measure_latency ? "enabled" : "disabled")
               << "  threads=" << cfg.num_threads
               << "  bg_threads=" << cfg.num_bg_threads.value_or(0)
+              << "  stats=" << (cfg.print_stats ? "enabled" : "disabled")
               << "\n";
 
     expected<std::shared_ptr<database>> maybe_db = open_db(cfg);
@@ -113,7 +117,13 @@ int main(int argc, char* argv[])
         run_rw(db, values, cfg.num_ops, cfg.vsize, cfg.num_threads, cfg.measure_latency);
     else if(cfg.mode == "range")
         run_range(db, cfg.num_ops, cfg.num_threads, cfg.measure_latency);
-    db->print_compaction_stats();
+
+    if(cfg.print_stats)
+    {
+        db->print_compaction_stats();
+        std::cout << "\n";
+        db->print_tree_structure();
+    }
 
     std::cout << "\n=== DONE ===\n";
 

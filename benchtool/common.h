@@ -103,6 +103,7 @@ namespace hedge::db
         bool measure_latency = false;
         size_t num_threads = NUM_WORKERS;
         std::optional<size_t> num_bg_threads;
+        bool print_stats = false;
     };
 
 } // namespace hedge::db

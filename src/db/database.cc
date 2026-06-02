@@ -39,7 +39,7 @@ namespace hedge::db
                 .num_writer_threads = io::static_pool::instance()->num_threads(),
                 .use_wal = !config.disable_wal,
                 .max_pending_flushes = config.max_pending_flushes,
-                .acquire_flush_statistics = config.acquire_flush_stats,
+                .acquire_flush_stats = config.acquire_flush_stats,
             },
             config.num_partition_exponent,
             db._partitions_path,

@@ -421,7 +421,7 @@ namespace hedge::db
         tmc::task<void> update_manifest_callback{};
         {
             std::unique_lock lk(this->_pending_flushes_mutex);
-            update_manifest_callback = this->_push_new_ssts_callback(std::move(partitioned_sorted_indices.value()), this->_cfg.acquire_flush_statistics ? std::optional{stats} : std::nullopt);
+            update_manifest_callback = this->_push_new_ssts_callback(std::move(partitioned_sorted_indices.value()), this->_cfg.acquire_flush_stats ? std::optional{stats} : std::nullopt);
             auto it = this->_pending_flushes.find(curr_flush_epoch);
             assert(it->second == memtable_to_flush);
             this->_pending_flushes.erase(it); // LSM-tree updated, can safely erase the memtable from memory

@@ -120,6 +120,7 @@ struct bench_config
     bool measure_latency = false;
     size_t num_threads = NUM_WORKERS;
     size_t num_bg_threads = 4;
+    bool print_stats = false;
 };
 
 static void print_usage(const char* prog)
@@ -131,7 +132,8 @@ static void print_usage(const char* prog)
               << "  -p, --path <path>      database path              (default: /tmp/bench_db_rocksdb)\n"
               << "  -l, --latency          enable latency measurement (default: disabled)\n"
               << "  -t, --threads <N>      foreground workers         (default: 20)\n"
-              << "  -b, --bg-threads <N>   max_background_jobs        (default: 4)\n";
+              << "  -b, --bg-threads <N>   max_background_jobs        (default: 4)\n"
+              << "  -s, --stats            print compaction statistics (default: disabled)\n";
 }
 
 static bench_config parse_args(int argc, char* argv[])
@@ -157,6 +159,8 @@ static bench_config parse_args(int argc, char* argv[])
             cfg.num_threads = std::strtoull(next(), nullptr, 10);
         else if(arg == "-b" || arg == "--bg-threads")
             cfg.num_bg_threads = std::strtoull(next(), nullptr, 10);
+        else if(arg == "-s" || arg == "--stats")
+            cfg.print_stats = true;
     }
     return cfg;
 }
@@ -222,8 +226,8 @@ static rocksdb::Options make_db_options(size_t num_bg_threads)
     table_opts.block_cache = rocksdb::HyperClockCacheOptions(1ULL * 1024 * 1024 * 1024).MakeSharedCache();
     table_opts.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
     table_opts.block_size = 4 * 1024;
-    opts.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_opts));
     table_opts.pin_l0_filter_and_index_blocks_in_cache = true;
+    opts.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_opts));
 
     return opts;
 }
@@ -276,6 +280,14 @@ static void print_max_rss()
         return;
     double mib = usage.ru_maxrss / 1024.0;
     std::cout << "Max RSS:    " << mib << " MiB\n";
+}
+
+static void print_compaction_stats(rocksdb::DB* db)
+{
+    std::string stats;
+    if(db->GetProperty("rocksdb.stats", &stats))
+        std::cout << "\n=== Compaction statistics ===\n"
+                  << stats << "\n";
 }
 
 static void run_load(rocksdb::DB* db, const values_t& values, size_t n, size_t vsize, size_t num_threads, bool measure_latency)
@@ -657,6 +669,7 @@ int main(int argc, char* argv[])
               << "  latency=" << (cfg.measure_latency ? "enabled" : "disabled")
               << "  threads=" << cfg.num_threads
               << "  bg_threads=" << cfg.num_bg_threads
+              << "  stats=" << (cfg.print_stats ? "enabled" : "disabled")
               << "\n";
 
     auto db = open_db(cfg);
@@ -675,6 +688,8 @@ int main(int argc, char* argv[])
         run_range(db.get(), cfg.num_ops, cfg.num_threads, cfg.measure_latency);
 
     std::cout << "\n=== DONE ===\n";
+    if(cfg.print_stats)
+        print_compaction_stats(db.get());
     print_max_rss();
     return 0;
 }

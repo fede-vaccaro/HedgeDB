@@ -33,6 +33,8 @@ namespace hedge::db
     expected<std::shared_ptr<database>> open_db(const bench_config& cfg)
     {
         db_config db_cfg = make_db_config(cfg.num_bg_threads);
+        db_cfg.acquire_flush_stats = cfg.print_stats;
+        db_cfg.acquire_compaction_stats = cfg.print_stats;
         if(cfg.mode == "load")
         {
             if(std::filesystem::exists(cfg.db_path))
