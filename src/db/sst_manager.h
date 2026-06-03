@@ -99,13 +99,13 @@ namespace hedge::db
             partition_t levels;
             permissions_t permissions;   // For fine-grained coordination between compaction commits
             sst_level_created_t created; // For tracking (for each level) whether it's been created, or whether a running compaction task will create it
-                                         // Needed for coordinating tombstone garbage collection
-            stats_per_level stats_per_lvl;
+            stats_per_level stats_per_lvl; // Needed for coordinating tombstone garbage collection
 
+            // Manifest related variables
             std::atomic_size_t levels_seq_num{0};
             fs::file state_file{};
             std::optional<int> dir_fd{};
-            std::mutex state_write_mutex{};
+            std::mutex manifest_write_mutex{};
 
             ~_partition_state()
             {

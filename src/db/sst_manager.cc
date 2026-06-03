@@ -324,6 +324,7 @@ namespace hedge::db
     std::string sst_manager::_serialize_levels(const partition_t& levels)
     {
         std::string result;
+        result.reserve(PAGE_SIZE_IN_BYTES);
         for(const auto& level : levels)
         {
             bool first = true;
@@ -336,7 +337,6 @@ namespace hedge::db
             }
             result += '\n';
         }
-        result.resize(PAGE_SIZE_IN_BYTES, '\0');
         return result;
     }
 
@@ -382,27 +382,45 @@ namespace hedge::db
             snap_gen = state.levels_seq_num.load(std::memory_order::acquire);
         }
 
-        auto buf = _serialize_levels(snapshot);
+        auto buf = this->_serialize_levels(snapshot);
 
         {
-            std::lock_guard wlk(state.state_write_mutex);
+            std::lock_guard wlk(state.manifest_write_mutex);
 
             // If levels changed since snapshot, re-serialize the current state
             if(state.levels_seq_num.load(std::memory_order::acquire) != snap_gen)
             {
                 std::shared_lock lk(state.mutex);
                 snapshot = state.levels;
-                buf = _serialize_levels(snapshot);
+                buf = this->_serialize_levels(snapshot);
             }
 
-            if(::pwrite(state.state_file.fd(), buf.data(), PAGE_SIZE_IN_BYTES, 0) < 0)
+            int32_t n = pwrite(state.state_file.fd(), buf.data(), buf.size(), 0);
+
+            if(n < 0)
             {
-                this->_logger.log("pwrite failed for partition state file: ", strerror(errno));
-                co_return hedge::error(std::string("pwrite failed for partition state file: ") + strerror(errno));
+                std::string err = std::format("pwrite failed for partition state file: {}", strerror(errno));
+                this->_logger.log(err);
+                co_return hedge::error(err);
+            }
+
+            if (n < static_cast<int32_t>(buf.size()))
+            {
+                std::string err = std::format("pwrite written less bytes than expected: {} < {}", n, buf.size());
+                this->_logger.log(err);
+                co_return hedge::error(err);
+            }
+
+            int32_t res = ftruncate(state.state_file.fd(), buf.size());
+            if(res < 0)
+            {
+                std::string err = std::format("ftruncate error: {}", strerror(errno));
+                this->_logger.log(err);
+                co_return hedge::error(err);
             }
         }
 
-        auto fsync_res = co_await io::fsync(state.state_file.fd());
+        int32_t fsync_res = co_await io::fsync(state.state_file.fd());
         if(fsync_res < 0)
         {
             this->_logger.log("fdatasync failed for partition state file: ", strerror(-fsync_res));

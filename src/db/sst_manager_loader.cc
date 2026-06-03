@@ -74,13 +74,13 @@ namespace hedge::db
             return result;
         }
 
-        static hedge::status _load_partition_manifest(sst_manager::_partition_state& state, const std::filesystem::path& dir_path)
+        static hedge::status _load_partition_manifest_file(sst_manager::_partition_state& state, const std::filesystem::path& dir_path)
         {
             auto partition_manifest_path = dir_path / sst_manager::MANIFEST_FILENAME;
             if(!std::filesystem::exists(partition_manifest_path))
                 return hedge::ok();
 
-            auto maybe_file = fs::file::from_path(partition_manifest_path, fs::file::open_mode::read_write, false, PAGE_SIZE_IN_BYTES);
+            auto maybe_file = fs::file::from_path(partition_manifest_path, fs::file::open_mode::read_write, false);
             if(maybe_file)
                 state.state_file = std::move(maybe_file.value());
 
@@ -139,15 +139,25 @@ namespace hedge::db
             if(!std::filesystem::exists(dir_path))
                 return hedge::ok();
 
-            auto ok = sst_manager_helpers::_load_partition_manifest(state, dir_path);
+            auto ok = sst_manager_helpers::_load_partition_manifest_file(state, dir_path);
             if(!ok)
                 return hedge::error(std::format("Failed to load manifest for partition {}: {}", partition_id, ok.error().to_string()));
 
-            std::string buf(PAGE_SIZE_IN_BYTES, '\0');
-            ssize_t n = state.state_file.fd() != -1 ? ::pread(state.state_file.fd(), buf.data(), PAGE_SIZE_IN_BYTES, 0) : 0;
+            std::string buf(state.state_file.file_size(), '\0');
+            ssize_t n = state.state_file.fd() != -1 ? ::pread(state.state_file.fd(), buf.data(), buf.size(), 0) : 0;
 
-            if(n > 0)
+            if(n < 0)
             {
+                std::string err = std::format("pread failed for partition state file: {}", strerror(errno));
+                return hedge::error(err);
+            }
+
+            if (n < static_cast<int32_t>(buf.size()))
+            {
+                std::string err = std::format("pread read less bytes than expected: {} < {}", n, buf.size());
+                return hedge::error(err);
+            }
+
                 auto maybe_levels = _parse_manifest_and_load_ssts(buf, dir_path, cfg.max_num_levels, cfg.use_odirect_for_ssts);
                 if(maybe_levels)
                 {
@@ -165,7 +175,6 @@ namespace hedge::db
                         }
                     }
                 }
-            }
 
             ok = sst_manager_helpers::_check_orphans(state, dir_path);
             if(!ok)
