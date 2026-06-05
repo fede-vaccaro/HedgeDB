@@ -134,14 +134,15 @@ else()
     message(STATUS "No custom allocator found")
 endif()
 
-# benchtool — unified benchmark CLI (write / read / rw / range modes)
+# benchtool (unified benchmark CLI)
 add_executable(benchtool
     benchtool/main.cc
     benchtool/utils.cc
     benchtool/load.cc
     benchtool/read.cc
     benchtool/rw.cc
-    benchtool/range.cc)
+    benchtool/range.cc
+    benchtool/compaction.cc)
 target_link_libraries(benchtool hedgedb ${MALLOC})
 
 # Hello world example

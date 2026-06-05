@@ -233,6 +233,8 @@ namespace hedge::db
             compaction_stats.input_bytes += i->file_size();
         }
 
+        // this->_logger.log("Compaction at level ", level, " num input SST: ", input_ptrs.size(), " total input size: ", (double)compaction_stats.input_bytes / 1024 / 1024, " MB");
+
         compaction_stats.num_inputs = inputs.size();
         compaction_stats.time_start = std::chrono::high_resolution_clock::now();
         hedge::expected<sst> merge_result =
@@ -275,7 +277,14 @@ namespace hedge::db
             state.levels_seq_num.fetch_add(1, std::memory_order::release);
 
             if(this->_cfg.acquire_compaction_stats)
+            {
                 state.stats_per_lvl[next_level_idx].emplace_back(compaction_stats);
+                // this->_logger.log("Merged ",
+                //     static_cast<double>(compaction_stats.input_bytes) / 1024.0 / 1024.0,
+                //     " in ",
+                //     std::chrono::duration_cast<std::chrono::seconds>(compaction_stats.time_end - compaction_stats.time_start).count(),
+                //     " seconds");
+            }
 
             lk.unlock();
 
@@ -866,6 +875,11 @@ namespace hedge::db
             double cumulative_bytes_per_us{0.0};
             double cumulative_items_per_us{0.0};
 
+            // Average of each compaction's own throughput (output_bytes/duration), independent
+            // of parallelism — i.e. the true single-job/single-stream merge rate
+            double single_job_bytes_per_us{0.0};
+            double single_job_items_per_us{0.0};
+
             // For computing the aggregated stats across parallel compactions, we weigh a compaction by its time-share of the total compaction time
             const double total_time_us = static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(max_time_point - min_time_point).count());
 
@@ -874,6 +888,9 @@ namespace hedge::db
                 const double duration_us = std::chrono::duration_cast<std::chrono::microseconds>(stat.time_end - stat.time_start).count();
                 const double time_share = static_cast<double>(duration_us) / static_cast<double>(total_time_us);
                 const double time_share_global = static_cast<double>(duration_us) / static_cast<double>(total_time_us_global);
+
+                single_job_bytes_per_us += static_cast<double>(stat.output_bytes) / duration_us;
+                single_job_items_per_us += static_cast<double>(stat.items_merged) / duration_us;
 
                 cumulative_bytes_per_us += (static_cast<double>(stat.output_bytes) / duration_us) * time_share;
                 cumulative_items_per_us += (static_cast<double>(stat.items_merged) / duration_us) * time_share;
@@ -892,7 +909,12 @@ namespace hedge::db
             size_t mb_per_sec = static_cast<size_t>(cumulative_bytes_per_us * 1'000'000.0 / MiB);
             size_t items_per_sec = static_cast<size_t>(cumulative_items_per_us * 1'000'000);
 
+            const size_t num_compactions_at_lvl = all_compaction_stats_per_level[lvl].size();
+            size_t avg_single_job_mb_per_sec = static_cast<size_t>(single_job_bytes_per_us / num_compactions_at_lvl * 1'000'000.0 / MiB);
+            size_t avg_single_job_items_per_sec = static_cast<size_t>(single_job_items_per_us / num_compactions_at_lvl * 1'000'000);
+
             std::cout << "Compaction throughput at level " << lvl << " : " << mb_per_sec << " MB/s, " << items_per_sec << " entries/s\n"
+                      << "Avg single-job throughput at level: " << avg_single_job_mb_per_sec << " MB/s, " << avg_single_job_items_per_sec << " entries/s\n"
                       << "Bytes written at level: " << static_cast<size_t>(static_cast<double>(bytes_written_at_lvl / MB)) << " MB\n"
                       << "Entries written at level: " << items_merged_at_lvl << "\n"
                       << "Num compactions at level: " << all_compaction_stats_per_level[lvl].size() << " compactions\n";

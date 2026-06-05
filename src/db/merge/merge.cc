@@ -51,6 +51,8 @@ namespace hedge::db
         if(!is_page_aligned(read_ahead_size))
             read_ahead_size = hedge::ceil_page_align(read_ahead_size);
 
+        size_t write_buffer_size = hedge::ceil_page_align(config.read_ahead_size);
+
         // Create new footer builder and start populating it
         sst_footer_builder fb;
 
@@ -62,7 +64,8 @@ namespace hedge::db
         fb.index_offset = 0;
         fb.max_seq_nr = std::accumulate(
             indices.begin(), indices.end(), uint64_t{0},
-            [](uint64_t acc, const sst* s) { return std::max(acc, s->max_seq_nr()); });
+            [](uint64_t acc, const sst* s)
+            { return std::max(acc, s->max_seq_nr()); });
 
         // Extrapolate new index path
         auto [dir, file_name] = format_prefix(indices[0]->upper_bound());
@@ -297,10 +300,6 @@ namespace hedge::db
                     if(!status)
                         co_return hedge::error("Failed to refresh views: " + status.error().to_string());
                 }
-
-                auto maybe_value = value_from_span(slot->source->front().value());
-                if(!maybe_value.has_value())
-                    co_return hedge::error("Failed to parse value from index entry during heap initialization: " + maybe_value.error().to_string());
 
                 merge_entry_t new_keypair{
                     .key = slot->source->front().key(),

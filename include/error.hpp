@@ -70,7 +70,7 @@ namespace hedge
             return std::holds_alternative<std::monostate>(err);
         }
 
-        hedge::error error()
+        hedge::error error() const
         {
             if(!*this)
                 return std::get<hedge::error>(this->err);

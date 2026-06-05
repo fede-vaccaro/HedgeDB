@@ -128,7 +128,7 @@ static void print_usage(const char* prog)
     std::cerr << "Usage: " << prog << " [OPTIONS]\n"
               << "  -n, --num_ops <N>      number of operations       (default: 1000000)\n"
               << "  -v, --vsize <N>        value size in bytes        (default: 100)\n"
-              << "  -m, --mode <mode>      load|read|rw|range         (default: load)\n"
+              << "  -m, --mode <mode>      load|read|rw|range|compaction (default: load)\n"
               << "  -p, --path <path>      database path              (default: /tmp/bench_db_rocksdb)\n"
               << "  -l, --latency          enable latency measurement (default: disabled)\n"
               << "  -t, --threads <N>      foreground workers         (default: 20)\n"
@@ -211,13 +211,13 @@ static rocksdb::Options make_db_options(size_t num_bg_threads)
     opts.OptimizeUniversalStyleCompaction();
 
     auto& uc = opts.compaction_options_universal;
-    uc.min_merge_width = 8;
-    uc.max_merge_width = 32; // unlimited
-    uc.allow_trivial_move = true;
-    opts.num_levels = 40;
+    // uc.min_merge_width = 8;
+    // uc.max_merge_width = 32; // unlimited
+    // uc.allow_trivial_move = true;
+    // opts.num_levels = 40;
     opts.compaction_readahead_size = 2 * MiB;
-    opts.level0_stop_writes_trigger = std::numeric_limits<int>::max();
-    opts.level0_slowdown_writes_trigger = std::numeric_limits<int>::max();
+    // opts.level0_stop_writes_trigger = std::numeric_limits<int>::max();
+    // opts.level0_slowdown_writes_trigger = std::numeric_limits<int>::max();
 
     opts.use_direct_reads = true;
     opts.use_direct_io_for_flush_and_compaction = true;
@@ -234,11 +234,15 @@ static rocksdb::Options make_db_options(size_t num_bg_threads)
 
 static std::unique_ptr<rocksdb::DB> open_db(const bench_config& cfg)
 {
-    if(cfg.mode == "load" && std::filesystem::exists(cfg.db_path))
+    if((cfg.mode == "load" || cfg.mode == "compaction") && std::filesystem::exists(cfg.db_path))
         std::filesystem::remove_all(cfg.db_path);
 
+    auto opts = make_db_options(cfg.num_bg_threads);
+    if(cfg.mode == "compaction")
+        opts.disable_auto_compactions = true;
+
     std::unique_ptr<rocksdb::DB> db;
-    auto status = rocksdb::DB::Open(make_db_options(cfg.num_bg_threads), cfg.db_path.string(), &db);
+    auto status = rocksdb::DB::Open(opts, cfg.db_path.string(), &db);
     if(!status.ok())
     {
         std::cerr << "Failed to open RocksDB: " << status.ToString() << "\n";
@@ -344,6 +348,28 @@ static void run_load(rocksdb::DB* db, const values_t& values, size_t n, size_t v
     std::cout << "Waiting for compactions...\n";
     wait_for_compactions(db);
     print_throughput("load (w/compaction)", n, std::chrono::duration<double>(clk::now() - t0).count(), vsize);
+}
+
+static void run_compaction(rocksdb::DB* db, const values_t& values, size_t n, size_t vsize, size_t num_threads, bool measure_latency)
+{
+    // Load phase: auto-compaction is disabled (see open_db), so data just accumulates in L0.
+    run_load(db, values, n, vsize, num_threads, measure_latency);
+
+    // Flush any remaining memtable so all data lives in SSTs before we compact.
+    auto flush_status = db->Flush(rocksdb::FlushOptions());
+    if(!flush_status.ok())
+        std::cerr << "Flush: " << flush_status.ToString() << "\n";
+
+    std::cout << "\nScheduling compaction...\n";
+    using clk = std::chrono::high_resolution_clock;
+    auto t0 = clk::now();
+    // CompactRange is synchronous: it blocks until the full compaction completes.
+    auto status = db->CompactRange(rocksdb::CompactRangeOptions(), nullptr, nullptr);
+    if(!status.ok())
+        std::cerr << "CompactRange: " << status.ToString() << "\n";
+    double elapsed = std::chrono::duration<double>(clk::now() - t0).count();
+
+    print_throughput("compaction", n, elapsed, vsize);
 }
 
 static void run_read(rocksdb::DB* db, size_t n, size_t vsize, size_t num_threads, bool measure_latency)
@@ -647,7 +673,7 @@ int main(int argc, char* argv[])
 {
     auto cfg = parse_args(argc, argv);
 
-    if(cfg.mode != "load" && cfg.mode != "read" && cfg.mode != "rw" && cfg.mode != "range")
+    if(cfg.mode != "load" && cfg.mode != "read" && cfg.mode != "rw" && cfg.mode != "range" && cfg.mode != "compaction")
     {
         print_usage(argv[0]);
         return 1;
@@ -686,6 +712,8 @@ int main(int argc, char* argv[])
         run_rw(db.get(), values, cfg.num_ops, cfg.vsize, cfg.num_threads, cfg.measure_latency);
     else if(cfg.mode == "range")
         run_range(db.get(), cfg.num_ops, cfg.num_threads, cfg.measure_latency);
+    else if(cfg.mode == "compaction")
+        run_compaction(db.get(), values, cfg.num_ops, cfg.vsize, cfg.num_threads, cfg.measure_latency);
 
     std::cout << "\n=== DONE ===\n";
     if(cfg.print_stats)

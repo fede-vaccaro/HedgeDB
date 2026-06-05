@@ -35,7 +35,9 @@ namespace hedge::db
         db_config db_cfg = make_db_config(cfg.num_bg_threads);
         db_cfg.acquire_flush_stats = cfg.print_stats;
         db_cfg.acquire_compaction_stats = cfg.print_stats;
-        if(cfg.mode == "load")
+        if(cfg.mode == "compaction")
+            db_cfg.auto_compaction = false;
+        if(cfg.mode == "load" || cfg.mode == "compaction")
         {
             if(std::filesystem::exists(cfg.db_path))
                 std::filesystem::remove_all(cfg.db_path);

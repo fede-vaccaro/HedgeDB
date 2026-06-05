@@ -73,13 +73,13 @@ namespace hedge::db
 
         static void append_meta_index_key(page_aligned_buffer<std::byte>& buffer, const std::span<const std::byte>& key_span)
         {
-            size_t buf_size = buffer.size();
+            const size_t old_buf_size = buffer.size();
 
             // Extend buffer size
-            buffer.resize(buf_size + key_span.size() + 1); // +1 for key size byte
+            buffer.grow_uninitialized(key_span.size() + 1); // +1 for key size byte
 
             // Write key size
-            write_key_unsafe(buffer.data() + buf_size, key_span);
+            write_key_unsafe(buffer.data() + old_buf_size, key_span);
         }
 
         struct partition_range

@@ -18,7 +18,7 @@ namespace hedge::db
         std::cerr << "Usage: " << prog << " [OPTIONS]\n"
                   << "  -n, --num_ops <N>      number of operations       (default: 1000000)\n"
                   << "  -v, --vsize <N>        value size in bytes        (default: 100)\n"
-                  << "  -m, --mode <mode>      load|read|rw|range         (default: load)\n"
+                  << "  -m, --mode <mode>      load|read|rw|range|compaction (default: load)\n"
                   << "  -p, --path <path>      database path              (default: /tmp/bench_db)\n"
                   << "  -l, --latency          enable latency measurement (default: disabled)\n"
                   << "  -t, --threads <N>      foreground workers         (default: 12)\n"
@@ -64,7 +64,7 @@ int main(int argc, char* argv[])
 
     bench_config cfg = parse_args(argc, argv);
 
-    if(cfg.mode != "load" && cfg.mode != "read" && cfg.mode != "rw" && cfg.mode != "range")
+    if(cfg.mode != "load" && cfg.mode != "read" && cfg.mode != "rw" && cfg.mode != "range" && cfg.mode != "compaction")
     {
         print_usage(argv[0]);
         return 1;
@@ -117,6 +117,8 @@ int main(int argc, char* argv[])
         run_rw(db, values, cfg.num_ops, cfg.vsize, cfg.num_threads, cfg.measure_latency);
     else if(cfg.mode == "range")
         run_range(db, cfg.num_ops, cfg.num_threads, cfg.measure_latency);
+    else if(cfg.mode == "compaction")
+        run_compaction(db, values, cfg.num_ops, cfg.vsize, cfg.num_threads, cfg.measure_latency);
 
     if(cfg.print_stats)
     {

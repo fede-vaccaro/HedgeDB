@@ -160,11 +160,21 @@ namespace hedge
             {
                 [[maybe_unused]] size_t old_size = this->_size;
 
-                if(new_size > this->_capacity)
+                if(new_size > this->_capacity) [[unlikely]]
                     page_aligned_buffer::_grow(*this, new_size);
 
                 std::fill(this->data() + old_size, this->data() + new_size, T{});
             }
+
+            this->_size = new_size;
+        }
+
+        void grow_uninitialized(size_t new_items_count)
+        {
+            const size_t new_size = this->_size + new_items_count;
+
+            if(new_size > this->_capacity) [[unlikely]]
+                page_aligned_buffer::_grow(*this, new_size);
 
             this->_size = new_size;
         }
@@ -228,10 +238,10 @@ namespace hedge
         static void _grow(page_aligned_buffer& buf, size_t new_capacity)
         {
             assert(buf._size <= new_capacity);
-            auto new_pab = page_aligned_buffer<T>();
-            page_aligned_buffer::_allocate_buffer(new_pab, buf.size(), new_capacity);
-            std::uninitialized_move(buf.begin(), buf.end(), new_pab.begin());
-            buf = std::move(new_pab);
+            auto new_buf = page_aligned_buffer<T>();
+            page_aligned_buffer::_allocate_buffer(new_buf, buf.size(), new_capacity);
+            std::uninitialized_move(buf.begin(), buf.end(), new_buf.begin());
+            buf = std::move(new_buf);
         }
     };
 } // namespace hedge
