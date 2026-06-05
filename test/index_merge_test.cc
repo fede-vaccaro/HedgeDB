@@ -223,7 +223,7 @@ public:
             auto res = tmc::post_waitable(
                            *this->_executor,
                            hedge::db::index_ops::flush_memtable(
-                               _base_path, begin, end, NUM_PARTITION_EXPONENT, run_idx, nullptr, false, this->_executor->ex(), false))
+                               _base_path, begin, end, NUM_PARTITION_EXPONENT, run_idx, nullptr, false, this->_executor->ex()))
                            .get();
 
             ASSERT_TRUE(res.has_value()) << "Flush failed: " << res.error().to_string();
@@ -431,7 +431,7 @@ public:
         auto flush0_res = tmc::post_waitable(
                               *this->_executor,
                               hedge::db::index_ops::flush_memtable(
-                                  _base_path, begin, end, NUM_PARTITION_EXPONENT, 0, nullptr, false, this->_executor->ex(), false))
+                                  _base_path, begin, end, NUM_PARTITION_EXPONENT, 0, nullptr, false, this->_executor->ex()))
                               .get();
         ASSERT_TRUE(flush0_res.has_value()) << "Flush 0 failed: " << flush0_res.error().to_string();
 
@@ -460,7 +460,7 @@ public:
             auto flush1_res = tmc::post_waitable(
                                   *this->_executor,
                                   hedge::db::index_ops::flush_memtable(
-                                      _base_path, begin, end, NUM_PARTITION_EXPONENT, 1, nullptr, false, this->_executor->ex(), false))
+                                      _base_path, begin, end, NUM_PARTITION_EXPONENT, 1, nullptr, false, this->_executor->ex()))
                                   .get();
             ASSERT_TRUE(flush1_res.has_value()) << "Flush 1 failed: " << flush1_res.error().to_string();
             ssts1 = std::move(flush1_res.value());

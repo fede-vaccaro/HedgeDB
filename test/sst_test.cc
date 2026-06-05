@@ -186,8 +186,7 @@ struct sst_test : public ::testing::TestWithParam<std::tuple<size_t, size_t, boo
                        0,
                        this->_cache,
                        false,
-                       this->_executor->ex(),
-                       false))
+                       this->_executor->ex()))
             .get();
     }
 

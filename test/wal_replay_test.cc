@@ -98,7 +98,7 @@ namespace hedge::db
                 _indices_path,
                 &flush_epoch,
                 executor,
-                [](std::vector<sst> /*new_indices*/) -> tmc::task<void>
+                [](std::vector<sst> /*new_indices*/, std::optional<compaction_stats> /*stats*/) -> tmc::task<void>
                 { co_return; },
                 []() {},
                 nullptr);
@@ -150,7 +150,7 @@ namespace hedge::db
                 _indices_path,
                 &flush_epoch,
                 executor,
-                [](std::vector<sst> /*new_indices*/) -> tmc::task<void>
+                [](std::vector<sst> /*new_indices*/, std::optional<compaction_stats> /*stats*/) -> tmc::task<void>
                 { co_return; },
                 []() {},
                 nullptr);

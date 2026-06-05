@@ -256,9 +256,7 @@ TEST_P(range_scan_test, test_flush_and_range_scan_all_16b_keys)
             0, // flush_iteration
             nullptr,
             false, // use_odirect
-            this->_executor->ex(),
-            false // fdatasync_ssts
-            ));
+            this->_executor->ex()));
 
     auto t1 = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
@@ -446,8 +444,7 @@ struct memtable_merged_scan_test : public ::testing::TestWithParam<std::tuple<si
                        flush_iter,
                        nullptr,
                        false,
-                       this->_executor->ex(),
-                       false))
+                       this->_executor->ex()))
             .get();
     }
 
