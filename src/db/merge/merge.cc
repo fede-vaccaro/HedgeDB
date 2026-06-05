@@ -47,11 +47,8 @@ namespace hedge::db
             co_return hedge::error("All indices must have the same partition prefix for merging");
 
         // Step 0: Validate preconditions and init all the necessary structures --
-        size_t read_ahead_size = config.read_ahead_size / indices.size();
-        if(!is_page_aligned(read_ahead_size))
-            read_ahead_size = hedge::ceil_page_align(read_ahead_size);
-
-        size_t write_buffer_size = hedge::ceil_page_align(config.read_ahead_size);
+        const size_t read_ahead_size = config.read_ahead_size / indices.size();
+        const size_t write_buffer_size = hedge::ceil_page_align(config.read_ahead_size);
 
         // Create new footer builder and start populating it
         sst_footer_builder fb;
@@ -90,8 +87,8 @@ namespace hedge::db
                 return acc + idx->_footer.indexed_keys;
             });
 
-        constexpr size_t ENTRIES_PER_PAGE_ESTIMATE = 32; // Rough assumption with 24 byte keys and 100 byte values
-        size_t meta_index_entries_estimate = hedge::ceil(max_new_index_keys, ENTRIES_PER_PAGE_ESTIMATE);
+        const size_t entries_per_page_estimate = estimated_size / max_new_index_keys;
+        const size_t meta_index_entries_estimate = hedge::ceil(max_new_index_keys, entries_per_page_estimate);
 
         // Create quotient filter (slightly oversized due to dedup — acceptable)
         auto maybe_qf = create_qf_for_key_count(max_new_index_keys);
@@ -169,7 +166,7 @@ namespace hedge::db
         [[maybe_unused]] uint64_t compute_duration{0};
         [[maybe_unused]] size_t merge_iterations{0};
 
-        merge_write_buffer write_buffer(read_ahead_size * 2);
+        merge_write_buffer write_buffer(write_buffer_size);
 
         // Hot path: returns true if buffer is full and item was NOT written
         auto try_push_kv = [&] [[nodiscard]] (const merge_entry_t& kv) -> bool
@@ -245,6 +242,7 @@ namespace hedge::db
 
         std::vector<heap_item_t> key_heap;
         key_heap.reserve(num_bufs);
+
 
         // Initialize the heap with the first element from each buffer
         for(auto* rbuf = rbufs_begin; rbuf < rbufs_end; ++rbuf)
