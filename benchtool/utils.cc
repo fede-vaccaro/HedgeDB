@@ -37,7 +37,7 @@ namespace hedge::db
         db_cfg.acquire_compaction_stats = cfg.print_stats;
         if(cfg.mode == "compaction")
             db_cfg.auto_compaction = false;
-        if(cfg.mode == "load" || cfg.mode == "compaction")
+        if(cfg.mode == "load" || cfg.mode == "timeseries" || cfg.mode == "compaction")
         {
             if(std::filesystem::exists(cfg.db_path))
                 std::filesystem::remove_all(cfg.db_path);

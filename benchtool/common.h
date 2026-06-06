@@ -97,6 +97,7 @@ namespace hedge::db
     struct bench_config
     {
         size_t num_ops = 1'000'000;
+        size_t num_ts = 1;
         size_t vsize = 100;
         std::string mode = "undefined";
         std::filesystem::path db_path = "/tmp/bench_db";

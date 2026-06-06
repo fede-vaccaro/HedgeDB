@@ -20,6 +20,20 @@ namespace hedge::db
         return k;
     }
 
+    // Time-series key: bytes 0..7 = xxhash(i) (device/user id), bytes 8..15 = 0,
+    // bytes 16..23 = ts stored big-endian so a device's points sort chronologically.
+    inline key_t make_ts_key(size_t i, uint64_t ts)
+    {
+        uint64_t h = xxh64::hash(reinterpret_cast<const char*>(&i), sizeof(i), KEY_SEED);
+        key_t k = key_t::make_with_length(KEY_SIZE);
+        auto span = k.as_bytes();
+        std::memset(span.data(), 0, KEY_SIZE);
+        std::memcpy(span.data(), &h, std::min(sizeof(h), KEY_SIZE));
+        for(size_t b = 0; b < sizeof(ts); ++b)
+            span[KEY_SIZE - 1 - b] = static_cast<std::byte>((ts >> (b * 8)) & 0xFF);
+        return k;
+    }
+
     inline size_t value_slot(size_t i)
     {
         return xxh64::hash(reinterpret_cast<const char*>(&i), sizeof(i), KEY_SEED) % NVALUES;

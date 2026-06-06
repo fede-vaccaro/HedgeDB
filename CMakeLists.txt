@@ -139,9 +139,11 @@ add_executable(benchtool
     benchtool/main.cc
     benchtool/utils.cc
     benchtool/load.cc
+    benchtool/load_timeseries.cc
     benchtool/read.cc
     benchtool/rw.cc
     benchtool/range.cc
+    benchtool/range_timeseries.cc
     benchtool/compaction.cc)
 target_link_libraries(benchtool hedgedb ${MALLOC})
 

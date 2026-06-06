@@ -114,6 +114,7 @@ struct latency_histogram
 struct bench_config
 {
     size_t num_ops = 1'000'000;
+    size_t num_ts = 1;
     size_t vsize = 100;
     std::string mode = "undefined";
     std::filesystem::path db_path = "/tmp/bench_db_rocksdb";
@@ -127,8 +128,9 @@ static void print_usage(const char* prog)
 {
     std::cerr << "Usage: " << prog << " [OPTIONS]\n"
               << "  -n, --num_ops <N>      number of operations       (default: 1000000)\n"
+              << "  -ts, --num_timestamps <N>  timestamps per key (timeseries mode) (default: 1)\n"
               << "  -v, --vsize <N>        value size in bytes        (default: 100)\n"
-              << "  -m, --mode <mode>      load|read|rw|range|compaction (default: load)\n"
+              << "  -m, --mode <mode>      load|timeseries|read|rw|range|range_timeseries|compaction (default: load)\n"
               << "  -p, --path <path>      database path              (default: /tmp/bench_db_rocksdb)\n"
               << "  -l, --latency          enable latency measurement (default: disabled)\n"
               << "  -t, --threads <N>      foreground workers         (default: 20)\n"
@@ -147,6 +149,8 @@ static bench_config parse_args(int argc, char* argv[])
 
         if(arg == "-n" || arg == "--num_ops")
             cfg.num_ops = std::strtoull(next(), nullptr, 10);
+        else if(arg == "-ts" || arg == "--num_timestamps")
+            cfg.num_ts = std::strtoull(next(), nullptr, 10);
         else if(arg == "-v" || arg == "--vsize")
             cfg.vsize = std::strtoull(next(), nullptr, 10);
         else if(arg == "-m" || arg == "--mode")
@@ -170,6 +174,18 @@ static std::string make_key(size_t i)
     uint64_t h = xxh64::hash(reinterpret_cast<const char*>(&i), sizeof(i), KEY_SEED);
     std::string k(KEY_SIZE, '\0');
     std::memcpy(k.data(), &h, sizeof(h));
+    return k;
+}
+
+// Time-series key: bytes 0..7 = xxhash(i) (device/user id), bytes 8..15 = 0,
+// bytes 16..23 = ts stored big-endian so a device's points sort chronologically.
+static std::string make_ts_key(size_t i, uint64_t ts)
+{
+    uint64_t h = xxh64::hash(reinterpret_cast<const char*>(&i), sizeof(i), KEY_SEED);
+    std::string k(KEY_SIZE, '\0');
+    std::memcpy(k.data(), &h, sizeof(h));
+    for(size_t b = 0; b < sizeof(ts); ++b)
+        k[KEY_SIZE - 1 - b] = static_cast<char>((ts >> (b * 8)) & 0xFF);
     return k;
 }
 
@@ -211,19 +227,19 @@ static rocksdb::Options make_db_options(size_t num_bg_threads)
     opts.OptimizeUniversalStyleCompaction();
 
     auto& uc = opts.compaction_options_universal;
-    // uc.min_merge_width = 8;
-    // uc.max_merge_width = 32; // unlimited
-    // uc.allow_trivial_move = true;
-    // opts.num_levels = 40;
+    uc.min_merge_width = 8;
+    uc.max_merge_width = 32; // unlimited
+    uc.allow_trivial_move = true;
+    opts.num_levels = 40;
     opts.compaction_readahead_size = 2 * MiB;
-    // opts.level0_stop_writes_trigger = std::numeric_limits<int>::max();
-    // opts.level0_slowdown_writes_trigger = std::numeric_limits<int>::max();
+    opts.level0_stop_writes_trigger = std::numeric_limits<int>::max();
+    opts.level0_slowdown_writes_trigger = std::numeric_limits<int>::max();
 
     opts.use_direct_reads = true;
     opts.use_direct_io_for_flush_and_compaction = true;
 
     rocksdb::BlockBasedTableOptions table_opts;
-    table_opts.block_cache = rocksdb::HyperClockCacheOptions(1ULL * 1024 * 1024 * 1024).MakeSharedCache();
+    table_opts.block_cache = rocksdb::HyperClockCacheOptions(4ULL * 1024 * 1024 * 1024).MakeSharedCache();
     table_opts.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
     table_opts.block_size = 4 * 1024;
     table_opts.pin_l0_filter_and_index_blocks_in_cache = true;
@@ -234,7 +250,7 @@ static rocksdb::Options make_db_options(size_t num_bg_threads)
 
 static std::unique_ptr<rocksdb::DB> open_db(const bench_config& cfg)
 {
-    if((cfg.mode == "load" || cfg.mode == "compaction") && std::filesystem::exists(cfg.db_path))
+    if((cfg.mode == "load" || cfg.mode == "timeseries" || cfg.mode == "compaction") && std::filesystem::exists(cfg.db_path))
         std::filesystem::remove_all(cfg.db_path);
 
     auto opts = make_db_options(cfg.num_bg_threads);
@@ -348,6 +364,69 @@ static void run_load(rocksdb::DB* db, const values_t& values, size_t n, size_t v
     std::cout << "Waiting for compactions...\n";
     wait_for_compactions(db);
     print_throughput("load (w/compaction)", n, std::chrono::duration<double>(clk::now() - t0).count(), vsize);
+}
+
+// Time-series load: for each hash i (0..n-1) insert num_ts items with ts = 0..num_ts-1,
+// producing n * num_ts items. A worker fully walks ts for one hash before advancing.
+static void run_load_timeseries(rocksdb::DB* db, const values_t& values, size_t n, size_t num_ts, size_t vsize, size_t num_threads, bool measure_latency)
+{
+    std::unique_ptr<latency_histogram> hist;
+    if(measure_latency)
+        hist = std::make_unique<latency_histogram>();
+    latency_histogram* hist_ptr = hist.get();
+
+    auto worker = [&](size_t tid)
+    {
+        rocksdb::WriteOptions write_opts;
+        for(size_t i = tid; i < n; i += num_threads)
+        {
+            for(uint64_t ts = 0; ts < num_ts; ++ts)
+            {
+                auto key = make_ts_key(i, ts);
+                const auto& val = values[value_slot(i * num_ts + ts)];
+
+                if(measure_latency && hist_ptr)
+                {
+                    using clk = std::chrono::high_resolution_clock;
+                    auto start = clk::now();
+                    auto status = db->Put(write_opts, key, val);
+                    auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(clk::now() - start).count();
+                    hist_ptr->record(elapsed);
+                    if(!status.ok())
+                        std::cerr << "put error at " << i << "/" << ts << ": " << status.ToString() << "\n";
+                }
+                else
+                {
+                    auto status = db->Put(write_opts, key, val);
+                    if(!status.ok())
+                        std::cerr << "put error at " << i << "/" << ts << ": " << status.ToString() << "\n";
+                }
+            }
+        }
+    };
+
+    size_t total = n * num_ts;
+
+    using clk = std::chrono::high_resolution_clock;
+    auto t0 = clk::now();
+
+    std::vector<std::function<void()>> tasks;
+    tasks.reserve(num_threads);
+    for(size_t tid = 0; tid < num_threads; ++tid)
+        tasks.push_back([&worker, tid]()
+                        { worker(tid); });
+    run_workers(std::move(tasks));
+
+    print_throughput("load_timeseries", total, std::chrono::duration<double>(clk::now() - t0).count(), vsize);
+    if(hist)
+    {
+        hist->print_percentiles("load_timeseries");
+        std::cout << "\n*** Note: Write latency measures RocksDB Put() time (includes WAL write). SST flush is async. ***\n";
+    }
+
+    std::cout << "Waiting for compactions...\n";
+    wait_for_compactions(db);
+    print_throughput("load_timeseries (w/compaction)", total, std::chrono::duration<double>(clk::now() - t0).count(), vsize);
 }
 
 static void run_compaction(rocksdb::DB* db, const values_t& values, size_t n, size_t vsize, size_t num_threads, bool measure_latency)
@@ -669,11 +748,81 @@ static void run_range(rocksdb::DB* db, size_t n, size_t num_threads, bool measur
     }
 }
 
+// Range scan over the time-series dataset: each scan covers one device's full
+// series, [make_ts_key(i, 0), make_ts_key(i, UINT64_MAX)), i.e. all timestamps
+// under a single hash prefix. One scan per device, no size tiers.
+static void run_range_timeseries(rocksdb::DB* db, size_t n, size_t num_threads, bool measure_latency)
+{
+    std::atomic_size_t scan_count{0};
+    std::atomic_size_t key_count{0};
+    std::unique_ptr<latency_histogram> hist;
+    if(measure_latency)
+        hist = std::make_unique<latency_histogram>();
+    latency_histogram* hist_ptr = hist.get();
+
+    std::cout << "\n=== Range scan (timeseries) ===\n";
+
+    auto worker = [&](size_t tid)
+    {
+        for(size_t device = tid; device < n; device += num_threads)
+        {
+            auto lower = make_ts_key(device, 0);
+            auto upper = make_ts_key(device, UINT64_MAX);
+            rocksdb::Slice upper_slice(upper);
+
+            rocksdb::ReadOptions read_opts;
+            read_opts.async_io = true;
+            read_opts.adaptive_readahead = true;
+            read_opts.iterate_upper_bound = &upper_slice;
+
+            auto it = std::unique_ptr<rocksdb::Iterator>(db->NewIterator(read_opts));
+
+            using clk = std::chrono::high_resolution_clock;
+            auto t_start = clk::now();
+
+            size_t entries = 0;
+            for(it->Seek(lower); it->Valid(); it->Next())
+                ++entries;
+
+            if(measure_latency && hist_ptr)
+            {
+                auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(clk::now() - t_start).count();
+                hist_ptr->record(elapsed);
+            }
+
+            key_count.fetch_add(entries, std::memory_order_relaxed);
+            scan_count.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+
+    using clk = std::chrono::high_resolution_clock;
+    auto t0 = clk::now();
+
+    std::vector<std::function<void()>> tasks;
+    tasks.reserve(num_threads);
+    for(size_t tid = 0; tid < num_threads; ++tid)
+        tasks.push_back([&worker, tid]()
+                        { worker(tid); });
+    run_workers(std::move(tasks));
+
+    double elapsed_s = std::chrono::duration<double>(clk::now() - t0).count();
+    size_t completed = scan_count.load();
+    size_t keys = key_count.load();
+
+    std::cout << "\n--- range_timeseries (" << completed << " scans) ---\n"
+              << "Duration:   " << elapsed_s * 1000.0 << " ms\n"
+              << "Scans/s:    " << static_cast<uint64_t>(completed / elapsed_s) << "\n"
+              << "Keys/s:     " << static_cast<uint64_t>(keys / elapsed_s) << "\n"
+              << "Avg/scan:   " << (completed ? keys / completed : 0) << " entries\n";
+    if(hist)
+        hist->print_percentiles("scan (range_timeseries)");
+}
+
 int main(int argc, char* argv[])
 {
     auto cfg = parse_args(argc, argv);
 
-    if(cfg.mode != "load" && cfg.mode != "read" && cfg.mode != "rw" && cfg.mode != "range" && cfg.mode != "compaction")
+    if(cfg.mode != "load" && cfg.mode != "timeseries" && cfg.mode != "read" && cfg.mode != "rw" && cfg.mode != "range" && cfg.mode != "range_timeseries" && cfg.mode != "compaction")
     {
         print_usage(argv[0]);
         return 1;
@@ -690,6 +839,7 @@ int main(int argc, char* argv[])
               << "=== rocksdb benchtool ===\n"
               << "mode=" << cfg.mode
               << "  n=" << cfg.num_ops
+              << "  num_ts=" << cfg.num_ts
               << "  vsize=" << cfg.vsize
               << "  path=" << cfg.db_path
               << "  latency=" << (cfg.measure_latency ? "enabled" : "disabled")
@@ -706,12 +856,16 @@ int main(int argc, char* argv[])
 
     if(cfg.mode == "load")
         run_load(db.get(), values, cfg.num_ops, cfg.vsize, cfg.num_threads, cfg.measure_latency);
+    else if(cfg.mode == "timeseries")
+        run_load_timeseries(db.get(), values, cfg.num_ops, cfg.num_ts, cfg.vsize, cfg.num_threads, cfg.measure_latency);
     else if(cfg.mode == "read")
         run_read(db.get(), cfg.num_ops, cfg.vsize, cfg.num_threads, cfg.measure_latency);
     else if(cfg.mode == "rw")
         run_rw(db.get(), values, cfg.num_ops, cfg.vsize, cfg.num_threads, cfg.measure_latency);
     else if(cfg.mode == "range")
         run_range(db.get(), cfg.num_ops, cfg.num_threads, cfg.measure_latency);
+    else if(cfg.mode == "range_timeseries")
+        run_range_timeseries(db.get(), cfg.num_ops, cfg.num_threads, cfg.measure_latency);
     else if(cfg.mode == "compaction")
         run_compaction(db.get(), values, cfg.num_ops, cfg.vsize, cfg.num_threads, cfg.measure_latency);
 
