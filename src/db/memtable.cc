@@ -56,7 +56,7 @@ namespace hedge::db
     hedge::expected<std::optional<std::filesystem::path>> move_old_wal_files(const std::filesystem::path& wal_dir)
     {
         auto old_wal_files = wal::collect_wal_filenames(wal_dir);
-        if (old_wal_files.empty())
+        if(old_wal_files.empty())
             return std::nullopt;
 
         std::array<std::byte, 16> uuid_bytes;
@@ -65,23 +65,21 @@ namespace hedge::db
         thread_local std::uniform_int_distribution<uint8_t> dist;
 
         std::ranges::for_each(uuid_bytes, [&](std::byte& b)
-        {
-            b = static_cast<std::byte>(dist(gen));
-        });
+                              { b = static_cast<std::byte>(dist(gen)); });
 
         std::string old_wal_dirname = hedge::to_hex_string(uuid_bytes);
         auto old_wal_dir_path = wal_dir / old_wal_dirname;
 
         bool ok = std::filesystem::create_directories(old_wal_dir_path);
-        if (!ok)
+        if(!ok)
             return hedge::error("could not create directory: " + old_wal_dir_path.string());
 
-        for (auto& wal: old_wal_files)
+        for(auto& wal : old_wal_files)
         {
             std::error_code ec;
             std::filesystem::rename(wal, old_wal_dir_path / wal.filename(), ec);
 
-            if (ec)
+            if(ec)
                 return hedge::error("error while moving wal file " + wal.string() + " :" + ec.message());
         }
 
@@ -128,10 +126,12 @@ namespace hedge::db
 
             // Before creating the new WALs check if there is anything to recover
             auto maybe_old_wals_path = move_old_wal_files(this->_indices_path);
-            if (!maybe_old_wals_path)
+            if(!maybe_old_wals_path)
                 throw std::runtime_error(std::format("Could not read wal files from {}: {}", this->_indices_path.string(), maybe_old_wals_path.error().to_string()));
 
             this->_old_wals_path = maybe_old_wals_path.value().value_or(std::filesystem::path{});
+            if(!this->_old_wals_path.empty())
+                this->_logger.log("Old WAL files moved to: ", this->_old_wals_path);
 
             for(const auto i : std::views::iota(size_t{0}, n_slots))
             {
@@ -492,12 +492,7 @@ namespace hedge::db
         // Flush done: reset WAL files and return the slot to the pool
         if(auto& w = memtable_to_flush->ptr()->_wal; w)
         {
-            auto s = co_await w->reset();
-            if(!s)
-            {
-                this->_logger.log("failed to reset wal file : " + s.error().to_string());
-                co_return;
-            }
+            w->reset();
             auto ch_tok = this->_wal_ch.new_token();
             [[maybe_unused]] bool ok = co_await ch_tok.push(std::move(w));
             assert(ok);
@@ -514,14 +509,17 @@ namespace hedge::db
 
     hedge::status memtable::replay_wal(std::optional<uint64_t> skip_up_to_seq_nr)
     {
-        size_t replayed_entries_count = 0;
-        uint64_t max_seq_nr = 0;
-
-        tmc::ex_cpu_st replay_executor;
+        tmc::ex_cpu replay_executor;
+        replay_executor.set_thread_count(this->_cfg.num_writer_threads);
         replay_executor.init();
 
-        if (this->_old_wals_path.empty())
+        if(this->_old_wals_path.empty())
             return hedge::ok();
+
+        if(skip_up_to_seq_nr.has_value())
+            this->_seq_nr.store(skip_up_to_seq_nr.value() + 1);
+
+        size_t i = 0;
 
         auto status = wal::replay(
             this->_old_wals_path,
@@ -533,18 +531,21 @@ namespace hedge::db
                 auto value_type = static_cast<hedge::value_type>(value[0]);
                 auto actual_value = value.subspan(1);
 
-                auto f = tmc::post_waitable(replay_executor, this->put_async(key, actual_value, value_type)).get();
-                if (!f)
+                auto f = tmc::post_waitable(
+                             replay_executor,
+                             this->put_async(key, actual_value, value_type),
+                             0,
+                             i++ % replay_executor.thread_count())
+                             .get();
+                if(!f)
                     throw std::runtime_error("failed to post put_async on wal replay: " + f.error().to_string());
 
                 return true;
             },
             this->_logger);
 
-        if(replayed_entries_count > 0)
-            this->_seq_nr.store(max_seq_nr + 1, std::memory_order::relaxed);
-
         std::filesystem::remove_all(this->_old_wals_path);
+        this->_logger.log("WAL replayed from ", this->_old_wals_path, "; deleting directory.");
         this->_old_wals_path = std::filesystem::path{};
 
         return status;

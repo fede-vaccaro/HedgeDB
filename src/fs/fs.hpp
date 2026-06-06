@@ -91,7 +91,7 @@ namespace hedge::fs
             if(!exists && mode == open_mode::read_only)
                 return hedge::error("File does not exist: " + path.string());
 
-            if(exists && (mode == open_mode::write_new || mode == open_mode::read_write || mode == open_mode::read_write_append))
+            if(exists && (mode == open_mode::write_new || mode == open_mode::read_write_new || mode == open_mode::read_write_append))
                 return hedge::error("File already exists: " + path.string());
 
             // Open the file;
