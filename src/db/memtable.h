@@ -123,6 +123,9 @@ namespace hedge::db
         size_t _num_partition_exponent{};
         std::filesystem::path _indices_path{};
 
+        // Old WALs are moved here on construction (if any)
+        std::filesystem::path _old_wals_path{};
+
         // DB state & callbacks
         std::atomic_size_t* _flush_epoch{};
         std::function<tmc::task<void>(std::vector<sst>, std::optional<compaction_stats>)> _push_new_ssts_callback;

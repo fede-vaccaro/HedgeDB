@@ -179,12 +179,6 @@ ctest --test-dir build -V
 
 ## What's missing
 
-HedgeDB is a **prototype**. Things that aren't here yet:
-
-- **Full-fledged crash recovery:** WAL replay works, but partial-write and
-  corrupted-file edge cases aren't handled.
-- **Battle-testing & hardening:** never run against real-world workloads
-  or for long execution periods.
 - **Cross-platform support:** Linux only (`io_uring`).
 - **Block compression:** many workloads would see meaningful size, space,
   and write-amplification reduction from lossless compression.
