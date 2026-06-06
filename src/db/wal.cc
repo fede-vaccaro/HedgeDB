@@ -11,9 +11,9 @@
 #include <unistd.h>
 #include <vector>
 
+#include "async/generator.h"
 #include "error.hpp"
 #include "fs/fs.hpp"
-#include "async/generator.h"
 #include "hasher.h"
 #include "key.h"
 #include "logger.h"
@@ -22,14 +22,72 @@
 
 namespace
 {
-    struct wal_entry
-    {
-        uint64_t seq_nr;
-        hedge::key_t key;
-        std::vector<std::byte> value;
-    };
 
-    hedge::async::generator<hedge::expected<wal_entry>> read_wal_file_generator(std::filesystem::path path)
+    // If the sequence number is 0, it signals the replayer to skip the entry
+    // So we always add 1 when encoding and remove 1 when decoding (replay)
+    uint64_t encode_seq_nr(uint64_t seq_nr)
+    {
+        return seq_nr + 1;
+    }
+
+    uint64_t decode_seq_nr(uint64_t seq_nr)
+    {
+        assert(seq_nr - 1 < seq_nr);
+        return seq_nr - 1;
+    }
+
+
+} // anonymous namespace
+
+namespace hedge::db
+{
+    std::vector<std::filesystem::path> wal::collect_wal_filenames(const std::filesystem::path& path)
+    {
+        std::vector<std::filesystem::path> files;
+        if(!std::filesystem::exists(path))
+            return files;
+
+        for(const auto& entry : std::filesystem::directory_iterator(path))
+        {
+            if(!entry.is_regular_file() || entry.file_size() == 0)
+                continue;
+
+            if(!entry.path().filename().string().starts_with(hedge::db::wal::WAL_FILE_PREFIX))
+                continue;
+
+            files.push_back(entry.path());
+        }
+
+        return files;
+    }
+
+
+    std::vector<wal::wal_entry> wal::read_all_entries(const std::filesystem::path& path, logger& log)
+    {
+        bool any_errors = false;
+        std::vector<wal_entry> entries;
+
+        for(auto& entry : read_wal_file_generator(path))
+        {
+            if(!entry) [[unlikely]]
+            {
+                any_errors = true;
+                log.log("Error reading WAL file ", path.string(), ": ", entry.error().to_string());
+                continue;
+            }
+            entries.push_back(std::move(entry.value()));
+        }
+
+        if(any_errors)
+            throw std::runtime_error("Errors occurred while reading WAL files; see log for details");
+
+        std::ranges::sort(entries, [](const wal_entry& a, const wal_entry& b)
+                          { return a.seq_nr < b.seq_nr; });
+
+        return entries;
+    }
+
+    hedge::async::generator<hedge::expected<wal::wal_entry>> wal::read_wal_file_generator(const std::filesystem::path& path)
     {
         auto maybe_file = hedge::fs::file::from_path(path, hedge::fs::file::open_mode::read_only, false);
         if(!maybe_file)
@@ -42,20 +100,24 @@ namespace
 
         std::vector<std::byte> buffer(file_size);
         ssize_t bytes_read = ::pread(file.fd(), buffer.data(), file_size, 0);
-        if(bytes_read <= 0)
+        if(bytes_read < 0)
             throw std::runtime_error("failed to read wal file " + path.string());
 
-        auto* pos = buffer.data();
-        auto* end = buffer.data() + bytes_read;
-        hedge::third_party::hasher64 hasher;
+        if(static_cast<size_t>(bytes_read) != file_size)
+            throw std::runtime_error(std::format("incomplete read of wal file {}: expected {} bytes, got {}", path.string(), file_size, bytes_read));
 
-        auto read_from_buf = [&pos, end](auto* dst, size_t n) -> bool
+        auto* pos = buffer.data();
+        auto* end = buffer.data() + buffer.size();
+        size_t bytes_read_from_buf = 0;
+
+        auto read_from_buf = [&pos, &bytes_read_from_buf, end](auto* dst, size_t n) -> bool
         {
             if(pos + n > end)
                 return false;
 
             std::memcpy(static_cast<void*>(dst), pos, n);
             pos += n;
+            bytes_read_from_buf += n;
 
             return true;
         };
@@ -64,6 +126,8 @@ namespace
         {
             return pos - buffer.data();
         };
+
+        hedge::third_party::hasher64 hasher;
 
         /*
             WAL format is:
@@ -76,13 +140,18 @@ namespace
         */
         while(pos < end)
         {
-            uint64_t seq_nr;
-            if(!read_from_buf(&seq_nr, sizeof(uint64_t)))
+            uint64_t encoded_seq_nr;
+            if(!read_from_buf(&encoded_seq_nr, sizeof(uint64_t)))
             {
                 co_yield hedge::error(std::format("incomplete WAL entry sequence number in file {} at offset {}", path.string(), offset()));
                 break;
             }
 
+            // Unwritten section: skip
+            if(encoded_seq_nr == 0)
+                continue;
+
+            uint64_t seq_nr = decode_seq_nr(encoded_seq_nr);
             std::byte encoded_key_size;
             if(!read_from_buf(&encoded_key_size, sizeof(std::byte)))
             {
@@ -91,6 +160,7 @@ namespace
             }
 
             size_t key_size = hedge::decode_key_size(encoded_key_size);
+
             if(key_size > hedge::MAX_KEY_LEN)
             {
                 co_yield hedge::error(std::format("invalid encoded key size {} in WAL entry in file {} at offset {}", std::to_integer<int>(encoded_key_size), path.string(), offset()));
@@ -126,7 +196,7 @@ namespace
             }
 
             // Recompute checksum and compare
-            hasher.update(&seq_nr, sizeof(uint64_t));
+            hasher.update(&encoded_seq_nr, sizeof(uint64_t));
             hasher.update(&encoded_key_size, sizeof(std::byte));
             hasher.update(key.data(), key.size());
             hasher.update(&value_size, sizeof(uint16_t));
@@ -144,65 +214,50 @@ namespace
                 break;
             }
 
+            size_t entry_length =
+                sizeof(uint64_t) + // seq_nr
+                sizeof(std::byte) + // key length
+                key.size() + // key
+                sizeof(uint16_t) + // value length
+                value.size() + // value
+                sizeof(uint32_t); // checksum
+
             co_yield wal_entry{
                 .seq_nr = seq_nr,
                 .key = std::move(key),
-                .value = std::move(value)};
+                .value = std::move(value),
+                .wal_entry_bytes = entry_length,
+            };
         }
     }
 
-    std::vector<std::filesystem::path> collect_wal_files(const std::filesystem::path& path)
+    std::vector<std::byte> wal::zero_bytes = std::vector<std::byte>(1 * MiB);
+
+    tmc::task<status> wal::zero_wal_until_size(wal_file& file, size_t size)
     {
-        std::vector<std::filesystem::path> files;
-        if(!std::filesystem::exists(path))
-            return files;
+        assert(file.file.file_size() >= size);
+        int32_t res = ftruncate(file.file.fd(), size);
+        if(res < 0)
+            co_return hedge::error("could not truncate wal file: " + std::string(strerror(errno)));
 
-        for(const auto& entry : std::filesystem::directory_iterator(path))
+        size_t offset = 0;
+        while(offset < size)
         {
-            if(!entry.is_regular_file() || entry.file_size() == 0)
-                continue;
+            size_t bytes_to_write = std::min(zero_bytes.size(), size - offset);
 
-            if(!entry.path().filename().string().starts_with(hedge::db::wal::WAL_FILE_PREFIX))
-                continue;
+            int32_t n = co_await hedge::io::write(file.file.fd(), wal::zero_bytes.data(), bytes_to_write, offset);
 
-            files.push_back(entry.path());
+            if(n < 0)
+                co_return hedge::error("could not write zeros into wal file: " + std::string(strerror(-n)));
+
+            if(n != static_cast<int32_t>(bytes_to_write))
+                co_return hedge::error("partial write of zeros into wal file: " + std::to_string(n) + " != " + std::to_string(bytes_to_write));
+
+            offset += n;
         }
-
-        return files;
+        file.offset = 0;
+        co_return hedge::ok();
     }
-
-    std::vector<wal_entry> read_all_entries(const std::vector<std::filesystem::path>& files, logger& log)
-    {
-        bool any_errors = false;
-        std::vector<wal_entry> entries;
-
-        for(const auto& path : files)
-        {
-            for(auto& entry : read_wal_file_generator(path))
-            {
-                if(!entry) [[unlikely]]
-                {
-                    any_errors = true;
-                    log.log("Error reading WAL file ", path, ": ", entry.error().to_string());
-                    continue;
-                }
-                entries.push_back(std::move(entry.value()));
-            }
-        }
-
-        if(any_errors)
-            throw std::runtime_error("Errors occurred while reading WAL files; see log for details");
-
-        std::ranges::sort(entries, [](const wal_entry& a, const wal_entry& b)
-                          { return a.seq_nr < b.seq_nr; });
-
-        return entries;
-    }
-
-} // anonymous namespace
-
-namespace hedge::db
-{
 
     wal::wal(const config& cfg) : _file_size_hint(cfg.file_size_hint)
     {
@@ -212,31 +267,33 @@ namespace hedge::db
             const auto wal_path = std::format("{}.{}.{}", wal::WAL_FILE_PREFIX, i, cfg.slot_idx);
             auto maybe_file = fs::file::from_path(
                 cfg.base_path / wal_path,
-                fs::file::open_mode::read_write_create_append,
-                false);
+                fs::file::open_mode::read_write_new,
+                false,
+                cfg.file_size_hint);
 
             if(!maybe_file.has_value())
+            {
                 throw std::runtime_error("could not open wal " + (cfg.base_path / wal_path).string() +
                                          " : " + maybe_file.error().to_string());
+            }
 
-            ::fallocate(maybe_file.value().fd(), FALLOC_FL_KEEP_SIZE, 0, static_cast<off_t>(cfg.file_size_hint));
             posix_fadvise(maybe_file.value().fd(), 0, 0, POSIX_FADV_DONTNEED);
 
-            this->_files.emplace_back(std::move(maybe_file.value()));
+            this->_files.emplace_back(std::move(maybe_file.value()), 0);
         }
     }
 
-    hedge::status wal::_write_entry(int32_t fd, uint64_t seq_nr,
-                                    const key_t& key, std::span<const std::byte> value)
+    hedge::status wal::write_entry(wal_file& file_and_offset, uint64_t seq_nr,
+                                   const key_t& key, std::span<const std::byte> value)
     {
+        uint64_t encoded_seq_nr = encode_seq_nr(seq_nr);
         uint8_t encoded_key_size = hedge::encode_key_size(key.size());
         auto value_size = static_cast<uint16_t>(value.size());
-
-        uint32_t checksum;
+        uint32_t checksum; // It will be valued later
 
         // clang-format off
         std::array<iovec, 6> entry{
-            iovec{.iov_base = &seq_nr,                              .iov_len = sizeof(uint64_t)},
+            iovec{.iov_base = &encoded_seq_nr,                      .iov_len = sizeof(uint64_t)},
             iovec{.iov_base = &encoded_key_size,                    .iov_len = sizeof(uint8_t)},
             iovec{.iov_base = const_cast<std::byte*>(key.data()),   .iov_len = key.size()},
             iovec{.iov_base = &value_size,                          .iov_len = sizeof(uint16_t)},
@@ -256,7 +313,7 @@ namespace hedge::db
                                               [](size_t sum, const iovec& v)
                                               { return sum + v.iov_len; });
 
-        int32_t res = pwritev2(fd, entry.data(), static_cast<int>(entry.size()), -1, 0);
+        int32_t res = pwritev2(file_and_offset.file.fd(), entry.data(), static_cast<int>(entry.size()), file_and_offset.offset, 0);
 
         if(res < 0)
             return hedge::error("could not write into wal: " + std::string(strerror(errno)));
@@ -264,31 +321,37 @@ namespace hedge::db
         if(size_t(res) != expected_bytes)
             return hedge::error("partial write into wal: " + std::to_string(res) + " != " + std::to_string(expected_bytes));
 
+        file_and_offset.offset += res;
+
         return hedge::ok();
     }
 
     hedge::status wal::append(size_t thread_idx, uint64_t seq_nr,
                               const key_t& key, std::span<const std::byte> value)
     {
-        return _write_entry(_files[thread_idx].fd(), seq_nr, key, value);
+        return hedge::db::wal::write_entry(this->_files[thread_idx], seq_nr, key, value);
     }
 
-    hedge::status wal::replay(const std::filesystem::path& path,
-                              const std::function<bool(const key_t&, std::span<const std::byte>, uint64_t)>& on_entry,
-                              logger& log)
+    hedge::status wal::replay(
+        const std::filesystem::path& wal_path,
+        const std::function<bool(const key_t&, std::span<const std::byte>, uint64_t)>& on_entry,
+        logger& log)
     {
-        auto files = collect_wal_files(path);
-        if(files.empty())
-            return hedge::ok();
 
-        auto entries = read_all_entries(files, log);
+        auto files = wal::collect_wal_filenames(wal_path);
 
         size_t replayed = 0;
-        for(const auto& entry : entries)
+
+        for(auto& wal_file : files)
         {
-            if(!on_entry(entry.key, entry.value, entry.seq_nr))
-                break;
-            ++replayed;
+            auto entries = read_all_entries(wal_file, log);
+
+            for(const auto& entry : entries)
+            {
+                if(!on_entry(entry.key, entry.value, entry.seq_nr))
+                    break;
+                ++replayed;
+            }
         }
 
         log.log("WAL replay: replayed ", replayed, " entries from ", files.size(), " WAL files");
@@ -296,13 +359,16 @@ namespace hedge::db
         return hedge::ok();
     }
 
-    void wal::reset()
+    tmc::task<hedge::status> wal::reset()
     {
-        for(const auto& f : this->_files)
+        for(auto& f : this->_files)
         {
-            [[maybe_unused]] int r = ::ftruncate(f.fd(), 0);
-            ::fallocate(f.fd(), FALLOC_FL_KEEP_SIZE, 0, static_cast<off_t>(this->_file_size_hint));
+            auto s = co_await wal::zero_wal_until_size(f, this->_file_size_hint);
+            if(!s)
+                co_return hedge::error("failed to reset wal file " + f.file.path().string() + ": " + s.error().to_string());
         }
+
+        co_return hedge::ok();
     }
 
 } // namespace hedge::db

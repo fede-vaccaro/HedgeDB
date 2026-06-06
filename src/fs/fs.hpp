@@ -40,7 +40,7 @@ namespace hedge::fs
             read_write = O_RDWR,
             read_write_new = O_RDWR | O_CREAT | O_TRUNC,
             read_write_append = O_RDWR | O_APPEND,
-            read_write_create_append = O_RDWR | O_CREAT | O_APPEND,
+            read_write_new_append = O_RDWR | O_CREAT | O_APPEND,
         };
 
     private:
@@ -91,7 +91,7 @@ namespace hedge::fs
             if(!exists && mode == open_mode::read_only)
                 return hedge::error("File does not exist: " + path.string());
 
-            if(exists && (mode == open_mode::write_new || mode == open_mode::read_write_new || mode == open_mode::read_write_append))
+            if(exists && (mode == open_mode::write_new || mode == open_mode::read_write || mode == open_mode::read_write_append))
                 return hedge::error("File already exists: " + path.string());
 
             // Open the file;
@@ -139,7 +139,7 @@ namespace hedge::fs
                     }
                     case open_mode::write_append_new:
                     case open_mode::read_write_append:
-                    case open_mode::read_write_create_append:
+                    case open_mode::read_write_new_append:
                         break;
                 };
             }
@@ -210,7 +210,7 @@ namespace hedge::fs
                     }
                     case open_mode::write_append_new:
                     case open_mode::read_write_append:
-                    case open_mode::read_write_create_append:
+                    case open_mode::read_write_new_append:
                         break;
                 };
             }

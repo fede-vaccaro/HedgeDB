@@ -53,6 +53,41 @@ namespace hedge::db
         return std::nullopt;
     }
 
+    hedge::expected<std::optional<std::filesystem::path>> move_old_wal_files(const std::filesystem::path& wal_dir)
+    {
+        auto old_wal_files = wal::collect_wal_filenames(wal_dir);
+        if (old_wal_files.empty())
+            return std::nullopt;
+
+        std::array<std::byte, 16> uuid_bytes;
+
+        thread_local std::mt19937_64 gen{std::random_device{}()};
+        thread_local std::uniform_int_distribution<uint8_t> dist;
+
+        std::ranges::for_each(uuid_bytes, [&](std::byte& b)
+        {
+            b = static_cast<std::byte>(dist(gen));
+        });
+
+        std::string old_wal_dirname = hedge::to_hex_string(uuid_bytes);
+        auto old_wal_dir_path = wal_dir / old_wal_dirname;
+
+        bool ok = std::filesystem::create_directories(old_wal_dir_path);
+        if (!ok)
+            return hedge::error("could not create directory: " + old_wal_dir_path.string());
+
+        for (auto& wal: old_wal_files)
+        {
+            std::error_code ec;
+            std::filesystem::rename(wal, old_wal_dir_path / wal.filename(), ec);
+
+            if (ec)
+                return hedge::error("error while moving wal file " + wal.string() + " :" + ec.message());
+        }
+
+        return old_wal_dir_path;
+    }
+
     memtable::memtable(const memtable_config& cfg,
                        size_t num_partition_exponent,
                        std::filesystem::path indices_path,
@@ -90,6 +125,13 @@ namespace hedge::db
             //   1 active + 1 pipelined + max_pending_flushes pending
             const size_t n_slots = cfg.max_pending_flushes + 2;
             const size_t file_size_hint = cfg.memory_budget_cap / std::max(cfg.num_writer_threads, size_t{1});
+
+            // Before creating the new WALs check if there is anything to recover
+            auto maybe_old_wals_path = move_old_wal_files(this->_indices_path);
+            if (!maybe_old_wals_path)
+                throw std::runtime_error(std::format("Could not read wal files from {}: {}", this->_indices_path.string(), maybe_old_wals_path.error().to_string()));
+
+            this->_old_wals_path = maybe_old_wals_path.value().value_or(std::filesystem::path{});
 
             for(const auto i : std::views::iota(size_t{0}, n_slots))
             {
@@ -450,7 +492,12 @@ namespace hedge::db
         // Flush done: reset WAL files and return the slot to the pool
         if(auto& w = memtable_to_flush->ptr()->_wal; w)
         {
-            w->reset();
+            auto s = co_await w->reset();
+            if(!s)
+            {
+                this->_logger.log("failed to reset wal file : " + s.error().to_string());
+                co_return;
+            }
             auto ch_tok = this->_wal_ch.new_token();
             [[maybe_unused]] bool ok = co_await ch_tok.push(std::move(w));
             assert(ok);
@@ -467,34 +514,38 @@ namespace hedge::db
 
     hedge::status memtable::replay_wal(std::optional<uint64_t> skip_up_to_seq_nr)
     {
-        auto table_ptr = this->_table.ref().load(std::memory_order::relaxed);
-        auto* mt = table_ptr->ptr();
-
         size_t replayed_entries_count = 0;
         uint64_t max_seq_nr = 0;
 
+        tmc::ex_cpu_st replay_executor;
+        replay_executor.init();
+
+        if (this->_old_wals_path.empty())
+            return hedge::ok();
+
         auto status = wal::replay(
-            this->_indices_path,
+            this->_old_wals_path,
             [&](const key_t& key, std::span<const std::byte> value, uint64_t seq_nr) -> bool
             {
                 if(skip_up_to_seq_nr && seq_nr <= *skip_up_to_seq_nr)
                     return true; // already persisted in an SST
 
-                auto* ptr = mt->value_arenas[0]->allocate_many(value.size(), VALUE_DATA_ALIGNMENT);
-                if(ptr == nullptr)
-                    throw std::runtime_error("WAL replay: arena exhausted after " +
-                                             std::to_string(replayed_entries_count) + " entries — data loss prevented");
+                auto value_type = static_cast<hedge::value_type>(value[0]);
+                auto actual_value = value.subspan(1);
 
-                std::memcpy(ptr, value.data(), value.size());
-                mt->insert(key, {ptr, value.size()});
-                max_seq_nr = std::max(max_seq_nr, seq_nr);
-                ++replayed_entries_count;
+                auto f = tmc::post_waitable(replay_executor, this->put_async(key, actual_value, value_type)).get();
+                if (!f)
+                    throw std::runtime_error("failed to post put_async on wal replay: " + f.error().to_string());
+
                 return true;
             },
             this->_logger);
 
         if(replayed_entries_count > 0)
             this->_seq_nr.store(max_seq_nr + 1, std::memory_order::relaxed);
+
+        std::filesystem::remove_all(this->_old_wals_path);
+        this->_old_wals_path = std::filesystem::path{};
 
         return status;
     }

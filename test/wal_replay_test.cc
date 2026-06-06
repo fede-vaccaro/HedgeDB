@@ -65,14 +65,14 @@ namespace hedge::db
 
         void SetUp() override
         {
-            if(std::filesystem::exists(_indices_path))
-                std::filesystem::remove_all(_indices_path);
-            std::filesystem::create_directories(_indices_path);
+            if(std::filesystem::exists(this->_indices_path))
+                std::filesystem::remove_all(this->_indices_path);
+            std::filesystem::create_directories(this->_indices_path);
 
             sync();
         }
 
-        std::filesystem::path _indices_path = "/tmp/db_wal_test/indices";
+        std::filesystem::path _indices_path = "db_wal_test/indices";
     };
 
     TEST_F(wal_replay_test, replay_recovers_unflushed_keys)
@@ -130,7 +130,7 @@ namespace hedge::db
 
             // Verify WAL files exist
             size_t wal_count = 0;
-            for(const auto& entry : std::filesystem::directory_iterator(_indices_path))
+            for(const auto& entry : std::filesystem::directory_iterator(this->_indices_path))
             {
                 if(entry.path().filename().string().starts_with(hedge::db::wal::WAL_FILE_PREFIX))
                     ++wal_count;
