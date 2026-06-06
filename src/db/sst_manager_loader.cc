@@ -81,8 +81,10 @@ namespace hedge::db
                 return hedge::ok();
 
             auto maybe_file = fs::file::from_path(partition_manifest_path, fs::file::open_mode::read_write, false);
-            if(maybe_file)
-                state.state_file = std::move(maybe_file.value());
+            if(!maybe_file)
+                return hedge::ok();
+
+            state.state_file = std::move(maybe_file.value());
 
             int fd = ::open(dir_path.c_str(), O_RDONLY | O_DIRECTORY);
             if(fd < 0)
