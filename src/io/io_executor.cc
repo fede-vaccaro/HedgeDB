@@ -289,7 +289,7 @@ namespace hedge::io
             }
             case executor_type::GENERAL_PURPOSE:
             {
-                this->_n_threads = topology.core_count();
+                this->_n_threads = std::min(topology.pu_count(), cfg.n_threads.value_or(0));
                 break;
             }
         }
