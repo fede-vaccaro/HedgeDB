@@ -146,8 +146,6 @@ namespace hedge::io
 
                 auto pop_count = std::min(static_cast<size_t>(sq_to_submit), this->_waiting_for_io.size());
 
-                submitted_sqe_count = pop_count;
-
                 for(size_t i = 0; i < pop_count; ++i)
                 {
                     auto io_callback = this->_waiting_for_io.front();
