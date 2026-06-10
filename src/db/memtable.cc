@@ -154,7 +154,8 @@ namespace hedge::db
                 auto ch_tok = self->_wal_ch.new_token();
                 self->_table.ref().store(co_await self->_make_memtable(ch_tok));
                 self->_pipelined_table.ref().store(co_await self->_make_memtable(ch_tok));
-            }(this))
+            }(this),
+            0)
             .wait();
     }
 

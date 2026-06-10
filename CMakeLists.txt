@@ -84,6 +84,8 @@ include_directories("src")
 include_directories(${xxhashct_SOURCE_DIR})
 include_directories(${tmc_SOURCE_DIR}/include)
 
+add_compile_definitions(TMC_PRIORITY_COUNT=5)
+
 set(IO_EXECUTOR_SRCS
     src/io/static_pool.cc
     src/io/io_executor.cc
@@ -106,6 +108,7 @@ set(DB_SOURCES
     src/fs/fs.hpp
     src/fs/fs.cc
     src/fs/file_reader2.cc
+    src/fs/stream_reader.cc
     src/db/database.cc
     src/db/sst_manager.cc
     src/db/sst_manager_loader.cc
@@ -145,6 +148,10 @@ add_executable(benchtool
     benchtool/compaction.cc)
 target_link_libraries(benchtool hedgedb ${MALLOC})
 
+# streamer (experimental)
+add_executable(streamer streamer/main.cc)
+target_link_libraries(streamer hedgedb ${MALLOC})
+
 # Hello world example
 add_executable(hello_world examples/hello_world.cc)
 target_link_libraries(hello_world hedgedb ${MALLOC})
@@ -163,6 +170,11 @@ if (BUILD_TESTS)
     add_executable(file_reader2_test test/file_reader2_test.cc)
     target_link_libraries(file_reader2_test hedgedb gtest gtest_main)
     add_test(NAME file_reader2_test COMMAND file_reader2_test)
+
+    # stream_reader tests
+    add_executable(stream_reader_test test/stream_reader_test.cc)
+    target_link_libraries(stream_reader_test hedgedb gtest gtest_main)
+    add_test(NAME stream_reader_test COMMAND stream_reader_test)
 
     # database tests
     add_executable(database_test test/database_test.cc)

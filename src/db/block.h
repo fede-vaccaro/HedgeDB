@@ -206,7 +206,7 @@ namespace hedge::db
         block_footer _footer{};
 
     public:
-        block_decoder(const block_config& cfg = {}) : _cfg(cfg){};
+        block_decoder(const block_config& cfg = {}) : _cfg(cfg) {};
         block_decoder(const std::byte* base, const block_config& cfg = {});
         std::span<const std::byte> find(std::span<const std::byte> key);
         void reset(const std::byte* new_base);
@@ -221,9 +221,9 @@ namespace hedge::db
     // Respect to the block_encoder, it automatically switch to the next block when the current has no space left
     class block_buffer_writer
     {
-        std::byte* const _begin{};
+        std::byte* _begin{};
         std::byte* _cur{};
-        std::byte* const _end{};
+        std::byte* _end{};
         block_encoder _block_encoder;
 
     public:
@@ -266,6 +266,14 @@ namespace hedge::db
         void reset()
         {
             this->_cur = this->_begin;
+            this->_block_encoder.reset(this->_cur);
+        }
+
+        void reset_to(std::byte* new_begin, std::byte* new_end)
+        {
+            this->_begin = new_begin;
+            this->_cur = new_begin;
+            this->_end = new_end;
             this->_block_encoder.reset(this->_cur);
         }
 

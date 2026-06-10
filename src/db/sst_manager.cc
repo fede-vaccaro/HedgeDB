@@ -21,6 +21,7 @@
 #include "perf_counter.h"
 #include "sst_manager.h"
 #include "tmc/aw_resume_on.hpp"
+#include "tmc/fork_group.hpp"
 #include "tmc/latch.hpp"
 #include "tmc/semaphore.hpp"
 #include "tmc/sync.hpp"
@@ -413,7 +414,7 @@ namespace hedge::db
                 co_return hedge::error(err);
             }
 
-            if (n < static_cast<int32_t>(buf.size()))
+            if(n < static_cast<int32_t>(buf.size()))
             {
                 std::string err = std::format("pwrite written less bytes than expected: {} < {}", n, buf.size());
                 this->_logger.log(err);
@@ -569,6 +570,15 @@ namespace hedge::db
             co_return;
         };
 
+        // auto run_tasks_in_sequence = [](std::vector<tmc::task<void>> tasks) -> tmc::task<void>
+        // {
+        //     auto fg = tmc::fork_group();
+        //     for(auto& t : tasks)
+        //         fg.fork(std::move(t));
+        //     co_await std::move(fg);
+        //     co_return;
+        // };
+
         std::vector<tmc::task<void>> last_level_tasks;
 
         for(auto& [partition_prefix, buckets] : buckets_per_partition)
@@ -646,7 +656,7 @@ namespace hedge::db
                 {
                     tmc::post(*this->_compaction_pool,
                               //    tasks.begin(), tasks.end(),
-                              run_tasks_in_sequence(std::move(tasks)));
+                              run_tasks_in_sequence(std::move(tasks)), 1);
                 }
             }
         }

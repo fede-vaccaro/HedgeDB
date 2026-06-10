@@ -68,6 +68,11 @@ namespace hedge::io
             return this->_ex;
         }
 
+        [[nodiscard]] tmc::ex_any* type_erased()
+        {
+            return this->_ex.type_erased();
+        }
+
         void shutdown();
 
         ~io_executor();
