@@ -13,7 +13,7 @@ namespace hedge::async
         std::shared_ptr<obj_t> shared_obj = std::make_shared<obj_t>(1, 42);
 
         {
-            auto writer = shared_obj->acquire_writer(0);
+            auto writer = shared_obj->acquire_writer_tok(0);
 
             ASSERT_TRUE(writer);
 
@@ -29,7 +29,7 @@ namespace hedge::async
         any_writer = shared_obj->any_active_writer();
         ASSERT_FALSE(any_writer);
 
-        auto new_writer = shared_obj->acquire_writer(0);
+        auto new_writer = shared_obj->acquire_writer_tok(0);
         ASSERT_FALSE(new_writer);
     }
 
@@ -48,7 +48,7 @@ namespace hedge::async
         std::shared_ptr<obj_t> shared_obj = std::make_shared<obj_t>(1, 42);
 
         {
-            auto writer = shared_obj->acquire_writer(0);
+            auto writer = shared_obj->acquire_writer_tok(0);
             writer->bar();
         }
 
@@ -69,8 +69,8 @@ namespace hedge::async
 
         std::shared_ptr<obj_t> shared_obj = std::make_shared<obj_t>(2, 42);
 
-        auto w1 = shared_obj->acquire_writer(0);
-        auto w2 = shared_obj->acquire_writer(1);
+        auto w1 = shared_obj->acquire_writer_tok(0);
+        auto w2 = shared_obj->acquire_writer_tok(1);
 
         w1.release();
 

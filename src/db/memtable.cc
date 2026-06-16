@@ -152,7 +152,7 @@ namespace hedge::db
             [](memtable* self) -> tmc::task<void>
             {
                 auto ch_tok = self->_wal_ch.new_token();
-                self->_table.ref().store(co_await self->_make_memtable(ch_tok));
+                self->_active_table.ref().store(co_await self->_make_memtable(ch_tok));
                 self->_pipelined_table.ref().store(co_await self->_make_memtable(ch_tok));
             }(this))
             .wait();
@@ -190,24 +190,24 @@ namespace hedge::db
         // Loading from an atomic shared every time is slow since it is spinlock-base (not lock-free)
         // This is a thread-local cache
         // TODO: thread_local might get tricky with work stealing
-        thread_local std::shared_ptr<rw_sync_buffer_t> local_memtable_ref = this->_table.ref().load(std::memory_order::relaxed);
+        thread_local std::shared_ptr<rw_sync_buffer_t> local_memtable_ref = this->_active_table.ref().load(std::memory_order::relaxed);
 
         static std::atomic_size_t THREADS{0};
         thread_local std::atomic_size_t THIS_THREAD_IDX = THREADS.fetch_add(1, std::memory_order::relaxed);
-        auto insert_attempts = 0UL;
+        auto insert_retries = 0UL;
 
         while(true)
         {
-            auto memtable = local_memtable_ref->acquire_writer(THIS_THREAD_IDX % this->_cfg.num_writer_threads);
+            auto memtable = local_memtable_ref->acquire_writer_tok(THIS_THREAD_IDX % this->_cfg.num_writer_threads);
 
             if(!memtable) [[unlikely]] // The memtable has been frozen (from the flusher), try loading the new one
             {
-                auto t = this->_table.ref().load(std::memory_order::relaxed);
+                auto t = this->_active_table.ref().load(std::memory_order::relaxed);
                 if(t == local_memtable_ref) // Backpressure if the table is not ready
                 {
-                    constexpr size_t ATTEMPTS_BEFORE_BACKPRESSURE = 4;
+                    constexpr size_t RETRIES_BEFORE_BACKPRESSURE = 4;
 
-                    if(insert_attempts++ < ATTEMPTS_BEFORE_BACKPRESSURE)
+                    if(insert_retries++ < RETRIES_BEFORE_BACKPRESSURE)
                     {
                         ::third_party::folly::detail::asm_volatile_pause();
                         continue;
@@ -215,15 +215,15 @@ namespace hedge::db
 
                     HALT_COUNTER.fetch_add(1, std::memory_order::relaxed);
 
-                    co_await this->_table.await(local_memtable_ref);
+                    co_await this->_active_table.await(local_memtable_ref);
 
-                    local_memtable_ref = this->_table.ref().load(std::memory_order::relaxed);
-                    insert_attempts = 0;
+                    local_memtable_ref = this->_active_table.ref().load(std::memory_order::relaxed);
+                    insert_retries = 0;
                     continue;
                 }
 
                 local_memtable_ref = std::move(t);
-                insert_attempts = 0;
+                insert_retries = 0;
                 continue;
             }
 
@@ -258,12 +258,12 @@ namespace hedge::db
     std::optional<value_t> memtable::get(const key_t& key) const
     {
         thread_local size_t table_switch_epoch = this->_table_switch_epoch.load(std::memory_order_acquire);
-        thread_local auto local_memtable_ref = this->_table.ref().load(std::memory_order_relaxed);
+        thread_local auto local_memtable_ref = this->_active_table.ref().load(std::memory_order_relaxed);
 
         if(auto curr_epoch = this->_table_switch_epoch.load(std::memory_order::acquire); curr_epoch > table_switch_epoch)
         {
             table_switch_epoch = curr_epoch;
-            local_memtable_ref = this->_table.ref().load(std::memory_order::relaxed);
+            local_memtable_ref = this->_active_table.ref().load(std::memory_order::relaxed);
         }
 
         auto v = local_memtable_ref->ptr()->get(key);
@@ -321,7 +321,7 @@ namespace hedge::db
         if(this->_flush_mutex.compare_exchange_strong(expected, true))
         {
             // Guard: if the table was already swapped by a concurrent flush, bail out
-            if(this->_table.ref().load(std::memory_order::relaxed) != expected_table)
+            if(this->_active_table.ref().load(std::memory_order::relaxed) != expected_table)
             {
                 this->_flush_mutex.store(false);
                 co_return false;
@@ -361,7 +361,7 @@ namespace hedge::db
             {
                 std::unique_lock lk(this->_pending_flushes_mutex);
                 rw_sync_buffer_ptr_t next_in_pipeline = this->_pipelined_table.ref().exchange(nullptr);
-                memtable_to_flush = this->_table.ref().exchange(next_in_pipeline, std::memory_order::relaxed);
+                memtable_to_flush = this->_active_table.ref().exchange(next_in_pipeline, std::memory_order::relaxed);
                 this->_pending_flushes.insert({curr_flush_epoch, memtable_to_flush});
             }
             t1 = std::chrono::high_resolution_clock::now();
@@ -387,7 +387,7 @@ namespace hedge::db
                                   "lock=", latencies.lock_for_swap.count(), "us");
             }
 
-            this->_table.notify_all();
+            this->_active_table.notify_all();
             this->_table_switch_epoch.fetch_add(1, std::memory_order::release);
 
             tmc::spawn([](memtable* self) -> tmc::task<void>
@@ -553,7 +553,7 @@ namespace hedge::db
 
     memtable::snapshot memtable::acquire_snapshot()
     {
-        auto curr_memtable = this->_table.ref().load(std::memory_order::relaxed);
+        auto curr_memtable = this->_active_table.ref().load(std::memory_order::relaxed);
         size_t curr_seq_nr = curr_memtable->ptr()->seq_nr();
 
         std::shared_lock lk(this->_pending_flushes_mutex);
