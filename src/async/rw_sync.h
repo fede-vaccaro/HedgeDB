@@ -64,19 +64,19 @@ namespace hedge::async
         }
 
         // RAII style for decreasing the reference counter when a writer has acquired the object
-        class acquired_writer
+        class write_token
         {
             T* _obj;
             std::atomic_int64_t* _counter;
-            acquired_writer(T* obj, std::atomic_int64_t* cnt) : _obj(obj), _counter(cnt)
+            write_token(T* obj, std::atomic_int64_t* cnt) : _obj(obj), _counter(cnt)
             {
             }
 
             friend class rw_sync<T>;
 
         public:
-            acquired_writer(acquired_writer&&) = default;
-            acquired_writer(const acquired_writer&) = delete;
+            write_token(write_token&&) = default;
+            write_token(const write_token&) = delete;
 
             operator bool() const
             {
@@ -107,7 +107,7 @@ namespace hedge::async
                 this->_counter = nullptr;
             }
 
-            ~acquired_writer()
+            ~write_token()
             {
                 this->release();
             }
@@ -124,12 +124,13 @@ namespace hedge::async
         }
 
         /**
-         * @brief Acquires the underlying resource for writing.
+         * @brief Acquires a token for modifying the underlying resource.
+         * The acquired token evaluates to false if the resource was frozen (@see freeze_writes().
          *
          * @param this_thread_idx The striped index for the current thread. Must be < thread_count.
-         * @return acquired_writer An RAII handle. Evaluates to false if acquisition failed (frozen).
+         * @return writer_token An RAII handle.
          */
-        [[nodiscard]] acquired_writer acquire_writer(size_t this_thread_idx)
+        [[nodiscard]] write_token acquire_writer_tok(size_t this_thread_idx)
         {
             auto& counter = this->_counters[this_thread_idx].c;
 
@@ -144,15 +145,14 @@ namespace hedge::async
             {
                 // Back off: withdraw announcement and fail
                 counter.store(0, std::memory_order::release);
-                return acquired_writer{nullptr, nullptr};
+                return write_token{nullptr, nullptr};
             }
 
-            return acquired_writer{&this->_obj, &counter};
+            return write_token{&this->_obj, &counter};
         }
 
         /**
          * @brief Checks if any writer is currently holding a reference.
-         * This is the "slow path" usually called by the flusher/reclaimer.
          */
         [[nodiscard]] bool any_active_writer() const
         {
@@ -162,8 +162,8 @@ namespace hedge::async
 
         /**
          * @brief Freezes the resource, blocking new writers.
-         * Existing writers are not affected, but new acquire_writer calls will fail.
-         * The caller should spin on any_active_writer() to wait for draining.
+         * Existing writers are not affected, acquire_writer_tok() calls will fail,
+         * returning an empty token.
          */
         void freeze_writes()
         {

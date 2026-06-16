@@ -145,7 +145,7 @@ namespace hedge::db
         alignas(CACHE_LINE_SIZE) std::atomic_uint64_t _seq_nr{0};
 
         // Current memtable and pipelined
-        alignas(CACHE_LINE_SIZE) tmc::atomic_condvar<rw_sync_buffer_ptr_t> _table{nullptr};
+        alignas(CACHE_LINE_SIZE) tmc::atomic_condvar<rw_sync_buffer_ptr_t> _active_table{nullptr};
         alignas(CACHE_LINE_SIZE) tmc::atomic_condvar<rw_sync_buffer_ptr_t> _pipelined_table{nullptr}; // For double buffering
         alignas(CACHE_LINE_SIZE) std::atomic_bool _flush_mutex;                                       // One thread at a time takes the responsability of flushing when
 

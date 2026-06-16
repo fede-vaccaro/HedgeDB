@@ -774,7 +774,7 @@ namespace
             }
             for(size_t i = start; i < end; ++i)
             {
-                auto guard = rw_gate.acquire_writer(thread_idx % num_threads);
+                auto guard = rw_gate.acquire_writer_tok(thread_idx % num_threads);
                 if(!guard)
                     std::abort();
                 if(!accessor.add(NodeData(keys[i], make_val(i))))
