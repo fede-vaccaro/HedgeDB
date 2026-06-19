@@ -88,9 +88,9 @@ make_put_task(hedge::db::memtable* mt, size_t tid, size_t N, size_t N_EXECUTORS)
 {
     for(size_t i = tid; i < N; i += N_EXECUTORS)
     {
-        co_await mt->put_async(make_key(i),
-                               DUMMY_VALUE,
-                               hedge::value_type::IN_PLACE_VALUE);
+        mt->put(make_key(i),
+                DUMMY_VALUE,
+                hedge::value_type::IN_PLACE_VALUE);
     }
     co_return;
 }

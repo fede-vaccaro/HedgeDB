@@ -129,6 +129,11 @@ namespace hedge::io
             return this->_in_flight.size();
         }
 
+        [[nodiscard]] size_t pending_count() const
+        {
+            return this->_waiting_for_io.size();
+        }
+
         size_t submit_and_wait()
         {
             auto cq_ready = static_cast<int32_t>(io_uring_cq_ready(&this->_uring));
@@ -162,7 +167,14 @@ namespace hedge::io
 
             const uint32_t wait_for = this->_in_flight.size() > 0 ? 1 : 0;
 
-            auto ret = io_uring_submit_and_wait(&this->_uring, wait_for);
+            // The SQEs above are already in the ring; io_uring_enter submits before waiting, so an
+            // EINTR (e.g. Go's async-preemption SIGURG hitting the blocking wait) leaves them
+            // submitted — retrying only re-waits, it does not re-submit.
+            int ret;
+            do
+            {
+                ret = io_uring_submit_and_wait(&this->_uring, wait_for);
+            } while(ret == -EINTR);
 
             if(ret < 0)
                 throw std::runtime_error("io_uring_submit_and_wait: "s + strerror(-ret));

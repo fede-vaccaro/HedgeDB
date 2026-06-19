@@ -123,6 +123,11 @@ endif()
 add_library(hedgedb STATIC ${DB_SOURCES})
 target_link_libraries(hedgedb PUBLIC hedgedb_io xxhash)
 
+add_library(hedgedb_c SHARED src/capi/hedge_c.cc)
+target_link_libraries(hedgedb_c PRIVATE hedgedb)
+
+set_target_properties(hedgedb_io hedgedb hedgedb_c PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 
 if(USE_TCMALLOC)
     set(MALLOC "tcmalloc")

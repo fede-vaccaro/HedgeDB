@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <semaphore>
 #include <shared_mutex>
 #include <span>
 #include <utility>
@@ -152,7 +153,7 @@ namespace hedge::db
         // Pending flushes
         alignas(CACHE_LINE_SIZE) std::atomic_size_t _table_switch_epoch;
         alignas(CACHE_LINE_SIZE) mutable std::shared_mutex _pending_flushes_mutex;
-        tmc::semaphore _pending_flush_slots;
+        std::counting_semaphore<> _pending_flush_slots;
         std::condition_variable_any _pending_flushes_cv_sync; // Only used when waiting for every flush to complete
         std::map<size_t, rw_sync_buffer_ptr_t> _pending_flushes;
 
@@ -179,10 +180,7 @@ namespace hedge::db
 
         ~memtable();
 
-        // This method needs to be asynchronous (::task<...>) because
-        // in case of pressure (arriving from the pending compactions or pending flushes)
-        // it cooperatively yields (to other task or threads)
-        tmc::task<hedge::status> put_async(const key_t& key, std::span<const std::byte> value, hedge::value_type value_type);
+        hedge::status put(const key_t& key, std::span<const std::byte> value, hedge::value_type value_type);
 
         std::optional<value_t> get(const key_t& key) const;
 
@@ -204,7 +202,7 @@ namespace hedge::db
         static constexpr size_t VALUE_DATA_ALIGNMENT = 16; // Deprecated, might use actual alignment (8 bytes)
 
         [[nodiscard]] tmc::task<std::shared_ptr<rw_sync_buffer_t>> _make_memtable(tmc::chan_tok<std::unique_ptr<wal>>& tok);
-        tmc::task<bool> _flush(rw_sync_buffer_ptr_t expected_table);
+        bool _flush(rw_sync_buffer_ptr_t expected_table);
         tmc::task<void> _flush_inner(size_t curr_flush_epoch,
                                      rw_sync_buffer_ptr_t memtable_to_flush,
                                      std::shared_ptr<tmc::semaphore> can_write,

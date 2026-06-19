@@ -161,7 +161,7 @@ namespace hedge::db
     memtable::~memtable()
     {
         this->_pipelined_table.ref().store(nullptr, std::memory_order::relaxed);
-        this->_pipelined_table.notify_one();
+        this->_pipelined_table.ref().notify_one();
 
         if(this->_wal_dir_fd)
             ::close(*this->_wal_dir_fd);
@@ -185,7 +185,7 @@ namespace hedge::db
             std::move(wal_slot));
     }
 
-    tmc::task<hedge::status> memtable::put_async(const key_t& key, std::span<const std::byte> value, hedge::value_type value_type)
+    hedge::status memtable::put(const key_t& key, std::span<const std::byte> value, hedge::value_type value_type)
     {
         // Loading from an atomic shared every time is slow since it is spinlock-base (not lock-free)
         // This is a thread-local cache
@@ -215,7 +215,7 @@ namespace hedge::db
 
                     HALT_COUNTER.fetch_add(1, std::memory_order::relaxed);
 
-                    co_await this->_active_table.await(local_memtable_ref);
+                    this->_active_table.ref().wait(local_memtable_ref);
 
                     local_memtable_ref = this->_active_table.ref().load(std::memory_order::relaxed);
                     insert_retries = 0;
@@ -241,7 +241,7 @@ namespace hedge::db
 
             if(!ok || memtable->bytes_written.fetch_add(key.size() + value.size() + 1, std::memory_order_relaxed) > this->_cfg.memory_budget_cap) [[unlikely]]
             {
-                bool this_thread_flushed = co_await this->_flush(local_memtable_ref);
+                bool this_thread_flushed = this->_flush(local_memtable_ref);
                 if(!this_thread_flushed)
                     ::third_party::folly::detail::asm_volatile_pause();
                 continue;
@@ -249,9 +249,9 @@ namespace hedge::db
 
             // OK
             if(!this->_cfg.use_wal)
-                co_return hedge::ok();
+                return hedge::ok();
 
-            co_return memtable->_wal->append(THIS_THREAD_IDX % this->_cfg.num_writer_threads, seq_nr, key, value_span);
+            return memtable->_wal->append(THIS_THREAD_IDX % this->_cfg.num_writer_threads, seq_nr, key, value_span);
         }
     }
 
@@ -313,7 +313,7 @@ namespace hedge::db
         return promise.get_future();
     }
 
-    tmc::task<bool> memtable::_flush(rw_sync_buffer_ptr_t expected_table)
+    bool memtable::_flush(rw_sync_buffer_ptr_t expected_table)
     {
         bool expected = false;
 
@@ -324,7 +324,7 @@ namespace hedge::db
             if(this->_active_table.ref().load(std::memory_order::relaxed) != expected_table)
             {
                 this->_flush_mutex.store(false);
-                co_return false;
+                return false;
             }
 
             size_t curr_flush_epoch = this->_flush_epoch->fetch_add(1, std::memory_order::relaxed);
@@ -346,13 +346,13 @@ namespace hedge::db
 
             // Section 1: Acquire flush slot (backpressure from max_pending_flushes)
             t0 = std::chrono::high_resolution_clock::now();
-            co_await this->_pending_flush_slots;
+            this->_pending_flush_slots.acquire();
             t1 = std::chrono::high_resolution_clock::now();
             latencies.acquire_flush_slot = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
 
             // Section 2: Wait for pipelined table to be ready
             t0 = std::chrono::high_resolution_clock::now();
-            co_await this->_pipelined_table.await(nullptr);
+            this->_pipelined_table.ref().wait(nullptr);
             t1 = std::chrono::high_resolution_clock::now();
             latencies.wait_pipelined = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
 
@@ -387,7 +387,7 @@ namespace hedge::db
                                   "lock=", latencies.lock_for_swap.count(), "us");
             }
 
-            this->_active_table.notify_all();
+            this->_active_table.ref().notify_all();
             this->_table_switch_epoch.fetch_add(1, std::memory_order::release);
 
             tmc::spawn([](memtable* self) -> tmc::task<void>
@@ -395,7 +395,7 @@ namespace hedge::db
                 thread_local auto ch_tok = self->_wal_ch.new_token();
 
                 self->_pipelined_table.ref().store(co_await self->_make_memtable(ch_tok), std::memory_order::relaxed);
-                self->_pipelined_table.notify_one();
+                self->_pipelined_table.ref().notify_one();
                 co_return; }(this))
                 .run_on(*this->_flusher)
                 .detach();
@@ -409,10 +409,10 @@ namespace hedge::db
 
             // Release mutex
             this->_flush_mutex.store(false);
-            co_return true;
+            return true;
         }
 
-        co_return false;
+        return false;
     }
 
     tmc::task<void> memtable::_flush_inner(
@@ -509,17 +509,11 @@ namespace hedge::db
 
     hedge::status memtable::replay_wal(std::optional<uint64_t> skip_up_to_seq_nr)
     {
-        tmc::ex_cpu replay_executor;
-        replay_executor.set_thread_count(this->_cfg.num_writer_threads);
-        replay_executor.init();
-
         if(this->_old_wals_path.empty())
             return hedge::ok();
 
         if(skip_up_to_seq_nr.has_value())
             this->_seq_nr.store(skip_up_to_seq_nr.value() + 1);
-
-        size_t i = 0;
 
         auto status = wal::replay(
             this->_old_wals_path,
@@ -531,14 +525,9 @@ namespace hedge::db
                 auto value_type = static_cast<hedge::value_type>(value[0]);
                 auto actual_value = value.subspan(1);
 
-                auto f = tmc::post_waitable(
-                             replay_executor,
-                             this->put_async(key, actual_value, value_type),
-                             0,
-                             i++ % replay_executor.thread_count())
-                             .get();
+                auto f = this->put(key, actual_value, value_type);
                 if(!f)
-                    throw std::runtime_error("failed to post put_async on wal replay: " + f.error().to_string());
+                    throw std::runtime_error("failed to replay put on wal replay: " + f.error().to_string());
 
                 return true;
             },

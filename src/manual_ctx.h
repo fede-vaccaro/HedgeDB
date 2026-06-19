@@ -55,12 +55,14 @@ namespace hedge
             this->_ex.post(wrap(std::move(task), std::move(callback)));
         }
 
-        void tick()
+        size_t tick()
         {
             this->_ex.run_all();
 
-            if(this->_ctx->in_flight_count() > 0)
-                this->_ctx->submit_and_wait();
+            if(this->_ctx->in_flight_count() == 0 && this->_ctx->pending_count() == 0)
+                return 0;
+
+            return this->_ctx->submit_and_wait();
         }
 
         void shutdown()

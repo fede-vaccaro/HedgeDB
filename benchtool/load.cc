@@ -33,7 +33,7 @@ namespace hedge::db
                 if (measure_latency && hist)
                 {
                     auto start = clk::now();
-                    hedge::status status = co_await db->put_async(make_key(idx), values[value_slot(idx)]);
+                    hedge::status status = db->put(make_key(idx), values[value_slot(idx)]);
                     auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(clk::now() - start).count();
                     hist->record(static_cast<uint64_t>(elapsed));
                     if (!status)
@@ -41,11 +41,12 @@ namespace hedge::db
                 }
                 else
                 {
-                    hedge::status status = co_await db->put_async(make_key(idx), values[value_slot(idx)]);
+                    hedge::status status = db->put(make_key(idx), values[value_slot(idx)]);
                     if (!status)
                         std::cerr << "put error at " << idx << ": " << status.error().to_string() << "\n";
                 }
                 sem.release();
+                co_return;
             };
 
             auto fg = tmc::fork_group();

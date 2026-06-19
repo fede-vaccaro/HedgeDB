@@ -25,6 +25,9 @@ namespace hedge
     constexpr size_t MAX_KEY_LEN = 256;
     constexpr size_t MIN_KEY_LEN = 1;
 
+    // Maximum supported value size (3 KiB)
+    constexpr size_t MAX_VALUE_LEN = 3 * KiB;
+
     struct value_ptr_t
     {
     private:

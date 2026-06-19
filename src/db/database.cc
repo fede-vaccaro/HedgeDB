@@ -36,7 +36,7 @@ namespace hedge::db
                 .memory_budget_cap = config.memtable_budget_bytes,
                 .auto_compaction = config.auto_compaction,
                 .use_odirect = config.use_direct_io,
-                .num_writer_threads = io::static_pool::instance()->num_threads(),
+                .num_writer_threads = config.num_writer_threads.value_or(io::static_pool::instance()->num_threads()),
                 .use_wal = !config.disable_wal,
                 .max_pending_flushes = config.max_pending_flushes,
                 .acquire_flush_stats = config.acquire_flush_stats,
@@ -174,9 +174,15 @@ namespace hedge::db
         return db;
     }
 
-    tmc::task<hedge::status> database::put_async(const key_t& key, const std::span<const std::byte>& value)
+    hedge::status database::put(const key_t& key, const std::span<const std::byte>& value)
     {
-        co_return co_await this->_memtable->put_async(key, value, hedge::value_type::IN_PLACE_VALUE);
+        if (key.size() < hedge::MIN_KEY_LEN || key.size() > hedge::MAX_KEY_LEN) {
+            return hedge::status{hedge::error{"Key size must be between 1 and 256 bytes", hedge::errc::GENERIC_ERROR}};
+        }
+        if (value.size() > hedge::MAX_VALUE_LEN) {
+            return hedge::status{hedge::error{"Value size must not exceed 3072 bytes", hedge::errc::GENERIC_ERROR}};
+        }
+        return this->_memtable->put(key, value, hedge::value_type::IN_PLACE_VALUE);
     }
 
     tmc::task<expected<value_t>> database::_find_value(const key_t& key)
@@ -246,9 +252,9 @@ namespace hedge::db
             std::move(snap), &maybe_partition.value(), std::move(lower), std::move(upper), read_ahead_size);
     }
 
-    tmc::task<hedge::status> database::remove_async(const key_t& key)
+    hedge::status database::remove(const key_t& key)
     {
-        return this->_memtable->put_async(key, {}, hedge::value_type::TOMBSTONE);
+        return this->_memtable->put(key, {}, hedge::value_type::TOMBSTONE);
     }
 
     void database::trigger_compaction(bool compact_all)

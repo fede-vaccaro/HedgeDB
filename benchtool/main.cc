@@ -82,7 +82,7 @@ int main(int argc, char* argv[])
     io::static_pool::instance()->init(
         io::executor_config{
             .name = "bench_pool",
-            .queue_depth = 16,
+            .queue_depth = 32,
             .type = io::executor_type::FOREGROUND,
             .n_threads = cfg.num_threads,
             .auto_detect = true,

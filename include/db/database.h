@@ -51,6 +51,10 @@ namespace hedge::db
         size_t index_page_clock_cache_size_bytes = 0;
         /// Number of background workers to be used for compaction. std::nullopt means "use static pool", 0 means "auto detect".
         std::optional<size_t> num_background_workers = std::nullopt;
+        /// Number of writer slots (rw_sync stripes + per-thread WAL files). Must be >= the number
+        /// of threads that concurrently issue put/remove (e.g. one per db_ctx). std::nullopt means
+        /// "use the static pool thread count" (legacy default).
+        std::optional<size_t> num_writer_threads = std::nullopt;
         /// Maximum number of concurrent memtable flushes allowed before backpressure
         size_t max_pending_flushes = 8;
         /// Maximum number of levels in the LSM tree.
@@ -125,7 +129,7 @@ namespace hedge::db
          * @param executor The I/O executor context.
          * @return An async task resolving to a status indicating success or failure.
          */
-        tmc::task<hedge::status> put_async(const key_t& key, const std::span<const std::byte>& value);
+        hedge::status put(const key_t& key, const std::span<const std::byte>& value);
 
         /**
          * @brief Asynchronously marks a key as deleted.
@@ -136,7 +140,7 @@ namespace hedge::db
          * @param executor The I/O executor context.
          * @return An async task resolving to a status indicating success or failure (e.g., key not found).
          */
-        tmc::task<hedge::status> remove_async(const key_t& key);
+        hedge::status remove(const key_t& key);
 
         /**
          * @brief Creates a scan iterator over [lower, upper) within a single partition.
