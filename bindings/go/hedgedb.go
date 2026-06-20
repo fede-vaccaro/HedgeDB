@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"unsafe"
 
@@ -218,14 +219,20 @@ func (db *DB) Remove(key []byte) error {
 // Get returns the value for key, or ErrKeyNotFound / ErrDeleted. Reads use a reactor, so they
 // are dispatched to the owning goroutine and resolved asynchronously.
 func (db *DB) Get(key []byte) ([]byte, error) {
-	r := db.do(&request{key: key})
+	req := reqPool.Get().(*request)
+	req.key = key
+	db.pick().reqCh <- req
+	r := <-req.reply
+	req.key = nil
+	reqPool.Put(req)
 	return r.value, r.err
 }
 
-func (db *DB) do(req *request) result {
-	req.reply = make(chan result, 1)
-	db.pick().reqCh <- req
-	return <-req.reply
+// reqPool recycles requests (and their 1-buffered reply channels) so the hot read path
+// allocates nothing per Get. Reuse is safe: the owner buffers exactly one reply and drops
+// the request from `pending` before the caller receives it and returns the request here.
+var reqPool = sync.Pool{
+	New: func() any { return &request{reply: make(chan result, 1)} },
 }
 
 func (c *Ctx) loop(queueDepth uint32, ready chan<- error) {
@@ -233,9 +240,9 @@ func (c *Ctx) loop(queueDepth uint32, ready chan<- error) {
 	defer runtime.UnlockOSThread()
 	defer close(c.done)
 
-	if c.cpu >= 0 {
-		_ = pinToCPU(c.cpu) // best effort
-	}
+	// if c.cpu >= 0 {
+	// 	_ = pinToCPU(c.cpu) // best effort
+	// }
 
 	c.cctx = C.hedge_ctx_create(c.db.cdb, C.uint32_t(queueDepth))
 	if c.cctx == nil {
@@ -294,8 +301,6 @@ func (c *Ctx) loop(queueDepth uint32, ready chan<- error) {
 			case <-c.quit:
 				quitting = true
 			}
-		} else if len(pending) > 0 {
-			runtime.Gosched()
 		}
 	}
 }

@@ -64,7 +64,10 @@ namespace hedge::db
             }
 
             this->_buffers = std::stack<registered_buffer, buffers_t>(std::move(buffer_vec));
-            io::io_ctx::this_thread_ctx->register_page_buffers(buffer_ptrs);
+            // Disabled for this build: the fixed_buffer read path is already off (see
+            // try_get_fixed_buffer), so registering buffers with the ring is unused work.
+            // io::io_ctx::this_thread_ctx->register_page_buffers(buffer_ptrs);
+            (void)buffer_ptrs;
         }
 
         registered_buffer try_get_fixed_buffer()
