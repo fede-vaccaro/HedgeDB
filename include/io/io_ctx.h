@@ -24,15 +24,20 @@ namespace hedge::io
 {
     struct io_callback
     {
-        tmc::detail::awaitable_customizer<int32_t> customizer;
+        // Both pointers reference state owned by the awaiting aw_io. That aw_io
+        // always lives in a suspended coroutine frame:
+        // - when awaited directly, in the awaiting coroutine
+        // - when wrapped in spawn(), in tmc's task_wrapper trampoline coroutine
+        // This means that the awaiting aw_io always outlives the in-flight operation.
+        tmc::detail::awaitable_customizer<int32_t>* customizer;
         io_request* req;
 
         std::coroutine_handle<> resume(int32_t result)
         {
             req->res = result;
-            *customizer.result_ptr = result;
+            *customizer->result_ptr = result;
 
-            return customizer.resume_continuation();
+            return customizer->resume_continuation();
         }
 
         void prepare(io_uring_sqe* sqe) const
@@ -188,15 +193,13 @@ namespace hedge::io
 
     struct aw_io
     {
-        friend tmc::detail::awaitable_traits<aw_io>;
-
     private:
         void _initiate()
         {
             auto* this_thread_uring = io_ctx::this_thread_ctx;
             assert(this_thread_uring != nullptr);
             this_thread_uring->submit_request(io_callback{
-                .customizer = this->customizer,
+                .customizer = &this->customizer,
                 .req = this->_request.get()});
         }
 
@@ -205,7 +208,7 @@ namespace hedge::io
 
     public:
         using result_type = int32_t;
-        static constexpr tmc::detail::configure_mode mode = tmc::detail::ASYNC_INITIATE;
+        static constexpr tmc::detail::configure_mode mode = tmc::detail::WRAPPER;
 
         explicit aw_io(std::unique_ptr<io_request> request)
             : _request(std::move(request))
@@ -242,43 +245,13 @@ struct tmc::detail::awaitable_traits<hedge::io::aw_io>
         return static_cast<hedge::io::aw_io&&>(awaitable);
     }
 
-    // Section controlling the behavior when wrapped by a utility function
-    // such as tmc::spawn_*().
-    static constexpr tmc::detail::configure_mode mode =
-        tmc::detail::ASYNC_INITIATE;
-
-    static void async_initiate(
-        hedge::io::aw_io&& awaitable, [[maybe_unused]] tmc::ex_any* Executor,
-        [[maybe_unused]] size_t Priority)
-    {
-        awaitable._initiate();
-    }
-
-    static void
-    set_result_ptr(hedge::io::aw_io& awaitable, int32_t* result_ptr)
-    {
-        awaitable.customizer.result_ptr = result_ptr;
-    }
-
-    static void
-    set_continuation(hedge::io::aw_io& awaitable, void* Continuation)
-    {
-        awaitable.customizer.continuation = Continuation;
-    }
-
-    static void
-    set_continuation_executor(hedge::io::aw_io& awaitable, void* ContExec)
-    {
-        awaitable.customizer.continuation_executor = ContExec;
-    }
-
-    static void set_done_count(hedge::io::aw_io& awaitable, void* DoneCount)
-    {
-        awaitable.customizer.done_count = DoneCount;
-    }
-
-    static void set_flags(hedge::io::aw_io& awaitable, size_t Flags)
-    {
-        awaitable.customizer.flags = Flags;
-    }
+    // Section controlling the behavior when wrapped by a utility function such
+    // as tmc::spawn_*(). In WRAPPER mode TMC wraps the awaitable in a
+    // task_wrapper coroutine (via safe_wrap) and co_awaits it there; that frame
+    // owns the aw_io and stays suspended until the operation completes, keeping
+    // the customizer/io_request pointers held by io_callback valid. This costs
+    // one coroutine allocation per spawned aw_io, but direct co_await (the only
+    // path this library uses) goes through get_awaiter with no wrapper and no
+    // allocation.
+    static constexpr tmc::detail::configure_mode mode = tmc::detail::WRAPPER;
 };
