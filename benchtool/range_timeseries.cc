@@ -16,7 +16,7 @@
 
 namespace hedge::db
 {
-    struct pin_to_thread_ts
+    struct pin_to_thread_ts : tmc::detail::AwaitTagNoGroupAsIs
     {
         tmc::ex_any* executor;
         size_t thread_hint;
@@ -27,6 +27,8 @@ namespace hedge::db
             executor->post(std::move(h), 0, thread_hint);
         }
         void await_resume() const noexcept {}
+
+        pin_to_thread_ts(tmc::ex_any* ex, size_t hint) : executor(ex), thread_hint(hint) {}
     };
 
     void run_range_timeseries(const std::shared_ptr<database>& db, size_t n, size_t num_threads, bool measure_latency)
