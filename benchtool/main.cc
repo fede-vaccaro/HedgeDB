@@ -140,5 +140,7 @@ int main(int argc, char* argv[])
     db->wait_for_compactions_to_finish();
     std::this_thread::sleep_for(std::chrono::seconds(1));
     io::static_pool::instance()->shutdown();
+    if(cfg.measure_latency)
+        get_latency_registry().print_all();
     print_max_rss();
 }

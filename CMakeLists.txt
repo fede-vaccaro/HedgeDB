@@ -138,6 +138,7 @@ endif()
 add_executable(benchtool
     benchtool/main.cc
     benchtool/utils.cc
+    benchtool/registry.cc
     benchtool/load.cc
     benchtool/load_timeseries.cc
     benchtool/read.cc

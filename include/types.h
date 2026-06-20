@@ -127,6 +127,15 @@ namespace hedge
         UNDEFINED = 255,
     };
 
+    namespace priorities
+    {
+        constexpr size_t DEFAULT = 0;
+        constexpr size_t PIPELINED_TABLE = 0;
+        constexpr size_t FLUSH = 1;
+        constexpr size_t LEVEL0_COMPACTION = 2;
+        constexpr size_t LEVEL_GT_0_COMPACTION = 2;
+    } // namespace priorities
+
     inline hedge::expected<value_t> value_from_span(std::span<const std::byte> span)
     {
         const auto type = static_cast<value_type>(*span.data());
