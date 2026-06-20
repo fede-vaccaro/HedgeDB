@@ -39,28 +39,27 @@ FetchContent_MakeAvailable(xxhashct)
 FetchContent_Declare(
     tmc
     GIT_REPOSITORY https://github.com/tzcnt/TooManyCooks.git
-    GIT_TAG c9423056bfc328674fbbb299931ae41777ce56d9
+    GIT_TAG v1.6.1
 )
 FetchContent_MakeAvailable(tmc)
-
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-if (NOT CMAKE_BUILD_TYPE)
+if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug)
 endif()
 
-if (CMAKE_BUILD_TYPE MATCHES "Debug")
-    message (STATUS "Building in Debug mode")
+if(CMAKE_BUILD_TYPE MATCHES "Debug")
+    message(STATUS "Building in Debug mode")
     set(CMAKE_CXX_FLAGS "-O0 -g -fno-omit-frame-pointer -foptimize-sibling-calls -Wall -Wextra -Wpedantic -Werror -Wno-interference-size")
-elseif (CMAKE_BUILD_TYPE MATCHES "Release")
-    message (STATUS "Building in Release mode")
+elseif(CMAKE_BUILD_TYPE MATCHES "Release")
+    message(STATUS "Building in Release mode")
     set(CMAKE_CXX_FLAGS "-O2 -g -fno-omit-frame-pointer -Wno-interference-size -fno-rtti")
 endif()
 
-if (SANITIZERS)
+if(SANITIZERS)
     message(STATUS "Enabling sanitizers: ${SANITIZERS}")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=${SANITIZERS}")
     set(CMAKE_LINKER_FLAGS "${CMAKE_LINKER_FLAGS} -fsanitize=${SANITIZERS}")
@@ -69,8 +68,9 @@ endif()
 find_library(HWLOC_LIB hwloc)
 if(HWLOC_LIB)
     message(STATUS "hwloc found")
-    add_compile_definitions(TMC_USE_HWLOC)
+    set(TMC_USE_HWLOC ON CACHE BOOL "" FORCE)
 else()
+    set(TMC_USE_HWLOC OFF CACHE BOOL "" FORCE)
     message(STATUS "hwloc not found — TMC_USE_HWLOC disabled")
 endif()
 
@@ -82,7 +82,6 @@ include_directories(${PUBLIC_INCLUDES})
 include_directories("src")
 
 include_directories(${xxhashct_SOURCE_DIR})
-include_directories(${tmc_SOURCE_DIR}/include)
 
 set(IO_EXECUTOR_SRCS
     src/io/static_pool.cc
@@ -114,7 +113,7 @@ set(DB_SOURCES
 
 # hedgedb: async I/O executor (io_uring + TooManyCooks)
 add_library(hedgedb_io STATIC ${IO_EXECUTOR_SRCS})
-target_link_libraries(hedgedb_io PUBLIC uring atomic)
+target_link_libraries(hedgedb_io PUBLIC uring atomic TooManyCooks::TooManyCooks)
 if(HWLOC_LIB)
     target_link_libraries(hedgedb_io PUBLIC hwloc)
 endif()
