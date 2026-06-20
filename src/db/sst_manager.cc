@@ -59,14 +59,11 @@ namespace hedge::db
         {
             auto ch_tok = sst_manager->_compaction_scheduler_signal_chan.new_token();
 
-            while(true)
+            while(auto ch_data = co_await ch_tok.pull())
             {
-                auto compact_all = co_await ch_tok.pull();
+                bool compact_all = *ch_data;
 
-                if(!compact_all)
-                    break;
-
-                if(auto ok = sst_manager->_schedule_compaction(compact_all.value()); !ok)
+                if(auto ok = sst_manager->_schedule_compaction(compact_all); !ok)
                     sst_manager->_logger.log("Compaction job failed: ", ok.error().to_string());
 
                 sst_manager->_compaction_jobs_in_flight.fetch_sub(1, std::memory_order::relaxed);
