@@ -19,10 +19,13 @@ namespace hedge::db
                              size_t n, size_t num_ts, size_t vsize,
                              size_t num_threads, bool measure_latency)
     {
-        auto hist = std::make_shared<latency_collector>();
+        std::shared_ptr<latency_collector> hist;
         if(measure_latency)
+        {
+            hist = std::make_shared<latency_collector>();
             hist->init(num_threads, (n * num_ts) / num_threads);
-        get_latency_registry().add("load_timeseries", hist);
+            get_latency_registry().add("load_timeseries", hist);
+        }
 
         auto worker = [db, &values, hist, n, num_ts, num_threads](size_t tid) -> tmc::task<void>
         {

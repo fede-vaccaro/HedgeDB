@@ -39,10 +39,13 @@ namespace hedge::db
 
         std::atomic_size_t scan_count{0};
         std::atomic_size_t key_count{0};
-        auto hist = std::make_shared<latency_collector>();
+        std::shared_ptr<latency_collector> hist;
         if(measure_latency)
+        {
+            hist = std::make_shared<latency_collector>();
             hist->init(num_threads, n / num_threads);
-        get_latency_registry().add("scan (range_timeseries)", hist);
+            get_latency_registry().add("scan (range_timeseries)", hist);
+        }
 
         std::cout << "\n=== Range scan (timeseries) ===\n";
 

@@ -22,16 +22,18 @@ namespace hedge::db
         std::atomic_size_t loads{0};
         std::atomic_size_t read_errors{0};
         std::atomic_size_t next_load_idx{n};
-
-        auto read_hist = std::make_shared<latency_collector>();
-        auto write_hist = std::make_shared<latency_collector>();
+        
+        std::shared_ptr<latency_collector> read_hist;
+        std::shared_ptr<latency_collector> write_hist;
         if(measure_latency)
         {
+            read_hist = std::make_shared<latency_collector>();
+            write_hist = std::make_shared<latency_collector>();
             read_hist->init(num_threads, n / num_threads);
             write_hist->init(num_threads, n / num_threads);
+            get_latency_registry().add("read (rw mode)", read_hist);
+            get_latency_registry().add("write (rw mode)", write_hist);
         }
-        get_latency_registry().add("read (rw mode)", read_hist);
-        get_latency_registry().add("write (rw mode)", write_hist);
 
         std::vector<uint64_t> seeds(num_threads);
         {

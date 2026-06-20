@@ -16,10 +16,13 @@ namespace hedge::db
     void run_load(const std::shared_ptr<database>& db, const values_t& values,
                   size_t n, size_t vsize, size_t num_threads, bool measure_latency)
     {
-        auto hist = std::make_shared<latency_collector>();
+        std::shared_ptr<latency_collector> hist;
         if(measure_latency)
+        {
+            hist = std::make_shared<latency_collector>();
             hist->init(num_threads, n / num_threads);
-        get_latency_registry().add("load", hist);
+            get_latency_registry().add("load", hist);
+        }
 
         auto worker = [db, &values, hist, n, num_threads](size_t tid) -> tmc::task<void>
         {

@@ -18,10 +18,13 @@ namespace hedge::db
     void run_read(const std::shared_ptr<database>& db, size_t n, size_t vsize, size_t num_threads, bool measure_latency)
     {
         std::atomic_size_t errors{0};
-        auto hist = std::make_shared<latency_collector>();
+        std::shared_ptr<latency_collector> hist;
         if(measure_latency)
+        {
+            hist = std::make_shared<latency_collector>();
             hist->init(num_threads, n / num_threads);
-        get_latency_registry().add("read", hist);
+            get_latency_registry().add("read", hist);
+        }
 
         auto worker = [db, hist, n, num_threads, &errors](size_t tid) -> tmc::task<void>
         {

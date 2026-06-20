@@ -62,11 +62,14 @@ namespace hedge::db
             size_t n_ops = n / tier.op_dividend;
 
             std::atomic_size_t scan_count{0};
-            auto hist = std::make_shared<latency_collector>();
+            std::shared_ptr<latency_collector> hist;
             if(measure_latency)
+            {
+                hist = std::make_shared<latency_collector>();
                 hist->init(num_threads, n_ops / num_threads);
-            std::string label = std::string("seek (range ") + tier.label + ")";
-            get_latency_registry().add(label, hist);
+                std::string label = std::string("seek (range ") + tier.label + ")";
+                get_latency_registry().add(label, hist);
+            }
 
             auto worker = [db, tier, hist, n_ops, num_threads, &scan_count, seeds](size_t tid) -> tmc::task<void>
             {
