@@ -21,6 +21,7 @@
 #include "perf_counter.h"
 #include "sst_manager.h"
 #include "tmc/aw_resume_on.hpp"
+#include "tmc/fork_group.hpp"
 #include "tmc/latch.hpp"
 #include "tmc/semaphore.hpp"
 #include "tmc/sync.hpp"
@@ -73,7 +74,7 @@ namespace hedge::db
             }
         };
 
-        tmc::post(*this->_compaction_pool, make_compaction_job(this));
+        tmc::post(*this->_compaction_pool, make_compaction_job(this), priorities::LEVEL_GT_0_COMPACTION);
     }
 
     tmc::task<void> sst_manager::push_new_ssts_to_l0(std::vector<sst> new_ssts, std::optional<compaction_stats> flush_stats_opt)
@@ -113,29 +114,21 @@ namespace hedge::db
         }
 
         if(affected_partitions.empty())
-            return tmc::task<void>{};
+            co_return;
 
-        // Use latch to wait for persist tasks to complete on compaction executor
-        std::unique_ptr<tmc::latch> completion_latch = std::make_unique<tmc::latch>(affected_partitions.size());
-
-        auto persist_partition = [](sst_manager* mgr, uint16_t pid, tmc::latch* latch) -> tmc::task<void>
+        auto persist_partition = [](sst_manager* mgr, uint16_t pid) -> tmc::task<void>
         {
             auto status = co_await mgr->_persist_partition_state(pid);
             if(!status)
                 mgr->_logger.log("Failed to persist partition state after flush: ", status.error().to_string());
-            latch->count_down();
         };
 
+        auto fg = tmc::fork_group();
         for(unsigned short affected_partition : affected_partitions)
         {
-            tmc::post(*this->_compaction_pool, persist_partition(this, affected_partition, completion_latch.get()));
+            fg.fork(persist_partition(this, affected_partition), *this->_compaction_pool, priorities::FLUSH);
         }
-
-        // Wait for all persist tasks to complete
-        return [](std::unique_ptr<tmc::latch> latch) -> tmc::task<void>
-        {
-            co_await *latch;
-        }(std::move(completion_latch));
+        co_await std::move(fg);
     }
 
     hedge::expected<partition_t> sst_manager::acquire_partition_snapshot(size_t partition_id) const
@@ -646,7 +639,8 @@ namespace hedge::db
                 {
                     tmc::post(*this->_compaction_pool,
                               //    tasks.begin(), tasks.end(),
-                              run_tasks_in_sequence(std::move(tasks)));
+                              run_tasks_in_sequence(std::move(tasks)),
+                              static_cast<size_t>(level == 0 ? priorities::LEVEL0_COMPACTION : priorities::LEVEL_GT_0_COMPACTION));
                 }
             }
         }

@@ -446,7 +446,7 @@ namespace hedge::db
                           &results,
                           &errors,
                           &latch),
-                      0, thread_hint++ % thread_count);
+                      priorities::FLUSH, thread_hint++ % thread_count);
 
             range_count++;
         }

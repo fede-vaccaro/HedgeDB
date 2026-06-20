@@ -154,7 +154,9 @@ namespace hedge::db
                 auto ch_tok = self->_wal_ch.new_token();
                 self->_active_table.ref().store(co_await self->_make_memtable(ch_tok));
                 self->_pipelined_table.ref().store(co_await self->_make_memtable(ch_tok));
-            }(this))
+            }(this),
+            priorities::PIPELINED_TABLE,
+            0)
             .wait();
     }
 
@@ -534,7 +536,7 @@ namespace hedge::db
                 auto f = tmc::post_waitable(
                              replay_executor,
                              this->put_async(key, actual_value, value_type),
-                             0,
+                             priorities::FLUSH,
                              i++ % replay_executor.thread_count())
                              .get();
                 if(!f)

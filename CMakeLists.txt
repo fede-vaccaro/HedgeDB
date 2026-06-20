@@ -43,6 +43,8 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(tmc)
 
+add_compile_definitions(TMC_PRIORITY_COUNT=8)
+
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
