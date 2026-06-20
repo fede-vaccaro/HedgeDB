@@ -34,6 +34,16 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(xxhashct)
 
+# set TooManyCooks options before configuring it
+find_library(HWLOC_LIB hwloc)
+
+if(HWLOC_LIB)
+    message(STATUS "hwloc found")
+    set(TMC_USE_HWLOC ON CACHE BOOL "" FORCE)
+else()
+    set(TMC_USE_HWLOC OFF CACHE BOOL "" FORCE)
+    message(STATUS "hwloc not found — TMC_USE_HWLOC disabled")
+endif()
 
 # download TooManyCooks
 FetchContent_Declare(
@@ -63,15 +73,6 @@ if(SANITIZERS)
     message(STATUS "Enabling sanitizers: ${SANITIZERS}")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=${SANITIZERS}")
     set(CMAKE_LINKER_FLAGS "${CMAKE_LINKER_FLAGS} -fsanitize=${SANITIZERS}")
-endif()
-
-find_library(HWLOC_LIB hwloc)
-if(HWLOC_LIB)
-    message(STATUS "hwloc found")
-    set(TMC_USE_HWLOC ON CACHE BOOL "" FORCE)
-else()
-    set(TMC_USE_HWLOC OFF CACHE BOOL "" FORCE)
-    message(STATUS "hwloc not found — TMC_USE_HWLOC disabled")
 endif()
 
 set(PUBLIC_INCLUDES
@@ -114,6 +115,7 @@ set(DB_SOURCES
 # hedgedb: async I/O executor (io_uring + TooManyCooks)
 add_library(hedgedb_io STATIC ${IO_EXECUTOR_SRCS})
 target_link_libraries(hedgedb_io PUBLIC uring atomic TooManyCooks::TooManyCooks)
+
 if(HWLOC_LIB)
     target_link_libraries(hedgedb_io PUBLIC hwloc)
 endif()
@@ -121,7 +123,6 @@ endif()
 # hedgedb: full DB static library
 add_library(hedgedb STATIC ${DB_SOURCES})
 target_link_libraries(hedgedb PUBLIC hedgedb_io xxhash)
-
 
 if(USE_TCMALLOC)
     set(MALLOC "tcmalloc")
@@ -155,7 +156,7 @@ target_link_libraries(hello_world hedgedb ${MALLOC})
 add_executable(memtable_perf_test src/memtable_perf_test.cc)
 target_link_libraries(memtable_perf_test hedgedb)
 
-if (BUILD_TESTS)
+if(BUILD_TESTS)
     # sst tests (flush memtable -> on-disk SST -> lookup, with disk reload coverage)
     add_executable(sst_test test/sst_test.cc)
     target_link_libraries(sst_test hedgedb gtest gtest_main)

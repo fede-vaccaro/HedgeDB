@@ -66,7 +66,6 @@ namespace hedge::db
                 .queue_depth = 32,
                 .type = io::executor_type::BACKGROUND,
                 .n_threads = config.num_background_workers,
-                .auto_detect = true,
             });
 
         if(auto status = _validate_config(config); !status)
@@ -123,7 +122,6 @@ namespace hedge::db
                 .queue_depth = 32,
                 .type = io::executor_type::BACKGROUND,
                 .n_threads = config.num_background_workers,
-                .auto_detect = true,
             });
 
         if(auto status = _validate_config(config); !status)
