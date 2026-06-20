@@ -141,4 +141,6 @@ int main(int argc, char* argv[])
     std::this_thread::sleep_for(std::chrono::seconds(1));
     io::static_pool::instance()->shutdown();
     print_max_rss();
+    if(cfg.measure_latency)
+        get_latency_registry().print_all();
 }

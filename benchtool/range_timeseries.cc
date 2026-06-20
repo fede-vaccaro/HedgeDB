@@ -25,7 +25,7 @@ namespace hedge::db
         bool await_ready() const noexcept { return false; }
         void await_suspend(std::coroutine_handle<> h) const noexcept
         {
-            executor->post(std::move(h), 0, thread_hint); // NOLINT(performance-move-const-arg)
+            executor->post(std::move(h), 0, thread_hint);
         }
         void await_resume() const noexcept {}
     };
@@ -39,48 +39,37 @@ namespace hedge::db
 
         std::atomic_size_t scan_count{0};
         std::atomic_size_t key_count{0};
-        std::unique_ptr<latency_histogram> hist;
+        auto hist = std::make_shared<latency_collector>();
         if(measure_latency)
-            hist = std::make_unique<latency_histogram>();
-        latency_histogram* hist_ptr = hist.get();
+            hist->init(num_threads, n / num_threads);
+        get_latency_registry().add("scan (range_timeseries)", hist);
 
         std::cout << "\n=== Range scan (timeseries) ===\n";
 
-        auto worker = [](size_t tid, size_t n, size_t num_threads,
-                         const std::shared_ptr<database>& db,
-                         std::atomic_size_t& scan_count, std::atomic_size_t& key_count,
-                         bool measure_latency, latency_histogram* hist) -> tmc::task<void>
+        auto worker = [db, hist, n, num_threads, &scan_count, &key_count](size_t tid) -> tmc::task<void>
         {
-            auto do_scan = [](
-                               const std::shared_ptr<database>& db,
-                               size_t device,
-                               std::atomic_size_t& scan_count,
-                               std::atomic_size_t& key_count,
-                               tmc::semaphore& sem,
-                               bool measure_latency,
-                               latency_histogram* hist) -> tmc::task<void>
+            auto do_scan = [](const std::shared_ptr<database>& db, size_t read_ahead_size, size_t device, size_t tid, std::shared_ptr<latency_collector> hist, std::atomic_size_t& scan_count, std::atomic_size_t& key_count, tmc::semaphore& sem) -> tmc::task<void>
             {
                 using clk = std::chrono::high_resolution_clock;
                 key_t lower = make_ts_key(device, 0);
                 key_t upper = make_ts_key(device, UINT64_MAX);
 
                 auto start = clk::now();
-                auto maybe_it = db->scan(lower, upper, READ_AHEAD_SIZE);
+                auto maybe_it = db->scan(lower, upper, read_ahead_size);
+                size_t entries = 0;
                 if(maybe_it)
                 {
                     auto it = std::move(maybe_it.value());
-                    size_t entries = 0;
                     while(co_await it.next())
                         ++entries;
-                    key_count.fetch_add(entries, std::memory_order_relaxed);
-                    scan_count.fetch_add(1, std::memory_order_relaxed);
                 }
-                if(measure_latency && hist)
-                {
-                    auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(clk::now() - start).count();
-                    hist->record(static_cast<uint64_t>(elapsed));
-                }
+                auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(clk::now() - start).count();
+                key_count.fetch_add(entries, std::memory_order_relaxed);
+                scan_count.fetch_add(1, std::memory_order_relaxed);
+                if(hist)
+                    hist->record(static_cast<uint64_t>(elapsed), tid);
                 sem.release();
+                co_return;
             };
 
             auto fg = tmc::fork_group();
@@ -90,8 +79,8 @@ namespace hedge::db
             for(size_t device = tid; device < n; device += num_threads)
             {
                 co_await sem;
-                co_await pin_to_thread_ts{executor, tid}; // Hack around tmc for better thread-locality
-                fg.fork(do_scan(db, device, scan_count, key_count, sem, measure_latency, hist));
+                co_await pin_to_thread_ts{executor, tid};
+                fg.fork(do_scan(db, READ_AHEAD_SIZE, device, tid, hist, scan_count, key_count, sem));
             }
 
             co_await std::move(fg);
@@ -103,7 +92,7 @@ namespace hedge::db
         std::vector<tmc::task<void>> tasks;
         tasks.reserve(num_threads);
         for(size_t tid = 0; tid < num_threads; ++tid)
-            tasks.push_back(worker(tid, n, num_threads, db, scan_count, key_count, measure_latency, hist_ptr));
+            tasks.push_back(worker(tid));
         run_workers(std::move(tasks));
 
         double elapsed_s = std::chrono::duration<double>(clk::now() - t0).count();
@@ -115,8 +104,8 @@ namespace hedge::db
                   << "Scans/s:    " << static_cast<uint64_t>(completed / elapsed_s) << "\n"
                   << "Keys/s:     " << static_cast<uint64_t>(keys / elapsed_s) << "\n"
                   << "Avg/scan:   " << (completed ? keys / completed : 0) << " entries\n";
-        if(hist)
-            hist->print_percentiles("scan (range_timeseries)");
+        if(measure_latency)
+            get_latency_registry().print_all();
     }
 
 } // namespace hedge::db
