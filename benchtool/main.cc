@@ -88,7 +88,6 @@ int main(int argc, char* argv[])
             .queue_depth = 16,
             .type = io::executor_type::FOREGROUND,
             .n_threads = cfg.num_threads,
-            .auto_detect = true,
         });
 
     std::cout << std::fixed << std::setprecision(2)
