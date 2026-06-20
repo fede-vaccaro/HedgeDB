@@ -18,7 +18,7 @@
 
 namespace hedge::db
 {
-    struct pin_to_thread
+    struct pin_to_thread : tmc::detail::AwaitTagNoGroupAsIs
     {
         tmc::ex_any* executor;
         size_t thread_hint;
@@ -29,6 +29,8 @@ namespace hedge::db
             executor->post(std::move(h), 0, thread_hint);
         }
         void await_resume() const noexcept {}
+
+        pin_to_thread(tmc::ex_any* ex, size_t hint) : executor(ex), thread_hint(hint) {}
     };
 
     struct scan_tier
