@@ -54,7 +54,7 @@ namespace hedge::db
 
         // push_new_ssts_to_l0 Push a batch of SSTs to L0 as the most recent
         // Returns a second callback (via tmc::task) that should be called for updating the manifest
-        tmc::task<void> push_new_ssts_to_l0(std::vector<sst> new_ssts, std::optional<compaction_stats> compaction_stats);
+        tmc::task<void> push_new_ssts_to_l0(std::vector<sst> new_ssts, std::optional<compaction_stats> flush_stats_opt);
 
         // SST lookup for the read path
         tmc::task<expected<value_t>> lookup_async(const key_t& key, size_t matching_partition_id);
@@ -107,10 +107,14 @@ namespace hedge::db
             std::optional<int> dir_fd{};
             std::mutex manifest_write_mutex{};
 
+            tmc::chan_tok<tmc::task<void>> compaction_ch = tmc::make_channel<tmc::task<void>>();
+
             ~_partition_state()
             {
                 if(dir_fd)
                     ::close(*dir_fd);
+
+                compaction_ch.close();
             }
         };
 
@@ -152,6 +156,8 @@ namespace hedge::db
 
         // Compaction related methods
         tmc::chan_tok<bool> _compaction_scheduler_signal_chan = tmc::make_channel<bool>();
+
+        static tmc::task<void> compaction_runner(sst_manager* mgr, uint16_t partition_id);
 
         void _update_pending_compactions_counter(int32_t count);
 

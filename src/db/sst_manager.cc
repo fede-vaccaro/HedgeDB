@@ -50,6 +50,8 @@ namespace hedge::db
             state->stats_per_lvl.resize(cfg.max_num_levels);
 
             this->_sorted_indices.emplace(partition_id, std::move(state));
+
+            tmc::post(*this->_compaction_pool, compaction_runner(this, partition_id));
         }
     }
 
@@ -74,6 +76,18 @@ namespace hedge::db
         };
 
         tmc::post(*this->_compaction_pool, make_compaction_job(this));
+    }
+
+    tmc::task<void> sst_manager::compaction_runner(sst_manager* mgr, uint16_t partition_id)
+    {
+        auto ch = mgr->_sorted_indices[partition_id]->compaction_ch.new_token();
+        while(true)
+        {
+            auto task_opt = co_await ch.pull();
+            if(!task_opt)
+                break;
+            co_await std::move(task_opt.value());
+        }
     }
 
     tmc::task<void> sst_manager::push_new_ssts_to_l0(std::vector<sst> new_ssts, std::optional<compaction_stats> flush_stats_opt)
@@ -413,7 +427,7 @@ namespace hedge::db
                 co_return hedge::error(err);
             }
 
-            if (n < static_cast<int32_t>(buf.size()))
+            if(n < static_cast<int32_t>(buf.size()))
             {
                 std::string err = std::format("pwrite written less bytes than expected: {} < {}", n, buf.size());
                 this->_logger.log(err);
@@ -562,15 +576,6 @@ namespace hedge::db
         size_t /*min_merge_width*/,
         size_t /*max_merge_width*/)
     {
-        auto run_tasks_in_sequence = [](std::vector<tmc::task<void>> tasks) -> tmc::task<void>
-        {
-            for(auto& t : tasks)
-                co_await std::move(t);
-            co_return;
-        };
-
-        std::vector<tmc::task<void>> last_level_tasks;
-
         for(auto& [partition_prefix, buckets] : buckets_per_partition)
         {
             const size_t current_last_level = index_snapshot.at(partition_prefix).size();
@@ -644,9 +649,20 @@ namespace hedge::db
 
                 if(!tasks.empty())
                 {
-                    tmc::post(*this->_compaction_pool,
-                              //    tasks.begin(), tasks.end(),
-                              run_tasks_in_sequence(std::move(tasks)));
+                    if(level == 0)
+                    {
+                        // L0: post all tasks directly to the pool — they run in parallel
+                        for(auto& task : tasks)
+                            tmc::post(*this->_compaction_pool, std::move(task));
+                    }
+                    else
+                    {
+                        // L>0: send tasks through the per-partition channel.
+                        // The runner coroutine serializes them, preventing overlapping chains.
+                        auto ch = this->_sorted_indices[partition_prefix]->compaction_ch.new_token();
+                        for(auto& task : tasks)
+                            ch.post(std::move(task));
+                    }
                 }
             }
         }
