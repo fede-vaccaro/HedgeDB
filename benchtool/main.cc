@@ -19,7 +19,7 @@ namespace hedge::db
                   << "  -n, --num_ops <N>      number of operations       (default: 1000000)\n"
                   << "  -ts, --num_timestamps <N>  timestamps per key (timeseries mode) (default: 1)\n"
                   << "  -v, --vsize <N>        value size in bytes        (default: 100)\n"
-                  << "  -m, --mode <mode>      load|timeseries|read|rw|range|range_timeseries|compaction (default: load)\n"
+                  << "  -m, --mode <mode>      load|timeseries|read|rw|range|range_timeseries|compaction|delete (default: load)\n"
                   << "  -p, --path <path>      database path              (default: /tmp/bench_db)\n"
                   << "  -l, --latency          enable latency measurement (default: disabled)\n"
                   << "  -t, --threads <N>      foreground workers         (default: 12)\n"
@@ -67,7 +67,7 @@ int main(int argc, char* argv[])
 
     bench_config cfg = parse_args(argc, argv);
 
-    if(cfg.mode != "load" && cfg.mode != "timeseries" && cfg.mode != "read" && cfg.mode != "rw" && cfg.mode != "range" && cfg.mode != "range_timeseries" && cfg.mode != "compaction")
+    if(cfg.mode != "load" && cfg.mode != "timeseries" && cfg.mode != "read" && cfg.mode != "rw" && cfg.mode != "range" && cfg.mode != "range_timeseries" && cfg.mode != "compaction" && cfg.mode != "delete")
     {
         print_usage(argv[0]);
         return 1;
@@ -127,6 +127,8 @@ int main(int argc, char* argv[])
         run_range_timeseries(db, cfg.num_ops, cfg.num_threads, cfg.measure_latency);
     else if(cfg.mode == "compaction")
         run_compaction(db, values, cfg.num_ops, cfg.vsize, cfg.num_threads, cfg.measure_latency);
+    else if(cfg.mode == "delete")
+        run_delete(db, values, cfg.num_ops, cfg.vsize, cfg.num_threads, cfg.measure_latency);
 
     if(cfg.print_stats)
     {

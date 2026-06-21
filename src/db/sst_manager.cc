@@ -628,11 +628,11 @@ namespace hedge::db
 
                     const bool can_discard_keys =
                         test_can_discard_keys() &&
-                        (target_level == max_num_levels || level_created == 0); // Confirms that the next level is empty and no other tasks has intention to write to it.
-                                                                                // There is a chance that a compaction that will write to the bottommost level,
-                                                                                // did not manage to publish the new SST yet;
-                                                                                // `level_created` is needed for signaling this intention, and protecting from erroneously discarding records
-                                                                                // Does not apply if it is the last level
+                        (target_level == (max_num_levels - 1) || level_created == 0); // Confirms that the next level is empty and no other tasks has intention to write to it.
+                                                                                      // There is a chance that a compaction that will write to the bottommost level,
+                                                                                      // did not manage to publish the new SST yet;
+                                                                                      // `level_created` is needed for signaling this intention, and protecting from erroneously discarding records
+                                                                                      // Does not apply if it is the last level
 
                     level_created = 1; // Here: the resulting SST is unpublished, but we still signal that there will be something
 

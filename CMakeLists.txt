@@ -145,7 +145,8 @@ add_executable(benchtool
     benchtool/rw.cc
     benchtool/range.cc
     benchtool/range_timeseries.cc
-    benchtool/compaction.cc)
+    benchtool/compaction.cc
+    benchtool/delete.cc)
 target_link_libraries(benchtool hedgedb ${MALLOC})
 
 # Hello world example
