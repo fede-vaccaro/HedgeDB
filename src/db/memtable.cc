@@ -133,13 +133,16 @@ namespace hedge::db
             if(!this->_old_wals_path.empty())
                 this->_logger.log("Old WAL files moved to: ", this->_old_wals_path);
 
+            auto fsync_interval = cfg.wal_fsync_bytes_interval == 0 ? SIZE_MAX : cfg.wal_fsync_bytes_interval;
+
             for(const auto i : std::views::iota(size_t{0}, n_slots))
             {
                 auto reusable_wal = std::make_unique<wal>(wal::config{
                     .base_path = this->_indices_path,
                     .slot_idx = i,
                     .n_threads = cfg.num_writer_threads,
-                    .file_size_hint = file_size_hint});
+                    .file_size_hint = file_size_hint,
+                    .fsync_interval_bytes = fsync_interval});
 
                 this->_wal_ch.post(std::move(reusable_wal));
             }
@@ -423,6 +426,18 @@ namespace hedge::db
     {
         while(memtable_to_flush->any_active_writer()) // Wait until every writer is done with the object
             std::this_thread::yield();
+
+        if(this->_cfg.use_wal)
+        {
+            assert(memtable_to_flush->ptr()->_wal);
+            auto ok = co_await memtable_to_flush->ptr()->_wal->sync();
+
+            if(!ok) [[unlikely]]
+            {
+                this->_logger.log("WAL sync failed during flush: ", ok.error().to_string());
+                std::abort();
+            }
+        }
 
         auto accessor = memtable_to_flush->ptr()->accessor();
 

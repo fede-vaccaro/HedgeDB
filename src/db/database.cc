@@ -1,3 +1,4 @@
+#include <bit>
 #include <cmath>
 #include <future>
 #include <memory>
@@ -24,7 +25,8 @@ namespace hedge::db
         if(config.num_partition_exponent > db_config::MAX_PARTITION_EXPONENT)
             return hedge::error("num_partition_exponent must be <= " + std::to_string(db_config::MAX_PARTITION_EXPONENT));
 
-        // TODO: add more config validation
+        if(config.wal_fsync_bytes_interval != 0 && config.wal_fsync_bytes_interval != 1 && std::popcount(config.wal_fsync_bytes_interval) != 1)
+            return hedge::error("wal_fsync_bytes_interval must be 0 (disabled), 1 (always), or a power of two");
 
         return hedge::ok();
     }
@@ -40,6 +42,7 @@ namespace hedge::db
                 .use_wal = !config.disable_wal,
                 .max_pending_flushes = config.max_pending_flushes,
                 .acquire_flush_stats = config.acquire_flush_stats,
+                .wal_fsync_bytes_interval = config.wal_fsync_bytes_interval,
             },
             config.num_partition_exponent,
             db._partitions_path,

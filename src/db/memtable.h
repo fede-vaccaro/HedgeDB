@@ -46,6 +46,7 @@ namespace hedge::db
         /* bool use_fsync = false; // NOT IMPLEMENTED */
         size_t max_pending_flushes = 4;
         bool acquire_flush_stats = true;
+        uint64_t wal_fsync_bytes_interval = 0;
     };
 
     // Currently unused

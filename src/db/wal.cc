@@ -17,6 +17,7 @@
 #include "hasher.h"
 #include "key.h"
 #include "logger.h"
+#include "tmc/fork_group.hpp"
 #include "types.h"
 #include "wal.h"
 
@@ -35,7 +36,6 @@ namespace
         assert(seq_nr - 1 < seq_nr);
         return seq_nr - 1;
     }
-
 
 } // anonymous namespace
 
@@ -60,7 +60,6 @@ namespace hedge::db
 
         return files;
     }
-
 
     std::vector<wal::wal_entry> wal::read_all_entries(const std::filesystem::path& path, logger& log)
     {
@@ -212,12 +211,12 @@ namespace hedge::db
             }
 
             size_t entry_length =
-                sizeof(uint64_t) + // seq_nr
+                sizeof(uint64_t) +  // seq_nr
                 sizeof(std::byte) + // key length
-                key.size() + // key
-                sizeof(uint16_t) + // value length
-                value.size() + // value
-                sizeof(uint32_t); // checksum
+                key.size() +        // key
+                sizeof(uint16_t) +  // value length
+                value.size() +      // value
+                sizeof(uint32_t);   // checksum
 
             co_yield wal_entry{
                 .seq_nr = seq_nr,
@@ -228,9 +227,10 @@ namespace hedge::db
         }
     }
 
-    wal::wal(const config& cfg) : _file_size_hint(cfg.file_size_hint)
+    wal::wal(const config& cfg) : _file_size_hint(cfg.file_size_hint), _fsync_interval(cfg.fsync_interval_bytes)
     {
         this->_files.reserve(cfg.n_threads);
+        this->_bytes_written.resize(cfg.n_threads);
         for(const auto i : std::views::iota(size_t{0}, cfg.n_threads))
         {
             const auto wal_path = std::format("{}.{}.{}", wal::WAL_FILE_PREFIX, i, cfg.slot_idx);
@@ -296,7 +296,49 @@ namespace hedge::db
     hedge::status wal::append(size_t thread_idx, uint64_t seq_nr,
                               const key_t& key, std::span<const std::byte> value)
     {
-        return hedge::db::wal::write_entry(this->_files[thread_idx], seq_nr, key, value);
+        auto status = hedge::db::wal::write_entry(this->_files[thread_idx], seq_nr, key, value);
+        if(!status)
+            return status;
+
+        size_t entry_bytes = sizeof(uint64_t) + sizeof(uint8_t) + key.size() + sizeof(uint16_t) + value.size() + sizeof(uint32_t);
+        this->_bytes_written[thread_idx].value += entry_bytes;
+
+        if((this->_bytes_written[thread_idx].value & (this->_fsync_interval - 1)) == 0)
+        {
+            int32_t ok = ::fsync(this->_files[thread_idx].fd());
+            if(ok < 0) [[unlikely]]
+            {
+                std::string err = std::format("fsync failed on WAL file {}: {}", thread_idx, strerror(errno));
+                return hedge::error(err);
+            }
+        }
+
+        return hedge::ok();
+    }
+
+    tmc::task<void> wal::_fsync_one(wal* self, size_t idx, std::vector<int>& results)
+    {
+        results[idx] = ::fsync(self->_files[idx].fd());
+        co_return;
+    }
+
+    tmc::task<hedge::status> wal::sync()
+    {
+        auto results = std::vector<int>(this->_files.size(), 0);
+        auto fg = tmc::fork_group();
+
+        for(size_t i = 0; i < this->_files.size(); ++i)
+            fg.fork(_fsync_one(this, i, results));
+
+        co_await std::move(fg);
+
+        for(size_t i = 0; i < results.size(); ++i)
+        {
+            if(results[i] != 0)
+                co_return hedge::error(std::format("fsync failed on WAL file {}: {}", i, strerror(errno)));
+        }
+
+        co_return hedge::ok();
     }
 
     hedge::status wal::replay(
@@ -318,7 +360,7 @@ namespace hedge::db
         }
 
         std::ranges::sort(entries, [](const wal_entry& a, const wal_entry& b)
-                  { return a.seq_nr < b.seq_nr; });
+                          { return a.seq_nr < b.seq_nr; });
 
         for(const auto& entry : entries)
         {
@@ -335,6 +377,9 @@ namespace hedge::db
 
     void wal::reset()
     {
+        for(auto& counter : this->_bytes_written)
+            counter.value = 0;
+
         for(const auto& f : this->_files)
         {
             [[maybe_unused]] int r = ::ftruncate(f.fd(), 0);
