@@ -2,7 +2,6 @@
 #include "io/static_pool.h"
 #include "keygen.h"
 #include "size_literals.h"
-#include "tmc/ex_any.hpp"
 #include "tmc/fork_group.hpp"
 #include "tmc/semaphore.hpp"
 #include "tmc/task.hpp"
@@ -10,28 +9,12 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <coroutine>
 #include <iostream>
 #include <random>
 #include <vector>
 
 namespace hedge::db
 {
-    struct pin_to_thread : tmc::detail::AwaitTagNoGroupAsIs
-    {
-        tmc::ex_any* executor;
-        size_t thread_hint;
-
-        bool await_ready() const noexcept { return false; }
-        void await_suspend(std::coroutine_handle<> h) const noexcept
-        {
-            executor->post(std::move(h), 0, thread_hint);
-        }
-        void await_resume() const noexcept {}
-
-        pin_to_thread(tmc::ex_any* ex, size_t hint) : executor(ex), thread_hint(hint) {}
-    };
-
     struct scan_tier
     {
         const char* label;
@@ -68,9 +51,26 @@ namespace hedge::db
             if(measure_latency)
                 hist = get_latency_registry().get_collector(label, num_threads, n_ops / num_threads);
 
-            auto worker = [](size_t tid, const std::shared_ptr<database>& db, size_t tier_min, size_t tier_max, size_t tier_read_ahead_size, latency_collector* hist, size_t n_ops, size_t num_threads, std::atomic_size_t& scan_count, std::vector<uint64_t> seeds) -> tmc::task<void>
+            auto worker = [](
+                              size_t tid,
+                              const std::shared_ptr<database>& db,
+                              size_t tier_min,
+                              size_t tier_max,
+                              size_t tier_read_ahead_size,
+                              latency_collector* hist,
+                              size_t n_ops,
+                              size_t num_threads,
+                              std::atomic_size_t& scan_count,
+                              std::vector<uint64_t> seeds) -> tmc::task<void>
             {
-                auto do_scan = [](const std::shared_ptr<database>& db, size_t read_ahead_size, size_t tid, latency_collector* hist, size_t lower_idx, size_t entries, std::atomic_size_t& scan_count, tmc::semaphore& sem) -> tmc::task<void>
+                auto do_scan = [](
+                                   const std::shared_ptr<database>& db,
+                                   size_t read_ahead_size,
+                                   size_t tid, latency_collector* hist,
+                                   size_t lower_idx,
+                                   size_t entries,
+                                   std::atomic_size_t& scan_count,
+                                   tmc::semaphore& sem) -> tmc::task<void>
                 {
                     if(hist)
                     {
@@ -110,13 +110,11 @@ namespace hedge::db
 
                 auto fg = tmc::fork_group();
                 tmc::semaphore sem(io::static_pool::instance()->queue_depth());
-                tmc::ex_any* executor = io::static_pool::instance()->ex().type_erased();
                 uint64_t rng = seeds[tid];
 
                 for(size_t op = tid; op < n_ops; op += num_threads)
                 {
                     co_await sem;
-                    co_await pin_to_thread{executor, tid};
                     size_t lower = xorshift64(rng) % n_ops;
                     size_t entries = tier_min + (xorshift64(rng) % (tier_max - tier_min + 1));
                     fg.fork(do_scan(db, tier_read_ahead_size, tid, hist, lower, entries, scan_count, sem));
@@ -131,7 +129,17 @@ namespace hedge::db
             std::vector<tmc::task<void>> tasks;
             tasks.reserve(num_threads);
             for(size_t tid = 0; tid < num_threads; ++tid)
-                tasks.push_back(worker(tid, db, tier.min_entries, tier.max_entries, tier.read_ahead_size, hist, n_ops, num_threads, scan_count, seeds));
+                tasks.push_back(worker(
+                    tid,
+                    db,
+                    tier.min_entries,
+                    tier.max_entries,
+                    tier.read_ahead_size,
+                    hist,
+                    n_ops,
+                    num_threads,
+                    scan_count,
+                    seeds));
             run_workers(std::move(tasks));
 
             double elapsed_s = std::chrono::duration<double>(clk::now() - t0).count();

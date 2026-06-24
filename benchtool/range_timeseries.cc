@@ -2,34 +2,18 @@
 #include "io/static_pool.h"
 #include "keygen.h"
 #include "size_literals.h"
-#include "tmc/ex_any.hpp"
 #include "tmc/fork_group.hpp"
 #include "tmc/semaphore.hpp"
 #include "tmc/task.hpp"
 #include "utils.h"
 #include <atomic>
 #include <chrono>
-#include <coroutine>
 #include <cstdint>
 #include <iostream>
 #include <vector>
 
 namespace hedge::db
 {
-    struct pin_to_thread_ts : tmc::detail::AwaitTagNoGroupAsIs
-    {
-        tmc::ex_any* executor;
-        size_t thread_hint;
-
-        bool await_ready() const noexcept { return false; }
-        void await_suspend(std::coroutine_handle<> h) const noexcept
-        {
-            executor->post(std::move(h), 0, thread_hint);
-        }
-        void await_resume() const noexcept {}
-
-        pin_to_thread_ts(tmc::ex_any* ex, size_t hint) : executor(ex), thread_hint(hint) {}
-    };
 
     void run_range_timeseries(const std::shared_ptr<database>& db, size_t n, size_t num_threads, bool measure_latency)
     {
@@ -87,12 +71,10 @@ namespace hedge::db
 
             auto fg = tmc::fork_group();
             tmc::semaphore sem(io::static_pool::instance()->queue_depth());
-            tmc::ex_any* executor = io::static_pool::instance()->ex().type_erased();
 
             for(size_t device = tid; device < n; device += num_threads)
             {
                 co_await sem;
-                co_await pin_to_thread_ts{executor, tid};
                 fg.fork(do_scan(db, READ_AHEAD_SIZE, device, tid, hist, scan_count, key_count, sem));
             }
 
