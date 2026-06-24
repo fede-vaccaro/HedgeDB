@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <bit>
 #include <bits/types/struct_iovec.h>
 #include <cstddef>
 #include <cstdint>
@@ -229,6 +230,8 @@ namespace hedge::db
 
     wal::wal(const config& cfg) : _file_size_hint(cfg.file_size_hint), _fsync_interval(cfg.fsync_interval_bytes)
     {
+        assert(this->_fsync_interval == 0 || std::popcount(this->_fsync_interval) == 1);
+        this->_fsync_shift = std::countr_zero(this->_fsync_interval);
         this->_files.reserve(cfg.n_threads);
         this->_bytes_written.resize(cfg.n_threads);
         for(const auto i : std::views::iota(size_t{0}, cfg.n_threads))
@@ -252,8 +255,8 @@ namespace hedge::db
         }
     }
 
-    hedge::status wal::write_entry(fs::file& file, uint64_t seq_nr,
-                                   const key_t& key, std::span<const std::byte> value)
+    hedge::expected<size_t> wal::write_entry(fs::file& file, uint64_t seq_nr,
+                                             const key_t& key, std::span<const std::byte> value)
     {
         uint64_t encoded_seq_nr = encode_seq_nr(seq_nr);
         uint8_t encoded_key_size = hedge::encode_key_size(key.size());
@@ -290,20 +293,22 @@ namespace hedge::db
         if(size_t(res) != expected_bytes)
             return hedge::error("partial write into wal: " + std::to_string(res) + " != " + std::to_string(expected_bytes));
 
-        return hedge::ok();
+        return expected_bytes;
     }
 
     hedge::status wal::append(size_t thread_idx, uint64_t seq_nr,
                               const key_t& key, std::span<const std::byte> value)
     {
-        auto status = hedge::db::wal::write_entry(this->_files[thread_idx], seq_nr, key, value);
-        if(!status)
-            return status;
+        auto maybe_bytes_written = hedge::db::wal::write_entry(this->_files[thread_idx], seq_nr, key, value);
+        if(!maybe_bytes_written)
+            return hedge::error(std::format("write_entry failed: {}", maybe_bytes_written.error().to_string()));
 
-        size_t entry_bytes = sizeof(uint64_t) + sizeof(uint8_t) + key.size() + sizeof(uint16_t) + value.size() + sizeof(uint32_t);
-        this->_bytes_written[thread_idx].value += entry_bytes;
+        auto& counter = this->_bytes_written[thread_idx].value;
+        auto before = counter;
+        counter += maybe_bytes_written.value();
 
-        if((this->_bytes_written[thread_idx].value & (this->_fsync_interval - 1)) == 0)
+        if(this->_fsync_interval != 0 &&
+           (before >> this->_fsync_shift) != (counter >> this->_fsync_shift)) [[unlikely]]
         {
             int32_t ok = ::fsync(this->_files[thread_idx].fd());
             if(ok < 0) [[unlikely]]

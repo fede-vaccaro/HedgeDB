@@ -70,7 +70,7 @@ namespace hedge::db
         bool acquire_flush_stats = false;
         /// If true, collects statistics about compaction
         bool acquire_compaction_stats = false;
-        /// WAL fsync interval in bytes. 0 = disabled, 1 = fsync every write,
+        /// Per-thread WAL fsync interval in bytes. 0 = disabled, 1 = fsync every write,
         /// otherwise must be a power of two (e.g. 131072 = fsync every 128 KiB).
         uint64_t wal_fsync_bytes_interval = 0;
 

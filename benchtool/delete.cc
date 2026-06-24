@@ -1,6 +1,3 @@
-#include <chrono>
-#include <iostream>
-#include <vector>
 #include "db/database.h"
 #include "db/memtable.h"
 #include "keygen.h"
@@ -9,19 +6,22 @@
 #include "tmc/semaphore.hpp"
 #include "tmc/task.hpp"
 #include "utils.h"
+#include <chrono>
+#include <iostream>
+#include <vector>
 
 namespace hedge::db
 {
-    void run_delete(const std::shared_ptr<database>& db, const values_t& values,
+    void run_delete(const std::shared_ptr<database>& db, const values_t& /*values*/,
                     size_t n, size_t vsize, size_t num_threads, bool measure_latency)
     {
         latency_collector* hist = nullptr;
         if(measure_latency)
             hist = get_latency_registry().get_collector("delete", num_threads, n / num_threads);
 
-        auto worker = [](size_t tid, const std::shared_ptr<database>& db, const values_t& values, latency_collector* hist, size_t n, size_t num_threads) -> tmc::task<void>
+        auto worker = [](size_t tid, const std::shared_ptr<database>& db, latency_collector* hist, size_t n, size_t num_threads) -> tmc::task<void>
         {
-            auto del_op = [](size_t idx, size_t tid, const std::shared_ptr<database>& db, const values_t& values, latency_collector* hist, tmc::semaphore& sem) -> tmc::task<void>
+            auto del_op = [](size_t idx, size_t tid, const std::shared_ptr<database>& db, latency_collector* hist, tmc::semaphore& sem) -> tmc::task<void>
             {
                 if(hist)
                 {
@@ -48,7 +48,7 @@ namespace hedge::db
             for(size_t i = tid; i < n; i += num_threads)
             {
                 co_await sem;
-                fg.fork(del_op(i, tid, db, values, hist, sem));
+                fg.fork(del_op(i, tid, db, hist, sem));
             }
             co_await std::move(fg);
         };
@@ -59,7 +59,7 @@ namespace hedge::db
         std::vector<tmc::task<void>> tasks;
         tasks.reserve(num_threads);
         for(size_t tid = 0; tid < num_threads; ++tid)
-            tasks.push_back(worker(tid, db, values, hist, n, num_threads));
+            tasks.push_back(worker(tid, db, hist, n, num_threads));
         run_workers(std::move(tasks));
 
         print_throughput("delete", n, std::chrono::duration<double>(clk::now() - t0).count(), vsize);

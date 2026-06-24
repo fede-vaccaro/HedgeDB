@@ -133,8 +133,6 @@ namespace hedge::db
             if(!this->_old_wals_path.empty())
                 this->_logger.log("Old WAL files moved to: ", this->_old_wals_path);
 
-            auto fsync_interval = cfg.wal_fsync_bytes_interval == 0 ? SIZE_MAX : cfg.wal_fsync_bytes_interval;
-
             for(const auto i : std::views::iota(size_t{0}, n_slots))
             {
                 auto reusable_wal = std::make_unique<wal>(wal::config{
@@ -142,7 +140,7 @@ namespace hedge::db
                     .slot_idx = i,
                     .n_threads = cfg.num_writer_threads,
                     .file_size_hint = file_size_hint,
-                    .fsync_interval_bytes = fsync_interval});
+                    .fsync_interval_bytes = cfg.wal_fsync_bytes_interval});
 
                 this->_wal_ch.post(std::move(reusable_wal));
             }

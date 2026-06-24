@@ -652,7 +652,7 @@ namespace hedge::db
                     if(level == 0)
                     {
                         // L0: post all tasks directly to the pool — they run in parallel
-                        for(auto& task : tasks)
+                            for(auto& task : tasks)
                             tmc::post(*this->_compaction_pool, std::move(task));
                     }
                     else

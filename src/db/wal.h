@@ -28,7 +28,7 @@ namespace hedge::db
             size_t slot_idx;
             size_t n_threads;
             size_t file_size_hint;
-            size_t fsync_interval_bytes = 1;
+            size_t fsync_interval_bytes = 0;
         };
 
         explicit wal(const config& cfg);
@@ -58,6 +58,7 @@ namespace hedge::db
         std::vector<fs::file> _files;
         size_t _file_size_hint{};
         size_t _fsync_interval{};
+        uint32_t _fsync_shift{};
         std::vector<aligned_counter> _bytes_written;
 
         static tmc::task<void> _fsync_one(wal* self, size_t idx, std::vector<int>& results);
@@ -72,8 +73,8 @@ namespace hedge::db
 
         static std::vector<wal::wal_entry> read_all_entries(const std::filesystem::path& path, logger& log);
         static hedge::async::generator<hedge::expected<wal_entry>> read_wal_file_generator(const std::filesystem::path& path);
-        static hedge::status write_entry(fs::file& file, uint64_t seq_nr,
-                                         const key_t& key, std::span<const std::byte> value);
+        static hedge::expected<size_t> write_entry(fs::file& file, uint64_t seq_nr,
+                                                   const key_t& key, std::span<const std::byte> value);
 
         static std::vector<std::byte> zero_bytes;
     };
